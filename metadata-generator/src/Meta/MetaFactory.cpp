@@ -536,7 +536,8 @@ void MetaFactory::populateIdentificationFields(const clang::NamedDecl& decl, Met
     clang::FileID fileId = _sourceManager.getDecomposedLoc(location).first;
     const clang::FileEntry* entry = _sourceManager.getFileEntryForID(fileId);
     if (entry != nullptr) {
-        meta.fileName = entry->getName();
+        auto name = entry->getName();
+        meta.fileName = name.str();
         meta.module = _headerSearch.findModuleForHeader(entry).getModule();
     }
 

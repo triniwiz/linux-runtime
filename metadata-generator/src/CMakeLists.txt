@@ -71,18 +71,31 @@ add_executable(metadata-generator ${GENERATOR_HEADERS} ${GENERATOR_SOURCES})
 target_link_libraries(metadata-generator
     ${LLVM_LINKER_FLAGS}
     ${LIBXML2_LIBRARIES}
-    clangFrontend
-    clangSerialization
-    clangDriver
-    clangParse
-    clangSema
-    clangAnalysis
     clangAST
-    clangBasic
-    clangEdit
-    clangLex
-    clangTooling
+	clangASTMatchers
+	clangAnalysis
+	clangBasic
+	clangDriver
+	clangEdit
+	clangFrontend
+	clangFrontendTool
+	clangLex
+	clangParse
+	clangSema
+	clangEdit
+	clangRewrite
+	clangRewriteFrontend
+	clangStaticAnalyzerFrontend
+	clangStaticAnalyzerCheckers
+	clangStaticAnalyzerCore
+	clangCrossTU
+	clangIndex
+	clangSerialization
+	clangToolingCore
+	clangTooling
+	clangFormat
 )
+
 
 set_target_properties(metadata-generator PROPERTIES
     COMPILE_FLAGS "-fvisibility=hidden -Werror -Wall -Wextra -Wno-unused-parameter"

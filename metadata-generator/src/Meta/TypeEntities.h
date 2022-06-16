@@ -158,7 +158,8 @@ public:
             return visitor.visitTypeArgument(as<TypeArgumentType>());
         case TypeExtVector:
             return visitor.visitExtVector(as<ExtVectorType>());
-                
+            default:
+            return 0;
         }
     }
 
