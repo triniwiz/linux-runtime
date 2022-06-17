@@ -110,7 +110,7 @@ public:
                 TypeScript::DefinitionWriter definitionWriter(modulePair, _visitor.getMetaFactory().getTypeFactory(), docSetPath);
 
                 llvm::SmallString<128> path;
-                llvm::sys::path::append(path, cla_outputDtsFolder, "objc!" + modulePair.first->getFullModuleName() + ".d.ts");
+                llvm::sys::path::append(path, cla_outputDtsFolder, "c!" + modulePair.first->getFullModuleName() + ".d.ts");
                 std::error_code error;
                 llvm::raw_fd_ostream file(path.str(), error, llvm::sys::fs::OF_Text);
                 if (error) {
@@ -185,8 +185,8 @@ int main(int argc, const char** argv)
 
         std::vector<std::string> clangArgs{
             "-v",
-            "-x", "objective-c",
-            "-fno-objc-arc", "-fmodule-maps", "-ferror-limit=0",
+            "-x", "c",
+            "-fmodule-maps", "-ferror-limit=0",
             "-Wno-unknown-pragmas", "-Wno-ignored-attributes", "-Wno-nullability-completeness", "-Wno-expansion-to-defined",
             "-D__NATIVESCRIPT_METADATA_GENERATOR=1"
         };
@@ -230,7 +230,7 @@ int main(int argc, const char** argv)
         }
         // generate metadata for the intermediate sdk header
         Meta::ModulesBlacklist modulesBlacklist(cla_whiteListModuleRegexesFile, cla_blackListModuleRegexesFile);
-        clang::tooling::runToolOnCodeWithArgs(std::unique_ptr<MetaGenerationFrontendAction>(new MetaGenerationFrontendAction(/*r*/modulesBlacklist)), umbrellaContent, clangArgs, "umbrella.h", "objc-metadata-generator");
+        clang::tooling::runToolOnCodeWithArgs(std::unique_ptr<MetaGenerationFrontendAction>(new MetaGenerationFrontendAction(/*r*/modulesBlacklist)), umbrellaContent, clangArgs, "umbrella.h", "metadata-generator");
 
         std::clock_t end = clock();
         double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;

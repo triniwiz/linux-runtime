@@ -93,6 +93,7 @@ static std::error_code CreateUmbrellaHeaderForAmbientModules(const std::vector<s
 
     clang::SmallVector<clang::Module*, 64> modules;
     HeaderSearch& headerSearch = ast->getPreprocessor().getHeaderSearchInfo();
+
     headerSearch.collectAllModules(modules);
 
     ModuleMap& moduleMap = headerSearch.getModuleMap();
@@ -144,7 +145,7 @@ std::string CreateUmbrellaHeader(const std::vector<std::string>& clangArgs, std:
 
     std::stringstream umbrellaHeaderContents;
     for (auto& h : umbrellaHeaders) {
-        umbrellaHeaderContents << "#import \"" << h.c_str() << "\"" << std::endl;
+        umbrellaHeaderContents << "#include \"" << h.c_str() << "\"" << std::endl;
     }
 
     return umbrellaHeaderContents.str();

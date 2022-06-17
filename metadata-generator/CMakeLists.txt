@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(MetadataGenerator)
 
 
+
 IF(NOT DEFINED METADATA_BINARY_ARCH)
 	set(METADATA_BINARY_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
 ENDIF(NOT DEFINED METADATA_BINARY_ARCH)
@@ -38,15 +39,20 @@ llvm_config(cppflags LLVM_PREPROCESSOR_FLAGS)
 llvm_config(libs LLVM_LIBS)
 llvm_config(ldflags LLVM_LINKER_FLAGS)
 llvm_config(libdir LLVM_LIBDIR)
+llvm_config(cmakedir LLVM_DIR)
+llvm_config(version LLVM_PACKAGE_VERSION)
+llvm_config(has-rtti LLVM_ENABLE_RTTI)
+llvm_config(assertion-mode LLVM_ENABLE_ASSERTIONS)
+llvm_config(bindir LLVM_TOOLS_BINARY_DIR)
+
+#set(LLVM_LINKER_FLAGS "${LLVM_LINKER_FLAGS} -Wl,-search_paths_first -Wl,-headerpad_max_install_names")
+
+set(LLVM_SYSTEM_LIBS "${LLVM_SYSTEM_LIBS} -lz -lcurses -lm -lxml2 -fuse-ld=lld")
 
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -std=c++17 -fno-rtti ${LLVM_PREPROCESSOR_FLAGS} -Wno-unused-variable")
-#set(LLVM_LINKER_FLAGS "${LLVM_LINKER_FLAGS} ${LLVM_SYSTEM_LIBS} ${LLVM_LIBS}")
+set(LLVM_LINKER_FLAGS "${LLVM_LINKER_FLAGS} ${LLVM_SYSTEM_LIBS} ${LLVM_LIBS}")
 
-#string(STRIP ${LLVM_LINKER_FLAGS} LLVM_LINKER_FLAGS)
-#string(STRIP ${CMAKE_CXX_FLAGS} CMAKE_CXX_FLAGS)
-
-#add_definitions(-DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld")
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/lib)

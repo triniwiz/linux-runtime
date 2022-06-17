@@ -110,9 +110,9 @@ add_custom_command(TARGET metadata-generator
                    COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/clang/*/lib)
 
 # Post build step to run tests
-add_custom_command(TARGET metadata-generator
-                   POST_BUILD
-                   COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test-mdg-executable.sh ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/../metadata-generator)
+ add_custom_command(TARGET metadata-generator
+                    POST_BUILD
+                    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test-mdg-executable.sh ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/../metadata-generator)
 
 install(TARGETS metadata-generator
         RUNTIME DESTINATION bin)
