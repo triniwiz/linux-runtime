@@ -24,6 +24,14 @@ pub struct State {
     pub reference_prototype: RefCell<Option<v8::Global<v8::Object>>>,
     /// struct view classes, keyed by type index
     pub struct_templates: RefCell<HashMap<u32, v8::Global<v8::FunctionTemplate>>>,
+    pub main_context: crate::event_loop::MainContext,
+    pub timers: RefCell<HashMap<u32, crate::event_loop::Timer>>,
+    pub next_timer: Cell<u32>,
+    pub loop_refs: Cell<i32>,
+    pub microtasks_scheduled: Cell<bool>,
+    pub rejections: RefCell<Vec<(v8::Global<v8::Promise>, v8::Global<v8::Value>)>>,
+    /// uncaught errors reported from the event loop
+    pub uncaught: Cell<u32>,
     /// Set while a resolved global is being defined on the global object:
     /// defining a property consults the interceptor again, which must not recurse.
     pub memoizing: Cell<bool>,
@@ -44,6 +52,13 @@ impl State {
             pointer_prototype: Default::default(),
             reference_prototype: Default::default(),
             struct_templates: Default::default(),
+            main_context: crate::event_loop::MainContext::for_current_thread(),
+            timers: Default::default(),
+            next_timer: Cell::new(0),
+            loop_refs: Cell::new(0),
+            microtasks_scheduled: Cell::new(false),
+            rejections: Default::default(),
+            uncaught: Cell::new(0),
             memoizing: Cell::new(false),
         }
     }

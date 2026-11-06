@@ -1,6 +1,7 @@
 //! NativeScript runtime for Linux: V8 (rusty_v8) with C APIs exposed lazily
 //! from the metadata generator's output.
 
+mod event_loop;
 mod ffi;
 mod globals;
 mod interop;
@@ -36,6 +37,8 @@ impl Runtime {
         // Boxed so the isolate address stays stable for libffi closures
         let mut isolate = Box::new(v8::Isolate::new(v8::CreateParams::default()));
         isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 50);
+        isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+        isolate.set_promise_reject_callback(event_loop::promise_reject_callback);
         let state = Rc::new(State::new(metadata));
         state.isolate.set(&mut **isolate as *mut v8::Isolate);
         isolate.set_slot(state.clone());
@@ -54,6 +57,7 @@ impl Runtime {
             let scope = &mut v8::ContextScope::new(scope, context);
             let global = context.global(scope);
             interop::install(scope, &state, global);
+            event_loop::install(scope, global);
             v8::tc_scope!(let tc, scope);
             if let Err(e) = globals::install(tc) {
                 if let Some(exception) = tc.exception() {
@@ -65,6 +69,7 @@ impl Runtime {
             v8::Global::new(tc, context)
         };
         *state.context.borrow_mut() = Some(context.clone());
+        event_loop::set_current(Some(state.clone()));
 
         Ok(Runtime { context, state, isolate })
     }
@@ -84,15 +89,30 @@ impl Runtime {
         let resource = v8::String::new(tc, name).unwrap();
         let origin = v8::ScriptOrigin::new(tc, resource.into(), 0, 0, false, 0, None, false, false, false, None);
         let ran = v8::Script::compile(tc, source, Some(&origin)).and_then(|script| script.run(tc));
-        if ran.is_some() {
-            tc.perform_microtask_checkpoint();
-        }
         if let Some(exception) = tc.exception() {
             let message = tc.message();
             let text = report_exception(tc, exception, message);
             return Err(text);
         }
+        if ran.is_some() {
+            let before = self.state.uncaught.get();
+            event_loop::checkpoint(tc, &self.state);
+            if self.state.uncaught.get() != before {
+                return Err("unhandled promise rejection".into());
+            }
+        }
         Ok(())
+    }
+
+    /// Runs timers and other pending work until nothing keeps the loop alive.
+    /// Returns an error if uncaught errors were reported meanwhile.
+    pub fn run_event_loop(&mut self) -> Result<(), String> {
+        let before = self.state.uncaught.get();
+        event_loop::run(&self.state);
+        match self.state.uncaught.get() - before {
+            0 => Ok(()),
+            n => Err(format!("{n} uncaught error(s)")),
+        }
     }
 
     pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
@@ -105,7 +125,28 @@ impl Runtime {
             source
         };
         let name = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let dir = name.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        self.set_global_string("__filename", &name.to_string_lossy());
+        self.set_global_string("__dirname", &dir);
         self.run_script(&source, &name.to_string_lossy())
+    }
+
+    fn set_global_string(&mut self, key: &str, value: &str) {
+        v8::scope!(let scope, &mut **self.isolate);
+        let context = v8::Local::new(scope, &self.context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let global = context.global(scope);
+        let key = v8::String::new(scope, key).unwrap();
+        let value = v8::String::new(scope, value).unwrap();
+        global.set(scope, key.into(), value.into());
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        event_loop::set_current(None);
+        self.state.timers.borrow_mut().clear();
+        self.state.rejections.borrow_mut().clear();
     }
 }
 

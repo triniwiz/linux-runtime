@@ -245,6 +245,8 @@ fn function_pointer_callback<'s>(
 /// State of a libffi closure that calls into JS.
 pub struct ClosureData {
     function: v8::Global<v8::Function>,
+    /// GMainContext of the JS thread, read from foreign threads
+    main_context: usize,
     signature: Vec<Type>,
     state: *const State,
     cif: Cif,
@@ -283,6 +285,7 @@ pub fn closure_for<'s>(
     }
     let mut data = Box::new(ClosureData {
         function: v8::Global::new(scope, function),
+        main_context: st.main_context.context,
         signature: signature.to_vec(),
         state: st as *const State,
         cif,
@@ -338,15 +341,24 @@ unsafe extern "C" fn closure_trampoline(
 ) {
     let data = &*(userdata as *const ClosureData);
     let st = &*data.state;
+    if std::thread::current().id() != st.thread {
+        // called by C on another thread: run on the JS thread and wait
+        let (ret, args) = (ret as usize, args as usize);
+        crate::event_loop::run_on_js_thread(data.main_context, Box::new(move || unsafe {
+            invoke_js(data, ret as *mut c_void, args as *mut *mut c_void);
+        }));
+        return;
+    }
+    invoke_js(data, ret, args);
+    crate::event_loop::schedule_microtasks(st);
+}
+
+unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void) {
+    let st = &*data.state;
     let ret_ty = &data.signature[0];
     let ret_size = st.layout(ret_ty).map(|l| l.size).unwrap_or(0);
     // libffi expects integral returns widened to ffi_arg
     std::ptr::write_bytes(ret as *mut u8, 0, ret_size.max(std::mem::size_of::<usize>()));
-
-    if std::thread::current().id() != st.thread {
-        eprintln!("[nativescript] callback invoked from a foreign thread, ignored");
-        return;
-    }
     let isolate = st.isolate.get();
     let Some(context) = st.context.borrow().clone() else {
         return;
@@ -373,6 +385,7 @@ unsafe extern "C" fn closure_trampoline(
     if let Some(exception) = tc.exception() {
         let message = tc.message();
         report_exception(tc, exception, message);
+        st.uncaught.set(st.uncaught.get() + 1);
         return;
     }
     let Some(result) = result else { return };
@@ -394,6 +407,6 @@ unsafe extern "C" fn closure_trampoline(
         eprintln!("[nativescript] callback return value: {e}");
     }
     // NOTE: temporaries (e.g. strings) returned to C would dangle; callbacks
-    // returning char* must return a Pointer to memory that outlives the call.
+    // returning char* must return memory that outlives the call (interop.cstring).
     drop(cx);
 }

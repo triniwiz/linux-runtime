@@ -26,6 +26,14 @@ function eq(actual, expected, what) {
 }
 "#;
 
+/// Tests using GLib's global default main context (g_idle_add,
+/// g_main_loop_new(null)) can't run in parallel.
+static DEFAULT_CONTEXT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn default_context() -> std::sync::MutexGuard<'static, ()> {
+    DEFAULT_CONTEXT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn run(source: &str) {
     let Some(mut rt) = runtime() else { return };
     rt.run_script(&format!("{PRELUDE}\n{source}"), "test.js").unwrap();
@@ -121,6 +129,7 @@ fn constants_and_enums() {
 
 #[test]
 fn glib_main_loop() {
+    let _guard = default_context();
     run(r#"
       const loop = g_main_loop_new(null, 0);
       let n = 0;
@@ -203,4 +212,67 @@ fn explicit_callbacks_and_release() {
       eq(interop.release(cmp), 1, "release frees the closure");
       eq(interop.release(cmp), 0, "nothing left");
     "#);
+}
+
+fn run_loop(source: &str) -> Result<(), String> {
+    let Some(mut rt) = runtime() else { return Ok(()) };
+    rt.run_script(&format!("{PRELUDE}\n{source}"), "loop.js")?;
+    rt.run_event_loop()
+}
+
+#[test]
+fn timers_and_microtasks() {
+    run_loop(r#"
+      const order = [];
+      setTimeout(() => order.push("t10"), 10);
+      setTimeout(() => order.push("t0"), 0);
+      Promise.resolve().then(() => order.push("micro"));
+      let n = 0;
+      const iv = setInterval(() => { if (++n === 3) clearInterval(iv); }, 1);
+      clearTimeout(setTimeout(() => order.push("cancelled"), 1));
+      setTimeout(() => {
+        eq(order, ["micro", "t0", "t10"], "order");
+        eq(n, 3, "interval");
+      }, 30);
+    "#).unwrap();
+}
+
+#[test]
+fn promises_resolve_inside_native_main_loops() {
+    let _guard = default_context();
+    run_loop(r#"
+      const loop = g_main_loop_new(null, 0);
+      let resolved = false;
+      g_idle_add(() => {
+        // microtasks queued from a C -> JS callback run from the main loop
+        Promise.resolve().then(() => { resolved = true; g_main_loop_quit(loop); });
+        return 0;
+      }, null);
+      g_main_loop_run(loop);
+      g_main_loop_unref(loop);
+      eq(resolved, true, "promise resolved while g_main_loop_run was blocking");
+    "#).unwrap();
+}
+
+#[test]
+fn callbacks_from_other_threads_run_on_the_js_thread() {
+    run_loop(r#"
+      nativescript.ref();
+      const js = g_thread_self().toString();
+      let calls = 0;
+      const t = g_thread_new("worker", () => {
+        calls++;
+        eq(g_thread_self().toString(), js, "same thread");
+        nativescript.unref();
+        return null;
+      }, null);
+      setTimeout(() => eq(calls, 1, "called"), 50);
+    "#).unwrap();
+}
+
+#[test]
+fn unhandled_rejections_fail() {
+    assert!(run_loop("Promise.reject(new Error('x'))").is_err());
+    assert!(run_loop("setTimeout(() => Promise.reject(new Error('y')), 1)").is_err());
+    assert!(run_loop("Promise.reject(new Error('z')).catch(() => {})").is_ok());
 }

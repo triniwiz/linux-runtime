@@ -5,6 +5,11 @@ const css = `
   window { background: linear-gradient(160deg, #1d2b64, #3a1c71); }
   .title { color: white; font-size: 26px; font-weight: 800; }
   .subtitle { color: #c9d2ff; font-size: 13px; }
+  .tagline {
+    color: #ffffff; font-size: 15px; font-weight: 600; letter-spacing: 0.3px;
+    background: alpha(#65f0c4, 0.18); border: 1px solid alpha(#65f0c4, 0.55);
+    border-radius: 999px; padding: 6px 16px;
+  }
   .counter { color: #65f0c4; font-size: 64px; font-weight: 900; font-family: monospace; }
   .clock { color: #f8d66d; font-family: monospace; font-size: 14px; }
   .greeting { color: white; font-size: 16px; }
@@ -23,7 +28,7 @@ function label(content, cls) {
 function buildUi(app) {
   const window = gtk_application_window_new(app);
   gtk_window_set_title(window, 'NativeScript ♥ GTK4');
-  gtk_window_set_default_size(window, 460, 520);
+  gtk_window_set_default_size(window, 460, 600);
 
   const provider = gtk_css_provider_new();
   gtk_css_provider_load_from_data(provider, css, -1);
@@ -34,8 +39,18 @@ function buildUi(app) {
     set(box, 28);
   }
 
+  // NativeScript logo (github.com/NativeScript/artwork)
+  const logo = gtk_picture_new_for_filename(`${__dirname}/assets/nativescript-logo.png`);
+  gtk_widget_set_size_request(logo, 96, 96);
+  gtk_widget_set_halign(logo, GtkAlign.CENTER);
+  gtk_widget_add_css_class(logo, 'logo');
+  gtk_box_append(box, logo);
+
   gtk_box_append(box, label('Hello from JavaScript', 'title'));
-  gtk_box_append(box, label('V8 → libffi → libgtk-4.so.1, no bindings written by hand', 'subtitle'));
+  const tagline = label('V8  →  libffi  →  libgtk-4.so.1', 'tagline');
+  gtk_label_set_justify(tagline, GtkJustification.CENTER);
+  gtk_widget_set_halign(tagline, GtkAlign.CENTER);
+  gtk_box_append(box, tagline);
 
   // counter
   let count = 0;

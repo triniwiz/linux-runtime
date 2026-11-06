@@ -60,7 +60,8 @@ fn main() -> ExitCode {
         (Some(code), _) => runtime.run_script(&code, "[eval]"),
         (None, Some(path)) => runtime.run_file(path),
         _ => unreachable!(),
-    };
+    }
+    .and_then(|_| runtime.run_event_loop());
     // flush anything written with C stdio
     unsafe extern "C" {
         fn fflush(stream: *mut std::ffi::c_void) -> i32;
