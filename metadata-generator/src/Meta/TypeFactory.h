@@ -49,6 +49,8 @@ public:
 
     static std::shared_ptr<Type> getDouble();
 
+    static std::shared_ptr<Type> getLongDouble();
+
     static std::shared_ptr<Type> getVaList();
 
     static std::shared_ptr<Type> getSelector();

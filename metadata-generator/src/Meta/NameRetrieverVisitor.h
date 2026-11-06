@@ -52,6 +52,8 @@ class NameRetrieverVisitor : public ::Meta::TypeVisitor<std::string> {
 
   virtual std::string visitDouble();
 
+  virtual std::string visitLongDouble();
+
   virtual std::string visitVaList();
 
   virtual std::string visitSelector();

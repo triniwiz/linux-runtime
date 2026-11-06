@@ -64,6 +64,8 @@ class BinaryTypeEncodingSerializer
 
   virtual unique_ptr<TypeEncoding> visitDouble() override;
 
+  virtual unique_ptr<TypeEncoding> visitLongDouble() override;
+
   virtual unique_ptr<TypeEncoding> visitVaList() override;
 
   virtual unique_ptr<TypeEncoding> visitSelector() override;

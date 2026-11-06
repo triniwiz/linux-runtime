@@ -790,6 +790,11 @@ void DefinitionWriter::visit(FunctionMeta* meta) {
       params << ", ";
     }
   }
+  if (meta->getFlags(MetaFlags::FunctionIsVariadic)) {
+    // variadic arguments are passed as interop.Variadic values (or plain
+    // numbers/strings/pointers whose C type is inferred at call time)
+    params << (meta->signature.size() > 1 ? ", " : "") << "...args: any[]";
+  }
 
   _buffer << std::endl << _docSet.getCommentFor(meta).toString("");
   _buffer << "declare function " << meta->jsName << "(" << params.str()
@@ -971,6 +976,7 @@ std::string DefinitionWriter::tsifyType(const Type& type,
     case TypeULongLong:
     case TypeFloat:
     case TypeDouble:
+    case TypeLongDouble:
       return "number";
     case TypeUnichar:
     case TypeSelector:

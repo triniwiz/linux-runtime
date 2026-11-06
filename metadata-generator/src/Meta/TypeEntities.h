@@ -31,6 +31,7 @@ enum TypeType {
   TypeCString,
   TypeFloat,
   TypeDouble,
+  TypeLongDouble,
   TypeVaList,
   TypeSelector,
   TypeInstancetype,
@@ -119,6 +120,8 @@ class Type {
         return visitor.visitFloat();
       case TypeDouble:
         return visitor.visitDouble();
+      case TypeLongDouble:
+        return visitor.visitLongDouble();
       case TypeVaList:
         return visitor.visitVaList();
       case TypeSelector:

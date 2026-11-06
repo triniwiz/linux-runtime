@@ -50,6 +50,8 @@ private:
 
     void createFromStruct(const clang::RecordDecl& record, StructMeta& recordMeta);
 
+    void createFromRecord(const clang::RecordDecl& record, RecordMeta& recordMeta);
+
     void createFromVar(const clang::VarDecl& var, VarMeta& varMeta);
 
     void createFromEnum(const clang::EnumDecl& enumeration, EnumMeta& enumMeta);

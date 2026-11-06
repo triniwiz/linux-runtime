@@ -92,6 +92,11 @@ shared_ptr<Type> TypeFactory::getFloat() {
   return type;
 }
 
+shared_ptr<Type> TypeFactory::getLongDouble() {
+  static shared_ptr<Type> type(new Type(TypeType::TypeLongDouble));
+  return type;
+}
+
 shared_ptr<Type> TypeFactory::getDouble() {
   static shared_ptr<Type> type(new Type(TypeType::TypeDouble));
   return type;
@@ -295,10 +300,10 @@ shared_ptr<Type> TypeFactory::createFromBuiltinType(
       return TypeFactory::getFloat();
     case clang::BuiltinType::Kind::Double:
       return TypeFactory::getDouble();
-    // Objective-C does not support the long double type. @encode(long double)
-    // returns d, which is the same encoding as for double.
+    // long double has its own ABI on Linux (x87 80-bit on x86_64, 128-bit on
+    // aarch64), so it can't be passed as a double
     case clang::BuiltinType::Kind::LongDouble:
-      return TypeFactory::getDouble();
+      return TypeFactory::getLongDouble();
 
       // ObjCSel, ObjCId and ObjCClass builtin types should never enter in this
       // method because these types should be handled on upper level. The 'SEL'
@@ -365,6 +370,7 @@ shared_ptr<Type> TypeFactory::createFromPointerType(
     if (builtinType->getKind() == clang::BuiltinType::Kind::ObjCSel)
       return TypeFactory::getSelector();
     if (builtinType->getKind() == clang::BuiltinType::Kind::Char_S ||
+        builtinType->getKind() == clang::BuiltinType::Kind::Char_U ||
         builtinType->getKind() == clang::BuiltinType::Kind::UChar)
       return TypeFactory::getCString();
   }
@@ -392,10 +398,9 @@ shared_ptr<Type> TypeFactory::createFromRecordType(
   if (!recordDef) {
     return TypeFactory::getVoid();
   }
-  if (recordDef->isUnion())
-    throw TypeCreationException(type, "The record is an union.", true);
-  if (!recordDef->isStruct())
-    throw TypeCreationException(type, "The record is not a struct.", true);
+  if (!recordDef->isStruct() && !recordDef->isUnion())
+    throw TypeCreationException(type, "The record is not a struct or union.",
+                                true);
   const clang::TagDecl* tagDecl =
       clang::dyn_cast<clang::TagDecl>(type->getDecl());
   if (MetaFactory::getTypedefOrOwnName(tagDecl) == "") {
@@ -406,9 +411,16 @@ shared_ptr<Type> TypeFactory::createFromRecordType(
                             this->create(field->getType()).get());
       fields.push_back(fieldMeta);
     }
+    if (recordDef->isUnion()) {
+      return make_shared<AnonymousUnionType>(fields);
+    }
     return make_shared<AnonymousStructType>(fields);
   }
 
+  if (recordDef->isUnion()) {
+    return make_shared<UnionType>(
+        &_metaFactory->create(*recordDef)->as<UnionMeta>());
+  }
   return make_shared<StructType>(
       &_metaFactory->create(*recordDef)->as<StructMeta>());
 }

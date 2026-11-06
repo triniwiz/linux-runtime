@@ -27,7 +27,7 @@ pushd "$(dirname "$MDG")" > /dev/null
     -output-typescript "$OUTDIR/typings" \
     Xclang \
     -fmodule-map-file="$TESTSDIR/linux/module.modulemap" \
-    $(pkg-config --cflags-only-I glib-2.0 2>/dev/null) \
+    $(pkg-config --cflags-only-I glib-2.0 libxml-2.0 2>/dev/null) \
     > "$OUTDIR/verbose.out" 2>&1 || { tail -20 "$OUTDIR/verbose.out"; exit 1; }
 popd > /dev/null
 

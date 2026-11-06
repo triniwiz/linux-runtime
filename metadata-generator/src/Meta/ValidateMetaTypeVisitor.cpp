@@ -39,6 +39,8 @@ bool ValidateMetaTypeVisitor::visitFloat() { return true; }
 
 bool ValidateMetaTypeVisitor::visitDouble() { return true; }
 
+bool ValidateMetaTypeVisitor::visitLongDouble() { return true; }
+
 bool ValidateMetaTypeVisitor::visitVaList() { return true; }
 
 bool ValidateMetaTypeVisitor::visitSelector() { return true; }

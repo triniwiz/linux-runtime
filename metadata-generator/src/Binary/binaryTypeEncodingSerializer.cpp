@@ -117,6 +117,12 @@ binary::BinaryTypeEncodingSerializer::visitDouble() {
 }
 
 unique_ptr<binary::TypeEncoding>
+binary::BinaryTypeEncodingSerializer::visitLongDouble() {
+  return std::make_unique<binary::TypeEncoding>(
+      binary::BinaryTypeEncodingType::LongDouble);
+}
+
+unique_ptr<binary::TypeEncoding>
 binary::BinaryTypeEncodingSerializer::visitVaList() {
   return std::make_unique<binary::TypeEncoding>(
       binary::BinaryTypeEncodingType::VaList);

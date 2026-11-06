@@ -62,6 +62,8 @@ class TypeVisitor {
 
   virtual T_RESULT visitDouble() = 0;
 
+  virtual T_RESULT visitLongDouble() = 0;
+
   virtual T_RESULT visitVaList() = 0;
 
   virtual T_RESULT visitSelector() = 0;

@@ -140,8 +140,7 @@ Meta* MetaFactory::create(const clang::Decl& decl,
         resetMetaAndAddToMap<UnionMeta>(insertedMetaPtrRef, this->_metaToDecl,
                                         decl);
         populateIdentificationFields(*record, *insertedMetaPtrRef.get());
-        throw MetaCreationException(insertedMetaPtrRef.get(),
-                                    "The record is union.", false);
+        createFromRecord(*record, insertedMetaPtrRef.get()->as<UnionMeta>());
       }
     } else if (const clang::VarDecl* var =
                    clang::dyn_cast<clang::VarDecl>(&decl)) {
@@ -240,13 +239,6 @@ void MetaFactory::createFromFunction(const clang::FunctionDecl& function,
                                 "The function is defined in headers.", false);
   }
 
-  // TODO: We don't support variadic functions but we save in metadata flags
-  // whether a function is variadic or not. If we not plan in the future to
-  // support variadic functions this redundant flag should be removed.
-  if (function.isVariadic())
-    throw MetaCreationException(&functionMeta, "The function is variadic.",
-                                false);
-
   populateMetaFields(function, functionMeta);
 
   functionMeta.setFlags(MetaFlags::FunctionIsVariadic,
@@ -290,6 +282,11 @@ void MetaFactory::createFromStruct(const clang::RecordDecl& record,
   if (!record.isStruct())
     throw MetaCreationException(&structMeta, "The record is not a struct.",
                                 false);
+  createFromRecord(record, structMeta);
+}
+
+void MetaFactory::createFromRecord(const clang::RecordDecl& record,
+                                   RecordMeta& structMeta) {
   if (!record.isThisDeclarationADefinition()) {
     throw MetaCreationException(&structMeta, "A forward declaration of record.",
                                 false);

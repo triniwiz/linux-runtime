@@ -76,6 +76,10 @@ std::string NameRetrieverVisitor::visitDouble() {
   return this->tsNames ? "number" : "double";
 }
 
+std::string NameRetrieverVisitor::visitLongDouble() {
+  return this->tsNames ? "number" : "long double";
+}
+
 std::string NameRetrieverVisitor::visitVaList() { return ""; }
 
 std::string NameRetrieverVisitor::visitSelector() {

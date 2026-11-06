@@ -45,7 +45,9 @@ enum BinaryTypeEncodingType : uint8_t {
     Block,
     AnonymousStruct,
     AnonymousUnion,
-    Vector
+    Vector,
+    // additions for the Linux (C) runtime, keep appended to preserve values
+    LongDouble
 };
 
 // BinaryMetaType values must not exceed

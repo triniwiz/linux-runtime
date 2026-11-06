@@ -1,17 +1,26 @@
 // Linux headers ship without clang module maps. The metadata generator groups
 // declarations (and the libraries to dlopen) by clang module, so we describe
 // the libraries we care about here. The nearest umbrella directory wins, so
-// more specific libraries (glib) take precedence over libc's /usr/include.
+// more specific libraries (glib, libxml2) take precedence over libc's
+// /usr/include.
+//
+// `link` names are sonames: the runtime dlopen()s them as-is. Unversioned
+// names like libc.so are linker scripts / dev-only symlinks and can't be used.
 module libc [system] {
   umbrella "/usr/include"
-  link "c"
-  link "m"
+  link "libc.so.6"
+  link "libm.so.6"
 }
 
 module GLib [system] {
   umbrella "/usr/include/glib-2.0"
   header "/usr/lib/x86_64-linux-gnu/glib-2.0/include/glibconfig.h"
-  link "glib-2.0"
-  link "gobject-2.0"
-  link "gio-2.0"
+  link "libglib-2.0.so.0"
+  link "libgobject-2.0.so.0"
+  link "libgio-2.0.so.0"
+}
+
+module libxml2 [system] {
+  umbrella "/usr/include/libxml2"
+  link "libxml2.so.2"
 }
