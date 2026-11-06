@@ -2,7 +2,8 @@
 //! Mirrors the API of the NativeScript iOS runtime.
 
 use crate::ffi;
-use crate::marshal::{self, CallCx};
+use crate::marshal::{self, CallCx, Mem};
+use crate::structs;
 use crate::state::{state, State};
 use crate::throw_error;
 use nativescript_metadata::Type;
@@ -43,6 +44,14 @@ pub mod keys {
     /// Extra memory kept alive by a Reference (e.g. a C string it points to)
     pub fn keep<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
         key(scope, "ns#keep")
+    }
+    /// BigInt address of the memory behind a struct view
+    pub fn struct_address<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
+        key(scope, "ns#struct")
+    }
+    /// Memory for a string stored in a struct field
+    pub fn keep_field<'s>(scope: &v8::PinScope<'s, '_, ()>, field: &str) -> v8::Local<'s, v8::Private> {
+        key(scope, &format!("ns#keep:{field}"))
     }
     /// BigInt address of a native function
     pub fn function_address<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
@@ -423,7 +432,7 @@ fn reference_get<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: R
     match reference_storage(scope, this) {
         Some(addr) => {
             let Some(ty) = reference_type(scope, &st, this) else { return };
-            match unsafe { marshal::read(scope, &st, &ty, addr as *const u8) } {
+            match unsafe { marshal::read(scope, &st, &ty, addr as *const u8, Mem::Live(Some(this))) } {
                 Ok(v) => rv.set(v),
                 Err(e) => throw_error(scope, &e),
             }
@@ -461,17 +470,15 @@ fn struct_ctor<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<
     let Some(ty) = args.data().uint32_value(scope).and_then(|i| st.type_at(i)) else {
         return;
     };
+    // owned, zeroed memory initialized from a plain object / struct / Pointer
     let result = (|| {
-        let size = st.layout(&ty)?.size;
-        let mut cx = CallCx::default();
-        let mem = cx.scratch(size);
+        let (buffer, addr) = structs::allocate(scope, &st, &ty)?;
         let init = args.get(0);
-        unsafe {
-            if !init.is_undefined() {
-                marshal::write(scope, &st, &ty, init, mem, &mut cx)?;
-            }
-            marshal::read(scope, &st, &ty, mem)
+        if !init.is_undefined() {
+            let mut cx = CallCx::default();
+            unsafe { marshal::write(scope, &st, &ty, init, addr as *mut u8, &mut cx)? };
         }
+        structs::view(scope, &st, &ty, addr, Some(buffer.into()))
     })();
     match result {
         Ok(v) => rv.set(v),
@@ -524,7 +531,7 @@ fn interop_sizeof<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: 
             Ok(l) => l.size,
             Err(e) => return throw_error(scope, &e),
         }
-    } else if pointer_address(scope, v).is_some() || is_reference(scope, v) || v.is_function() {
+    } else if pointer_address(scope, v).is_some() || is_reference(scope, v) || v.is_function() || v.is_string() {
         std::mem::size_of::<usize>()
     } else {
         return throw_error(scope, "interop.sizeof expects a type, struct or Pointer");
@@ -539,6 +546,8 @@ fn interop_handleof<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv
         return rv.set(v);
     }
     let addr = if let Some(addr) = reference_storage(scope, v) {
+        Some(addr)
+    } else if let Some(addr) = structs::address(scope, v) {
         Some(addr)
     } else if let Ok(f) = v8::Local::<v8::Function>::try_from(v) {
         native_function_address(scope, &st, f)
@@ -556,6 +565,10 @@ fn interop_handleof<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv
 }
 
 fn interop_string_from_cstring<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    // const char* results are already strings
+    if args.get(0).is_string() {
+        return rv.set(args.get(0));
+    }
     let addr = match address_from_value(scope, args.get(0)) {
         Ok(a) => a,
         Err(e) => return throw_error(scope, &e),
@@ -607,6 +620,31 @@ fn interop_callback<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv
         Ok(addr) => rv.set(new_pointer(scope, &st, addr, Some(function.into())).into()),
         Err(e) => throw_error(scope, &e),
     }
+}
+
+/// `interop.cstring(str)`: C string that lives as long as the returned Pointer.
+fn interop_cstring<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let mut bytes = args.get(0).to_rust_string_lossy(scope).into_bytes();
+    if bytes.contains(&0) {
+        return throw_error(scope, "string contains a NUL character");
+    }
+    bytes.push(0);
+    let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
+    let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
+    let addr = buffer.data().map(|p| p.as_ptr() as usize).unwrap_or(0);
+    rv.set(new_pointer(scope, &st, addr, Some(buffer.into())).into());
+}
+
+/// `interop.release(fn)`: frees the C callbacks created for `fn` once C won't
+/// call them anymore. Returns how many were released.
+fn interop_release<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let Ok(function) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
+        return throw_error(scope, "interop.release expects a function");
+    };
+    let released = ffi::release_closures(scope, &st, function);
+    rv.set(v8::Integer::new(scope, released as i32).into());
 }
 
 fn interop_buffer_from_data<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
@@ -679,6 +717,8 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, global: v8::Loc
     set_function(scope, interop, "stringFromCString", interop_string_from_cstring);
     set_function(scope, interop, "bufferFromData", interop_buffer_from_data);
     set_function(scope, interop, "callback", interop_callback);
+    set_function(scope, interop, "cstring", interop_cstring);
+    set_function(scope, interop, "release", interop_release);
 
     let key = v8::String::new(scope, "interop").unwrap();
     global.set(scope, key.into(), interop.into());

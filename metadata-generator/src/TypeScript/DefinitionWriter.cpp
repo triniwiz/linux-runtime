@@ -981,6 +981,12 @@ std::string DefinitionWriter::tsifyType(const Type& type,
     case TypeUnichar:
     case TypeSelector:
       return "string";
+    case TypeConstCString:
+      // const char* is read into a JS string (the memory isn't owned by the caller)
+      if (!isFuncParam) {
+        return "string | null";
+      }
+      [[fallthrough]];
     case TypeCString: {
       std::string res = isFuncParam ? "string | " : "";
       Type typeVoid(TypeVoid);

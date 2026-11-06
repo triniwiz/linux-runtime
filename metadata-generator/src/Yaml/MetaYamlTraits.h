@@ -142,6 +142,7 @@ struct ScalarEnumerationTraits<Meta::TypeType> {
     io.enumCase(value, "UChar", Meta::TypeType::TypeUnsignedChar);
     io.enumCase(value, "Unichar", Meta::TypeType::TypeUnichar);
     io.enumCase(value, "CString", Meta::TypeType::TypeCString);
+    io.enumCase(value, "ConstCString", Meta::TypeType::TypeConstCString);
     io.enumCase(value, "Float", Meta::TypeType::TypeFloat);
     io.enumCase(value, "Double", Meta::TypeType::TypeDouble);
     io.enumCase(value, "LongDouble", Meta::TypeType::TypeLongDouble);

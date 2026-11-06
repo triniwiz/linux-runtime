@@ -88,7 +88,7 @@ fn resolve<'s>(
         MetaKind::Var => {
             let ty = meta.var_type().ok_or("variable without type")?;
             let address = st.symbol(&meta)?;
-            let value = unsafe { marshal::read(scope, st, &ty, address as *const u8)? };
+            let value = unsafe { marshal::read(scope, st, &ty, address as *const u8, marshal::Mem::Live(None))? };
             (value, false)
         }
         MetaKind::JsCode => {

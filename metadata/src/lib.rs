@@ -9,7 +9,7 @@ mod hash;
 mod types;
 
 pub use hash::string_hash;
-pub use types::{Type, TypeTag};
+pub use types::{FieldLayout, RecordLayout, Type, TypeTag};
 
 use std::borrow::Cow;
 use std::fmt;
@@ -484,6 +484,14 @@ impl<'a> Meta<'a> {
             return None;
         }
         Some(self.file.heap_str(self.file.heap_ptr(self.offset + META_HEADER)))
+    }
+
+    /// Layout of a struct or union computed by clang.
+    pub fn record_layout(&self) -> Option<RecordLayout> {
+        if !matches!(self.kind(), MetaKind::Struct | MetaKind::Union) {
+            return None;
+        }
+        types::decode_layout(self.file, self.file.heap_ptr(self.offset + META_HEADER + 8))
     }
 
     /// Fields of a struct or union, in declaration order.

@@ -205,6 +205,7 @@ void binary::BinarySerializer::serializeRecord(::Meta::RecordMeta* meta, binary:
 
     binaryMetaStruct._fieldNames = this->heapWriter.push_binaryArray(nameOffsets);
     binaryMetaStruct._fieldsEncodings = this->typeEncodingSerializer.visit(typeEncodings);
+    binaryMetaStruct._layout = BinaryTypeEncodingSerializer::writeRecordLayout(this->heapWriter, meta->layout, meta->fields);
 }
 
 void binary::BinarySerializer::serializeContainer(std::vector<std::pair<clang::Module*, std::vector< ::Meta::Meta*> > >& container)

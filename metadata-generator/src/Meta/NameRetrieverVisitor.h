@@ -48,6 +48,8 @@ class NameRetrieverVisitor : public ::Meta::TypeVisitor<std::string> {
 
   virtual std::string visitCString();
 
+  virtual std::string visitConstCString();
+
   virtual std::string visitFloat();
 
   virtual std::string visitDouble();

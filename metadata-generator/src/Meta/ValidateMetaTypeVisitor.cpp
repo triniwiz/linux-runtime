@@ -35,6 +35,8 @@ bool ValidateMetaTypeVisitor::visitUnichar() { return true; }
 
 bool ValidateMetaTypeVisitor::visitCString() { return true; }
 
+bool ValidateMetaTypeVisitor::visitConstCString() { return true; }
+
 bool ValidateMetaTypeVisitor::visitFloat() { return true; }
 
 bool ValidateMetaTypeVisitor::visitDouble() { return true; }

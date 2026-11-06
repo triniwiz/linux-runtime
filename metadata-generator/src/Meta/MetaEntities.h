@@ -251,6 +251,7 @@ public:
 class RecordMeta : public Meta {
 public:
     std::vector<RecordField> fields;
+    RecordLayout layout;
 };
 
 class StructMeta : public RecordMeta {

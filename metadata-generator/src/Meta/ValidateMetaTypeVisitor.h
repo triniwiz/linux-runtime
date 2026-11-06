@@ -47,6 +47,8 @@ class ValidateMetaTypeVisitor : public TypeVisitor<bool> {
 
   virtual bool visitCString();
 
+  virtual bool visitConstCString();
+
   virtual bool visitFloat();
 
   virtual bool visitDouble();

@@ -7,6 +7,7 @@ mod interop;
 mod longdouble;
 mod marshal;
 mod state;
+mod structs;
 
 pub use nativescript_metadata::MetaFile;
 

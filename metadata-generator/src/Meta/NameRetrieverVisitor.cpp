@@ -68,6 +68,10 @@ std::string NameRetrieverVisitor::visitCString() {
   return this->tsNames ? "string" : "char*";
 }
 
+std::string NameRetrieverVisitor::visitConstCString() {
+  return this->tsNames ? "string" : "const char*";
+}
+
 std::string NameRetrieverVisitor::visitFloat() {
   return this->tsNames ? "number" : "float";
 }

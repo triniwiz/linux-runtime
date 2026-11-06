@@ -58,6 +58,8 @@ class TypeVisitor {
 
   virtual T_RESULT visitCString() = 0;
 
+  virtual T_RESULT visitConstCString() = 0;
+
   virtual T_RESULT visitFloat() = 0;
 
   virtual T_RESULT visitDouble() = 0;

@@ -22,6 +22,7 @@ binary::MetaFileOffset binary::RecordMeta::save(BinaryWriter& writer)
     binary::MetaFileOffset offset = Meta::save(writer);
     writer.push_pointer(this->_fieldNames);
     writer.push_pointer(this->_fieldsEncodings);
+    writer.push_pointer(this->_layout);
     return offset;
 }
 
@@ -184,5 +185,6 @@ binary::MetaFileOffset binary::AnonymousRecordEncoding::save(binary::BinaryWrite
     for (int i = 0; i < this->_fieldsCount; i++) {
         this->_fieldEncodings[i]->save(writer);
     }
+    writer.push_pointer(this->_layout);
     return offset;
 }

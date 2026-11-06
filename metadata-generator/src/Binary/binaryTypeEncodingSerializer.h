@@ -22,9 +22,17 @@ class BinaryTypeEncodingSerializer
   // duplicate copy of every string reachable from both paths.
   BinaryWriter& _heapWriter;
 
+public:
+  // Writes a record layout blob (see RecordMeta::_layout) to the heap
+  static MetaFileOffset writeRecordLayout(
+      BinaryWriter& heapWriter, const ::Meta::RecordLayout& layout,
+      const std::vector< ::Meta::RecordField>& fields);
+
+private:
   unique_ptr<TypeEncoding> serializeRecordEncoding(
       const binary::BinaryTypeEncodingType encodingType,
-      const std::vector< ::Meta::RecordField>& fields);
+      const std::vector< ::Meta::RecordField>& fields,
+      const ::Meta::RecordLayout& layout);
 
  public:
   BinaryTypeEncodingSerializer(BinaryWriter& heapWriter)
@@ -59,6 +67,8 @@ class BinaryTypeEncodingSerializer
   virtual unique_ptr<TypeEncoding> visitUnichar() override;
 
   virtual unique_ptr<TypeEncoding> visitCString() override;
+
+  virtual unique_ptr<TypeEncoding> visitConstCString() override;
 
   virtual unique_ptr<TypeEncoding> visitFloat() override;
 

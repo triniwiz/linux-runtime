@@ -1,5 +1,6 @@
 #include "TypeFactory.h"
 
+#include <clang/AST/RecordLayout.h>
 #include <llvm/ADT/STLExtras.h>
 
 #include "CreationException.h"
@@ -79,6 +80,34 @@ shared_ptr<Type> TypeFactory::getUnsignedChar() {
 
 shared_ptr<Type> TypeFactory::getUnichar() {
   static shared_ptr<Type> type(new Type(TypeType::TypeUnichar));
+  return type;
+}
+
+RecordLayout TypeFactory::computeLayout(const clang::RecordDecl& record,
+                                        std::vector<RecordField>& fields) {
+  RecordLayout result;
+  const clang::RecordDecl* def = record.getDefinition();
+  if (!def || def->isInvalidDecl() || def->isDependentType()) {
+    return result;
+  }
+  clang::ASTContext& context = def->getASTContext();
+  const clang::ASTRecordLayout& layout = context.getASTRecordLayout(def);
+  result.size = layout.getSize().getQuantity();
+  result.align = layout.getAlignment().getQuantity();
+  size_t i = 0;
+  for (const clang::FieldDecl* field : def->fields()) {
+    if (i >= fields.size()) {
+      break;
+    }
+    fields[i].offsetBits = layout.getFieldOffset(field->getFieldIndex());
+    fields[i].bitWidth = field->isBitField() ? field->getBitWidthValue(context) : 0;
+    i++;
+  }
+  return result;
+}
+
+shared_ptr<Type> TypeFactory::getConstCString() {
+  static shared_ptr<Type> type(new Type(TypeType::TypeConstCString));
   return type;
 }
 
@@ -372,7 +401,8 @@ shared_ptr<Type> TypeFactory::createFromPointerType(
     if (builtinType->getKind() == clang::BuiltinType::Kind::Char_S ||
         builtinType->getKind() == clang::BuiltinType::Kind::Char_U ||
         builtinType->getKind() == clang::BuiltinType::Kind::UChar)
-      return TypeFactory::getCString();
+      return qualPointee.isConstQualified() ? TypeFactory::getConstCString()
+                                            : TypeFactory::getCString();
   }
 
   // if is a FunctionPointerType don't wrap the type in another pointer type
@@ -411,10 +441,11 @@ shared_ptr<Type> TypeFactory::createFromRecordType(
                             this->create(field->getType()).get());
       fields.push_back(fieldMeta);
     }
+    RecordLayout layout = computeLayout(*recordDef, fields);
     if (recordDef->isUnion()) {
-      return make_shared<AnonymousUnionType>(fields);
+      return make_shared<AnonymousUnionType>(fields, layout);
     }
-    return make_shared<AnonymousStructType>(fields);
+    return make_shared<AnonymousStructType>(fields, layout);
   }
 
   if (recordDef->isUnion()) {

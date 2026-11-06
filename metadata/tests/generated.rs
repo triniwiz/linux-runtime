@@ -49,12 +49,12 @@ fn functions() {
     let Some(file) = metadata() else { return };
     let strlen = file.find("strlen").unwrap();
     assert_eq!(strlen.kind(), MetaKind::Function);
-    assert_eq!(strlen.signature().unwrap(), vec![Type::ULong, Type::CString]);
+    assert_eq!(strlen.signature().unwrap(), vec![Type::ULong, Type::ConstCString]);
     assert!(!strlen.is_variadic());
 
     let printf = file.find("printf").unwrap();
     assert!(printf.is_variadic());
-    assert_eq!(printf.signature().unwrap(), vec![Type::Int, Type::CString]);
+    assert_eq!(printf.signature().unwrap(), vec![Type::Int, Type::ConstCString]);
 
     let qsort = file.find("qsort").unwrap();
     let sig = qsort.signature().unwrap();
@@ -75,7 +75,7 @@ fn records() {
     assert_eq!(fields[1].0, "data");
     match &fields[1].1 {
         Type::ConstantArray(2, inner) => {
-            assert!(matches!(&**inner, Type::AnonymousUnion(f) if f.iter().any(|(n, _)| n == "v_pointer")))
+            assert!(matches!(&**inner, Type::AnonymousUnion(f, _) if f.iter().any(|(n, _)| n == "v_pointer")))
         }
         other => panic!("unexpected GValue.data type {other:?}"),
     }
@@ -98,4 +98,31 @@ fn vars_and_constants() {
 
     let error = file.find("G_LOG_LEVEL_ERROR").unwrap();
     assert_eq!(error.js_code(), Some("4"));
+}
+
+#[test]
+fn record_layouts_and_const_strings() {
+    let Some(file) = metadata() else { return };
+    let tm = file.find("tm").unwrap().record_layout().unwrap();
+    assert_eq!((tm.size, tm.align), (56, 8));
+    assert_eq!(tm.fields[1].offset_bits, 32);
+    assert_eq!(tm.fields[9].offset_bits, 320); // tm_gmtoff after tm_isdst + padding
+
+    // struct _GList { gpointer data; GList *next; GList *prev; }
+    let list = file.find("_GList").unwrap().record_layout().unwrap();
+    assert_eq!(list.size, 24);
+
+    // GTK uses bitfields, e.g. struct _GdkRGBA has none but _GtkBorder has none either:
+    // find any record with a bitfield and check widths are sane
+    let with_bits = file
+        .iter()
+        .filter_map(|m| m.record_layout())
+        .find(|l| l.fields.iter().any(|f| f.bit_width > 0))
+        .expect("some record with bitfields");
+    assert!(with_bits.fields.iter().all(|f| f.bit_width <= 64));
+
+    let name = file.find("g_get_user_name").unwrap();
+    assert_eq!(name.signature().unwrap()[0], Type::ConstCString);
+    let dup = file.find("g_strdup").unwrap();
+    assert_eq!(dup.signature().unwrap()[0], Type::CString);
 }

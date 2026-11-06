@@ -1,7 +1,7 @@
 //! Calling C functions through libffi, and libffi closures for JS callbacks.
 
 use crate::interop::keys;
-use crate::marshal::{self, CallCx};
+use crate::marshal::{self, CallCx, Mem};
 use crate::state::{state, State};
 use crate::{report_exception, throw_error};
 use libffi::middle::{Cif, Type as FfiType};
@@ -142,7 +142,7 @@ impl CFunction {
             );
         }
 
-        let result = unsafe { marshal::read(scope, st, ret_ty, ret)? };
+        let result = unsafe { marshal::read(scope, st, ret_ty, ret, Mem::Temp)? };
         cx.finish(scope, st)?;
         Ok(result)
     }
@@ -197,14 +197,29 @@ pub fn function_from_pointer<'s>(
         return Err("function pointer without signature".into());
     }
     let function = CFunction::new(st, "<function pointer>", address, signature.to_vec(), false)?;
-    // Owned by the JS function through an External kept alive for the runtime
-    // lifetime (function pointers are rare and usually long lived).
+    // The CFunction is owned by an ArrayBuffer backing store attached to the JS
+    // function: when the function is garbage collected the deleter frees it.
     let raw = Box::into_raw(Box::new(function));
+    unsafe extern "C" fn drop_function(data: *mut c_void, _: usize, _: *mut c_void) {
+        drop(Box::from_raw(data as *mut CFunction));
+    }
+    let store = unsafe {
+        v8::ArrayBuffer::new_backing_store_from_ptr(
+            raw as *mut c_void,
+            std::mem::size_of::<CFunction>(),
+            drop_function,
+            std::ptr::null_mut(),
+        )
+    }
+    .make_shared();
+    let owner = v8::ArrayBuffer::with_backing_store(scope, &store);
     let data = v8::External::new(scope, raw as *mut c_void);
     let f = v8::Function::builder(function_pointer_callback)
-    .data(data.into())
-    .build(scope)
-    .ok_or("failed to create function")?;
+        .data(data.into())
+        .build(scope)
+        .ok_or("failed to create function")?;
+    let key = keys::owner(scope);
+    f.set_private(scope, key, owner.into());
     let key = keys::function_address(scope);
     let addr = v8::BigInt::new_from_u64(scope, address as u64);
     f.set_private(scope, key, addr.into());
@@ -292,6 +307,29 @@ pub fn closure_for<'s>(
     Ok(address)
 }
 
+/// Frees the libffi closures created for `function` (`interop.release`).
+pub fn release_closures<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, function: v8::Local<'s, v8::Function>) -> usize {
+    let mut released = Vec::new();
+    {
+        let mut closures = st.closures.borrow_mut();
+        let mut i = 0;
+        while i < closures.len() {
+            let f = v8::Local::new(scope, &closures[i].function);
+            if f.strict_equals(function.into()) {
+                released.push(closures.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+    }
+    for data in &released {
+        let key = keys::closure(scope, &data.signature);
+        let undefined = v8::undefined(scope);
+        function.set_private(scope, key, undefined.into());
+    }
+    released.len()
+}
+
 unsafe extern "C" fn closure_trampoline(
     _cif: *mut raw::ffi_cif,
     ret: *mut c_void,
@@ -321,7 +359,7 @@ unsafe extern "C" fn closure_trampoline(
 
     let mut argv = Vec::with_capacity(data.signature.len() - 1);
     for (i, ty) in data.signature[1..].iter().enumerate() {
-        match marshal::read(tc, st, ty, *args.add(i) as *const u8) {
+        match marshal::read(tc, st, ty, *args.add(i) as *const u8, Mem::Temp) {
             Ok(v) => argv.push(v),
             Err(e) => {
                 eprintln!("[nativescript] callback argument {}: {e}", i + 1);

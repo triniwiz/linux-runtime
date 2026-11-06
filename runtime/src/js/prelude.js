@@ -46,6 +46,11 @@
     if (value instanceof Date) return value.toISOString();
     if (value instanceof RegExp) return String(value);
     if (seen.includes(value)) return '[Circular]';
+    // struct views: fields are accessors on the prototype
+    if (typeof value.toJSON === 'function' && Object.keys(value).length === 0) {
+      const ctor = Object.getPrototypeOf(value)?.constructor;
+      return `${ctor && ctor.name ? ctor.name + ' ' : ''}${inspect(value.toJSON(), depth, seen.concat([value]), true)}`;
+    }
     if (depth > 2) return Array.isArray(value) ? '[Array]' : '[Object]';
     seen = seen.concat([value]);
     if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {

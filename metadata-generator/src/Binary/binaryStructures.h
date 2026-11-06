@@ -47,7 +47,8 @@ enum BinaryTypeEncodingType : uint8_t {
     AnonymousUnion,
     Vector,
     // additions for the Linux (C) runtime, keep appended to preserve values
-    LongDouble
+    LongDouble,
+    ConstCString
 };
 
 // BinaryMetaType values must not exceed
@@ -110,6 +111,8 @@ public:
 
     MetaFileOffset _fieldNames = 0;
     MetaFileOffset _fieldsEncodings = 0;
+    // Linux addition: i32 size, i32 align, i32 count, count x (i32 offsetBits, u8 bitWidth)
+    MetaFileOffset _layout = 0;
 
     virtual MetaFileOffset save(BinaryWriter& writer) override;
 };
@@ -382,6 +385,8 @@ public:
     uint8_t _fieldsCount = 0;
     std::vector<MetaFileOffset> _fieldNames;
     std::vector<std::unique_ptr<TypeEncoding> > _fieldEncodings;
+    // Linux addition, see RecordMeta::_layout
+    MetaFileOffset _layout = 0;
 
     virtual MetaFileOffset save(BinaryWriter& writer) override;
 };

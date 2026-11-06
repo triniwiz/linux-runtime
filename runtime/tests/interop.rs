@@ -137,3 +137,70 @@ fn uncaught_errors_are_reported() {
     let err = rt.run_script("strlen(1, 2)", "err.js").unwrap_err();
     assert!(err.contains("expects 1 argument"), "{err}");
 }
+
+#[test]
+fn live_struct_views() {
+    run(r#"
+      // nested fields alias the parent's memory
+      const it = new itimerval();
+      it.it_value.tv_sec = 5;
+      it.it_interval = { tv_sec: 2, tv_usec: 7 };
+      eq(it.toJSON(), { it_interval: { tv_sec: 2, tv_usec: 7 }, it_value: { tv_sec: 5, tv_usec: 0 } }, "nested writes");
+
+      // a Reference over existing memory gives a live view
+      const mem = interop.alloc(interop.sizeof(tm));
+      const view = new interop.Reference(tm, mem).value;
+      view.tm_mday = 21;
+      eq(new interop.Reference(interop.types.int32, mem.add(12)).value, 21, "view writes memory");
+
+      // views passed to T* are passed by address (C writes are visible)
+      const t = new tm();
+      gmtime_r(new interop.Reference(interop.types.long, 86400), t);
+      eq(t.tm_mday, 2, "pointer aliasing");
+      eq(JSON.stringify(div(7, 2)), '{"quot":3,"rem":1}', "toJSON");
+    "#);
+}
+
+#[test]
+fn bitfields_match_the_c_layout() {
+    run(r#"
+      // struct _GHookList { gulong seq_id; guint hook_size : 16; guint is_setup : 1; ... }
+      const hooks = new _GHookList();
+      hooks.hook_size = 300;
+      eq([hooks.hook_size, hooks.is_setup], [300, 0], "bitfield write/read");
+      g_hook_list_init(hooks, 64);
+      eq([hooks.hook_size, hooks.is_setup], [64, 1], "bitfields written by C");
+      g_hook_list_clear(hooks);
+    "#);
+}
+
+#[test]
+fn strings_ownership() {
+    run(r#"
+      eq(typeof g_get_user_name(), "string", "const char* returns are strings");
+      const dup = g_strdup("owned");
+      eq(dup instanceof interop.Pointer, true, "char* returns stay Pointers");
+      eq(interop.stringFromCString(dup), "owned", "read owned string");
+      g_free(dup);
+
+      // interop.cstring outlives the call, unlike temporary strings
+      const src = interop.cstring("77tail");
+      const end = new interop.Reference(interop.types.pointer, null);
+      eq(strtol(src, end, 10), 77, "strtol");
+      eq(interop.stringFromCString(end.value), "tail", "endptr into a cstring");
+    "#);
+}
+
+#[test]
+fn explicit_callbacks_and_release() {
+    run(r#"
+      const cmp = (a, b) => new interop.Reference(interop.types.int32, a).value - new interop.Reference(interop.types.int32, b).value;
+      const fp = interop.callback(cmp, { returns: interop.types.int32, args: [interop.types.pointer, interop.types.pointer] });
+      eq(fp instanceof interop.Pointer, true, "callback pointer");
+      const nums = new Int32Array([3, 1, 2]);
+      qsort(nums, 3, 4, fp);
+      eq(Array.from(nums), [1, 2, 3], "explicit callback");
+      eq(interop.release(cmp), 1, "release frees the closure");
+      eq(interop.release(cmp), 0, "nothing left");
+    "#);
+}

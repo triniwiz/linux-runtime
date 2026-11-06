@@ -1,7 +1,7 @@
 //! Per-isolate runtime state, stored in the isolate slot as `Rc<State>`.
 
 use crate::ffi::{CFunction, ClosureData};
-use nativescript_metadata::{Meta, MetaFile, MetaKind, Offset, Type};
+use nativescript_metadata::{Meta, MetaFile, MetaKind, Offset, RecordLayout as ClangLayout, Type};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_void, CString};
@@ -22,6 +22,8 @@ pub struct State {
     pub closures: RefCell<Vec<Box<ClosureData>>>,
     pub pointer_prototype: RefCell<Option<v8::Global<v8::Object>>>,
     pub reference_prototype: RefCell<Option<v8::Global<v8::Object>>>,
+    /// struct view classes, keyed by type index
+    pub struct_templates: RefCell<HashMap<u32, v8::Global<v8::FunctionTemplate>>>,
     /// Set while a resolved global is being defined on the global object:
     /// defining a property consults the interceptor again, which must not recurse.
     pub memoizing: Cell<bool>,
@@ -41,6 +43,7 @@ impl State {
             closures: Default::default(),
             pointer_prototype: Default::default(),
             reference_prototype: Default::default(),
+            struct_templates: Default::default(),
             memoizing: Cell::new(false),
         }
     }
@@ -113,8 +116,12 @@ impl State {
         let (key, union) = match ty {
             Type::Struct(name) => (format!("s:{name}"), false),
             Type::Union(name) => (format!("u:{name}"), true),
-            Type::AnonymousStruct(fields) => return Ok(Rc::new(self.compute_record(fields.clone(), false)?)),
-            Type::AnonymousUnion(fields) => return Ok(Rc::new(self.compute_record(fields.clone(), true)?)),
+            Type::AnonymousStruct(fields, layout) => {
+                return Ok(Rc::new(self.compute_record(fields.clone(), false, layout.as_ref())?))
+            }
+            Type::AnonymousUnion(fields, layout) => {
+                return Ok(Rc::new(self.compute_record(fields.clone(), true, layout.as_ref())?))
+            }
             other => return Err(format!("{other:?} is not a record type")),
         };
         if let Some(layout) = self.records.borrow().get(&key) {
@@ -132,30 +139,51 @@ impl State {
             .into_iter()
             .map(|(n, t)| (n.into_owned(), t))
             .collect();
-        let layout = Rc::new(self.compute_record(fields, union)?);
+        let layout = Rc::new(self.compute_record(fields, union, meta.record_layout().as_ref())?);
         self.records.borrow_mut().insert(key, layout.clone());
         Ok(layout)
     }
 
-    fn compute_record(&self, fields: Vec<(String, Type)>, union: bool) -> Result<RecordLayout, String> {
+    /// Field offsets come from clang's layout when the metadata has it
+    /// (bitfields, packed / aligned records), natural C layout otherwise.
+    fn compute_record(
+        &self,
+        fields: Vec<(String, Type)>,
+        union: bool,
+        clang: Option<&ClangLayout>,
+    ) -> Result<RecordLayout, String> {
         let mut out = Vec::with_capacity(fields.len());
         let mut offset = 0usize;
         let mut size = 0usize;
         let mut align = 1usize;
-        for (name, ty) in fields {
+        let mut natural = true;
+        for (i, (name, ty)) in fields.into_iter().enumerate() {
             let l = self.layout(&ty)?;
-            let field_offset = if union { 0 } else { align_up(offset, l.align) };
-            offset = field_offset + l.size;
+            let natural_offset = if union { 0 } else { align_up(offset, l.align) };
+            offset = natural_offset + l.size;
             size = size.max(offset);
             align = align.max(l.align);
-            out.push(Field { name, ty, offset: field_offset });
+            let mut field = Field { name, ty, offset: natural_offset, bits: None };
+            if let Some(f) = clang.and_then(|c| c.fields.get(i)) {
+                if f.bit_width > 0 {
+                    field.bits = Some((f.offset_bits, f.bit_width));
+                    field.offset = (f.offset_bits / 8) as usize;
+                    natural = false;
+                } else {
+                    field.offset = (f.offset_bits / 8) as usize;
+                    natural &= field.offset == natural_offset;
+                }
+            }
+            out.push(field);
         }
-        Ok(RecordLayout {
-            fields: out,
-            size: align_up(size, align),
-            align,
-            union,
-        })
+        let (size, align) = match clang {
+            Some(c) => {
+                natural &= c.size as usize == align_up(size, align) && c.align as usize == align;
+                (c.size as usize, c.align as usize)
+            }
+            None => (align_up(size, align), align),
+        };
+        Ok(RecordLayout { fields: out, size, align, union, natural })
     }
 
     /// C layout of a type on this (LP64 Linux) target.
@@ -178,7 +206,7 @@ impl State {
                 let size = (l.size * *n as usize).next_power_of_two();
                 Ok(Layout { size, align: size.min(16) })
             }
-            Type::Struct(_) | Type::Union(_) | Type::AnonymousStruct(_) | Type::AnonymousUnion(_) => {
+            Type::Struct(_) | Type::Union(_) | Type::AnonymousStruct(..) | Type::AnonymousUnion(..) => {
                 let r = self.record(ty)?;
                 Ok(Layout { size: r.size, align: r.align })
             }
@@ -205,7 +233,7 @@ impl State {
             // C arrays decay to pointers when passed to functions
             Type::ConstantArray(..) => F::pointer(),
             t if t.is_pointer_like() => F::pointer(),
-            Type::Struct(_) | Type::AnonymousStruct(_) | Type::Union(_) | Type::AnonymousUnion(_) => {
+            Type::Struct(_) | Type::AnonymousStruct(..) | Type::Union(_) | Type::AnonymousUnion(..) => {
                 self.ffi_record(ty)?
             }
             Type::ExtVector(n, inner) => {
@@ -222,10 +250,9 @@ impl State {
         if record.size == 0 {
             return Err("empty records can't be passed by value".into());
         }
-        if record.union {
-            // libffi has no unions: use the member that spans the whole union if
-            // there is one, otherwise integers of the union's alignment.
-            for field in &record.fields {
+        if record.union || !record.natural {
+            // libffi can't express these: whole-record member, else integer chunks
+            for field in record.fields.iter().filter(|_| record.union) {
                 let l = self.layout(&field.ty)?;
                 if l.size == record.size && l.align == record.align {
                     return Ok(F::structure(self.ffi_field(&field.ty)?));
@@ -238,7 +265,7 @@ impl State {
                 _ => F::u64(),
             };
             let unit_size = record.align.min(8);
-            return Ok(F::structure((0..record.size / unit_size).map(|_| unit.clone())));
+            return Ok(F::structure((0..record.size.div_ceil(unit_size)).map(|_| unit.clone())));
         }
         let mut elements = Vec::new();
         for field in &record.fields {
@@ -269,7 +296,10 @@ pub struct Layout {
 pub struct Field {
     pub name: String,
     pub ty: Type,
+    /// byte offset (for bitfields: of the byte containing the first bit)
     pub offset: usize,
+    /// (offset in bits from the record start, width) for bitfields
+    pub bits: Option<(u32, u8)>,
 }
 
 #[derive(Debug)]
@@ -278,6 +308,8 @@ pub struct RecordLayout {
     pub size: usize,
     pub align: usize,
     pub union: bool,
+    /// false for bitfields / packed / over-aligned records
+    pub natural: bool,
 }
 
 pub fn align_up(v: usize, align: usize) -> usize {

@@ -29,6 +29,7 @@ enum TypeType {
   TypeUnsignedChar,
   TypeUnichar,
   TypeCString,
+  TypeConstCString,
   TypeFloat,
   TypeDouble,
   TypeLongDouble,
@@ -116,6 +117,8 @@ class Type {
         return visitor.visitUnichar();
       case TypeCString:
         return visitor.visitCString();
+      case TypeConstCString:
+        return visitor.visitConstCString();
       case TypeFloat:
         return visitor.visitFloat();
       case TypeDouble:
@@ -182,6 +185,15 @@ struct RecordField {
 
   std::string name;
   Type* encoding;
+  // from clang's ASTRecordLayout, -1 when unknown
+  int64_t offsetBits = -1;
+  // 0 when the field isn't a bitfield
+  unsigned bitWidth = 0;
+};
+
+struct RecordLayout {
+  int64_t size = -1;
+  int64_t align = -1;
 };
 
 class IdType : public Type {
@@ -309,18 +321,20 @@ class UnionType : public Type {
 
 class AnonymousStructType : public Type {
  public:
-  AnonymousStructType(std::vector<RecordField> fields)
-      : Type(TypeType::TypeAnonymousStruct), fields(fields) {}
+  AnonymousStructType(std::vector<RecordField> fields, RecordLayout layout = {})
+      : Type(TypeType::TypeAnonymousStruct), fields(fields), layout(layout) {}
 
   std::vector<RecordField> fields;
+  RecordLayout layout;
 };
 
 class AnonymousUnionType : public Type {
  public:
-  AnonymousUnionType(std::vector<RecordField> fields)
-      : Type(TypeType::TypeAnonymousUnion), fields(fields) {}
+  AnonymousUnionType(std::vector<RecordField> fields, RecordLayout layout = {})
+      : Type(TypeType::TypeAnonymousUnion), fields(fields), layout(layout) {}
 
   std::vector<RecordField> fields;
+  RecordLayout layout;
 };
 
 class EnumType : public Type {

@@ -105,6 +105,12 @@ binary::BinaryTypeEncodingSerializer::visitCString() {
 }
 
 unique_ptr<binary::TypeEncoding>
+binary::BinaryTypeEncodingSerializer::visitConstCString() {
+  return std::make_unique<binary::TypeEncoding>(
+      binary::BinaryTypeEncodingType::ConstCString);
+}
+
+unique_ptr<binary::TypeEncoding>
 binary::BinaryTypeEncodingSerializer::visitFloat() {
   return std::make_unique<binary::TypeEncoding>(
       binary::BinaryTypeEncodingType::Float);
@@ -271,14 +277,14 @@ unique_ptr<binary::TypeEncoding>
 binary::BinaryTypeEncodingSerializer::visitAnonymousStruct(
     const ::Meta::AnonymousStructType& type) {
   return this->serializeRecordEncoding(
-      binary::BinaryTypeEncodingType::AnonymousStruct, type.fields);
+      binary::BinaryTypeEncodingType::AnonymousStruct, type.fields, type.layout);
 }
 
 unique_ptr<binary::TypeEncoding>
 binary::BinaryTypeEncodingSerializer::visitAnonymousUnion(
     const ::Meta::AnonymousUnionType& type) {
   return this->serializeRecordEncoding(
-      binary::BinaryTypeEncodingType::AnonymousUnion, type.fields);
+      binary::BinaryTypeEncodingType::AnonymousUnion, type.fields, type.layout);
 }
 
 unique_ptr<binary::TypeEncoding>
@@ -304,10 +310,27 @@ binary::BinaryTypeEncodingSerializer::visitNonNullable(
   return type.innerType->visit(*this);
 }
 
+binary::MetaFileOffset binary::BinaryTypeEncodingSerializer::writeRecordLayout(
+    binary::BinaryWriter& heapWriter, const ::Meta::RecordLayout& layout,
+    const std::vector< ::Meta::RecordField>& fields) {
+  if (layout.size < 0) {
+    return 0;
+  }
+  binary::MetaFileOffset offset = heapWriter.push_int((int32_t)layout.size);
+  heapWriter.push_int((int32_t)layout.align);
+  heapWriter.push_int((int32_t)fields.size());
+  for (const ::Meta::RecordField& field : fields) {
+    heapWriter.push_int((int32_t)field.offsetBits);
+    heapWriter.push_byte((uint8_t)field.bitWidth);
+  }
+  return offset;
+}
+
 unique_ptr<binary::TypeEncoding>
 binary::BinaryTypeEncodingSerializer::serializeRecordEncoding(
     const binary::BinaryTypeEncodingType encodingType,
-    const std::vector< ::Meta::RecordField>& fields) {
+    const std::vector< ::Meta::RecordField>& fields,
+    const ::Meta::RecordLayout& layout) {
   binary::AnonymousRecordEncoding* s =
       new binary::AnonymousRecordEncoding(encodingType);
   s->_fieldsCount = (uint8_t)fields.size();
@@ -319,6 +342,7 @@ binary::BinaryTypeEncodingSerializer::serializeRecordEncoding(
   for (const ::Meta::RecordField& field : fields) {
     s->_fieldEncodings.push_back(field.encoding->visit(*this));
   }
+  s->_layout = writeRecordLayout(this->_heapWriter, layout, fields);
   return unique_ptr<binary::TypeEncoding>(s);
 }
 

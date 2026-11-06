@@ -300,6 +300,7 @@ void MetaFactory::createFromRecord(const clang::RecordDecl& record,
                             _typeFactory.create(field->getType()).get());
     structMeta.fields.push_back(recordField);
   }
+  structMeta.layout = TypeFactory::computeLayout(record, structMeta.fields);
 }
 
 void MetaFactory::createFromVar(const clang::VarDecl& var, VarMeta& varMeta) {

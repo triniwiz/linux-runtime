@@ -42,12 +42,13 @@ pub enum TypeTag {
     AnonymousUnion,
     Vector,
     LongDouble,
+    ConstCString,
 }
 
 impl TypeTag {
     pub fn from_u8(v: u8) -> Option<Self> {
-        if v <= TypeTag::LongDouble as u8 {
-            // SAFETY: repr(u8) enum with contiguous discriminants 0..=LongDouble
+        if v <= TypeTag::ConstCString as u8 {
+            // SAFETY: repr(u8) enum with contiguous discriminants 0..=ConstCString
             Some(unsafe { std::mem::transmute::<u8, TypeTag>(v) })
         } else {
             None
@@ -72,8 +73,10 @@ pub enum Type {
     Char,
     UChar,
     Unichar,
-    /// `char*` / `const char*`
+    /// `char*`
     CString,
+    /// `const char*`, read into JS strings
+    ConstCString,
     Float,
     Double,
     LongDouble,
@@ -90,8 +93,8 @@ pub enum Type {
     FunctionPointer(Vec<Type>),
     /// Return type first (Apple blocks).
     Block(Vec<Type>),
-    AnonymousStruct(Vec<(String, Type)>),
-    AnonymousUnion(Vec<(String, Type)>),
+    AnonymousStruct(Vec<(String, Type)>, Option<RecordLayout>),
+    AnonymousUnion(Vec<(String, Type)>, Option<RecordLayout>),
     VaList,
     /// Objective-C only encodings, never produced for C headers.
     ObjC(TypeTag),
@@ -110,12 +113,54 @@ impl Type {
             self,
             Type::Pointer(_)
                 | Type::CString
+                | Type::ConstCString
                 | Type::IncompleteArray(_)
                 | Type::FunctionPointer(_)
                 | Type::Block(_)
                 | Type::ObjC(_)
         )
     }
+}
+
+/// Layout of a struct / union as computed by clang (accounts for bitfields,
+/// packed and aligned attributes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordLayout {
+    pub size: u32,
+    pub align: u32,
+    pub fields: Vec<FieldLayout>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldLayout {
+    /// offset from the start of the record, in bits
+    pub offset_bits: u32,
+    /// width for bitfields, 0 otherwise
+    pub bit_width: u8,
+}
+
+/// `i32 size, i32 align, i32 count, count x (i32 offsetBits, u8 bitWidth)`
+pub(crate) fn decode_layout(file: &MetaFile, offset: Offset) -> Option<RecordLayout> {
+    if offset == 0 {
+        return None;
+    }
+    let size = file.heap_i32(offset);
+    let align = file.heap_i32(offset + 4);
+    let count = file.heap_i32(offset + 8).max(0) as u32;
+    let fields = (0..count)
+        .map(|i| {
+            let at = offset + 12 + i * 5;
+            FieldLayout {
+                offset_bits: file.heap_i32(at).max(0) as u32,
+                bit_width: file.heap_u8(at + 4),
+            }
+        })
+        .collect();
+    Some(RecordLayout {
+        size: size.max(0) as u32,
+        align: align.max(1) as u32,
+        fields,
+    })
 }
 
 /// Decodes the `i32 count` + `count` back to back encodings list.
@@ -172,6 +217,7 @@ pub(crate) fn decode(file: &MetaFile, offset: Offset) -> (Type, Offset) {
         TypeTag::UChar => Type::UChar,
         TypeTag::Unichar => Type::Unichar,
         TypeTag::CString => Type::CString,
+        TypeTag::ConstCString => Type::ConstCString,
         TypeTag::Float => Type::Float,
         TypeTag::Double => Type::Double,
         TypeTag::LongDouble => Type::LongDouble,
@@ -216,10 +262,11 @@ pub(crate) fn decode(file: &MetaFile, offset: Offset) -> (Type, Offset) {
                 fields.push((name, t));
                 cursor = next;
             }
+            let layout = decode_layout(file, ptr!());
             if tag == TypeTag::AnonymousUnion {
-                Type::AnonymousUnion(fields)
+                Type::AnonymousUnion(fields, layout)
             } else {
-                Type::AnonymousStruct(fields)
+                Type::AnonymousStruct(fields, layout)
             }
         }
         TypeTag::InterfaceDeclarationReference => {
