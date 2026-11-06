@@ -1,7 +1,6 @@
 #pragma once
 
-#include <Utils/stream.h>
-#include <memory>
+#include "Utils/stream.h"
 
 namespace binary {
 class BinaryOperation {

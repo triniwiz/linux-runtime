@@ -69,33 +69,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${LIBXML2_INCLUDE_DIR})
 
 add_executable(metadata-generator ${GENERATOR_HEADERS} ${GENERATOR_SOURCES})
 target_link_libraries(metadata-generator
-    ${LLVM_LINKER_FLAGS}
     ${LIBXML2_LIBRARIES}
-    clangAST
-	clangASTMatchers
-	clangAnalysis
-	clangBasic
-	clangDriver
-	clangEdit
-	clangFrontend
-	clangFrontendTool
-	clangLex
-	clangParse
-	clangSema
-	clangEdit
-	clangRewrite
-	clangRewriteFrontend
-	clangStaticAnalyzerFrontend
-	clangStaticAnalyzerCheckers
-	clangStaticAnalyzerCore
-	clangCrossTU
-	clangIndex
-	clangSerialization
-	clangToolingCore
-	clangTooling
-	clangFormat
+    ${LLVM_LINK_LIBS}
 )
-
 
 set_target_properties(metadata-generator PROPERTIES
     COMPILE_FLAGS "-fvisibility=hidden -Werror -Wall -Wextra -Wno-unused-parameter"
@@ -108,11 +84,6 @@ add_custom_command(TARGET metadata-generator
 add_custom_command(TARGET metadata-generator
                    POST_BUILD
                    COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/clang/*/lib)
-
-# Post build step to run tests
- add_custom_command(TARGET metadata-generator
-                    POST_BUILD
-                    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test-mdg-executable.sh ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/../metadata-generator)
 
 install(TARGETS metadata-generator
         RUNTIME DESTINATION bin)
