@@ -1,0 +1,17 @@
+// Linux headers ship without clang module maps. The metadata generator groups
+// declarations (and the libraries to dlopen) by clang module, so we describe
+// the libraries we care about here. The nearest umbrella directory wins, so
+// more specific libraries (glib) take precedence over libc's /usr/include.
+module libc [system] {
+  umbrella "/usr/include"
+  link "c"
+  link "m"
+}
+
+module GLib [system] {
+  umbrella "/usr/include/glib-2.0"
+  header "/usr/lib/x86_64-linux-gnu/glib-2.0/include/glibconfig.h"
+  link "glib-2.0"
+  link "gobject-2.0"
+  link "gio-2.0"
+}
