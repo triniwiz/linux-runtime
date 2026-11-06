@@ -30,6 +30,13 @@ impl Drop for Timer {
 pub fn report_pending(st: &State) {
     let js = st.js();
     if let Some(e) = js.take_exception() {
+        // @nativescript/core's hook
+        if let Ok(hook) = js.get(js.global(), "__onUncaughtError") {
+            if js.type_of(hook) == FUNCTION {
+                let _ = js.call(hook, js.undefined(), &[e]);
+                js.clear_exception();
+            }
+        }
         eprintln!("Uncaught {}", js.describe(e));
         st.uncaught.set(st.uncaught.get() + 1);
     }
@@ -250,4 +257,20 @@ pub fn post(context: usize, release: bool, f: Box<dyn FnOnce(&State) + Send>) {
 /// Keeps the loop alive until a matching `post(.., release = true, ..)`.
 pub fn hold(st: &State) {
     st.loop_refs.set(st.loop_refs.get() + 1);
+}
+
+/// SIGUSR1 calls `global.__onLiveSync()` (the CLI signals after syncing files).
+pub fn install_livesync_signal() {
+    fn fire() {
+        if let Some(st) = current() {
+            with_js(st, |js| {
+                if let Ok(f) = js.get(js.global(), "__onLiveSync") {
+                    if js.type_of(f) == FUNCTION {
+                        let _ = js.call(f, js.undefined(), &[]);
+                    }
+                }
+            });
+        }
+    }
+    nativescript_core::glib::on_signal(libc::SIGUSR1, fire);
 }

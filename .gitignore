@@ -3,3 +3,4 @@
 build
 /llvm/
 /target
+/dist

@@ -99,6 +99,9 @@ impl Runtime {
         };
         *state.context.borrow_mut() = Some(context.clone());
         event_loop::set_current(Some(state.clone()));
+        if state.parent.borrow().is_none() {
+            event_loop::install_livesync_signal();
+        }
 
         Ok(Runtime { context, state, isolate })
     }
@@ -195,8 +198,7 @@ impl Runtime {
     /// Runs a file as an ES module or CommonJS module (by extension,
     /// package.json "type" or syntax).
     pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
-        let path = path.as_ref();
-        let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let path = nativescript_core::resolve::entry_point(path.as_ref())?;
         let before = self.state.uncaught.get();
         v8::scope!(let scope, &mut **self.isolate);
         let context = v8::Local::new(scope, &self.context);
@@ -238,12 +240,26 @@ pub(crate) fn throw_error(scope: &mut v8::PinScope, message: &str) {
     scope.throw_exception(error);
 }
 
+/// `global.__onUncaughtError(error)`, the hook @nativescript/core installs.
+fn notify_uncaught<'s>(scope: &mut v8::PinScope<'s, '_>, exception: v8::Local<'s, v8::Value>) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let key = v8::String::new(scope, "__onUncaughtError").unwrap();
+    let Some(hook) = global.get(scope, key.into()).and_then(|h| v8::Local::<v8::Function>::try_from(h).ok()) else {
+        return;
+    };
+    v8::tc_scope!(let tc, scope);
+    let recv = v8::undefined(tc).into();
+    hook.call(tc, recv, &[exception]);
+}
+
 /// Prints an uncaught exception with its stack (or location) to stderr.
 pub(crate) fn report_exception<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     exception: v8::Local<'s, v8::Value>,
     message: Option<v8::Local<'s, v8::Message>>,
 ) -> String {
+    notify_uncaught(scope, exception);
     let mut text = String::new();
     if let Ok(object) = v8::Local::<v8::Object>::try_from(exception) {
         let key = v8::String::new(scope, "stack").unwrap();

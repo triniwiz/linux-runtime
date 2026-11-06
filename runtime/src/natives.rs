@@ -187,6 +187,11 @@ fn exit<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
     std::process::exit(code);
 }
 
+/// Full GC (`__collect`).
+fn gc<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, _rv: Rv<'s>) {
+    scope.low_memory_notification();
+}
+
 fn cwd<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, mut rv: Rv<'s>) {
     let dir = std::env::current_dir().unwrap_or_default();
     rv.set(str(scope, &dir.to_string_lossy()).into());
@@ -246,6 +251,7 @@ pub fn create<'s>(scope: &mut v8::PinScope<'s, '_>, argv: &[String]) -> v8::Loca
     set!("now", now);
     set!("hrtime", hrtime);
     set!("exit", exit);
+    set!("gc", gc);
     set!("cwd", cwd);
     set!("chdir", chdir);
     set!("getenv", getenv);

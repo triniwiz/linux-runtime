@@ -333,6 +333,9 @@
     toJSON: () => ({ timeOrigin: natives.timeOrigin }),
   };
   define('performance', performance);
+  // @nativescript/core runtime hooks
+  define('__time', natives.now);
+  define('__collect', natives.gc || (() => {}));
 
   // ---------- structuredClone ----------
   define('structuredClone', (value, options) => {

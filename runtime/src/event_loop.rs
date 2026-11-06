@@ -335,3 +335,20 @@ pub fn post_state(context: usize, f: Box<dyn FnOnce(&State) + Send>) {
     let data = Box::into_raw(Box::new(f)) as gpointer;
     queue(context, dispatch, data);
 }
+
+/// SIGUSR1 calls `global.__onLiveSync()` (the CLI signals after syncing files).
+pub fn install_livesync_signal() {
+    fn fire() {
+        with_current(|st| {
+            with_js(st, |scope| {
+                let global = scope.get_current_context().global(scope);
+                let key = v8::String::new(scope, "__onLiveSync").unwrap();
+                if let Some(f) = global.get(scope, key.into()).and_then(|f| v8::Local::<v8::Function>::try_from(f).ok()) {
+                    let recv = v8::undefined(scope).into();
+                    f.call(scope, recv, &[]);
+                }
+            })
+        });
+    }
+    nativescript_core::glib::on_signal(libc::SIGUSR1, fire);
+}

@@ -231,6 +231,15 @@ pub fn strip_shebang(src: String) -> String {
     }
 }
 
+/// Entry script for `path`: a file, or a directory resolved like `require(dir)` (package.json "main", index.js).
+pub fn entry_point(path: &Path) -> Result<PathBuf, String> {
+    let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if path.is_dir() {
+        return resolve_path(&path).ok_or_else(|| format!("{}: no package.json \"main\" or index.js", path.display()));
+    }
+    Ok(path)
+}
+
 pub fn dir_of(path: &Path) -> PathBuf {
     path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"))
 }

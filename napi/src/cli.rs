@@ -37,6 +37,10 @@ pub fn main(engine: &str) -> ExitCode {
             _ => script = Some(PathBuf::from(arg)),
         }
     }
+    // packaged apps: `<exe dir>/app`
+    if script.is_none() && eval.is_none() {
+        script = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("app"))).filter(|a| a.is_dir());
+    }
     if script.is_none() && eval.is_none() {
         return usage();
     }

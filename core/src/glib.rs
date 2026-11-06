@@ -29,6 +29,17 @@ extern "C" {
     pub fn g_source_unref(source: gpointer);
     pub fn g_main_current_source() -> gpointer;
     pub fn g_source_get_context(source: gpointer) -> gpointer;
+    pub fn g_unix_signal_add_full(priority: i32, signum: i32, handler: SourceFunc, data: gpointer, notify: Option<unsafe extern "C" fn(gpointer)>) -> u32;
+}
+
+/// Runs `f` on the default main context each time `signum` arrives (e.g. SIGUSR1 for livesync).
+pub fn on_signal(signum: i32, f: fn()) {
+    unsafe extern "C" fn run(data: gpointer) -> gboolean {
+        let f: fn() = std::mem::transmute(data);
+        f();
+        1
+    }
+    unsafe { g_unix_signal_add_full(G_PRIORITY_DEFAULT, signum, run, f as gpointer, None) };
 }
 
 /// The GMainContext JS runs on for this thread: the process default on the

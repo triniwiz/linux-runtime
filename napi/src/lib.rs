@@ -71,6 +71,7 @@ impl Runtime {
         unsafe { napi_open_handle_scope(env, &mut scope) };
         let rt = Runtime { state, runtime, env, scope };
         rt.install(engine).map_err(|_| rt.take_error("failed to initialize the runtime"))?;
+        event_loop::install_livesync_signal();
         Ok(rt)
     }
 
@@ -129,9 +130,9 @@ impl Runtime {
         self.scoped(|st| run_script(st.js(), source, name).map(|_| ()).map_err(|Thrown| None))
     }
 
-    /// Runs a file as the entry module.
+    /// Runs a file, or an app directory, as the entry module.
     pub fn run_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let path = std::fs::canonicalize(path.as_ref()).map_err(|e| format!("{}: {e}", path.as_ref().display()))?;
+        let path = nativescript_core::resolve::entry_point(path.as_ref())?;
         self.scoped(|st| modules::run_entry(st, &path))
     }
 
