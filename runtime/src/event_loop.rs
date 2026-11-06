@@ -135,6 +135,7 @@ pub fn with_js(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
 pub fn checkpoint(scope: &mut v8::PinScope<'_, '_>, st: &State) {
     st.microtasks_scheduled.set(false);
     scope.perform_microtask_checkpoint();
+    crate::napi::drain_finalizers(st);
     let rejections = std::mem::take(&mut *st.rejections.borrow_mut());
     for (_, value) in rejections {
         let value = v8::Local::new(scope, &value);
@@ -356,6 +357,17 @@ type Completion = Box<dyn for<'s, 'i> FnOnce(&mut v8::PinScope<'s, 'i>, &State) 
 /// Keeps the loop alive until a `post` with `release` runs.
 pub fn begin_pending(st: &State) {
     st.loop_refs.set(st.loop_refs.get() + 1);
+}
+
+pub fn end_pending(st: &State) {
+    st.loop_refs.set((st.loop_refs.get() - 1).max(0));
+}
+
+/// Runs `f` with this thread's runtime state, if any.
+pub fn with_current(f: impl FnOnce(&State)) {
+    if let Some(st) = current() {
+        f(&st);
+    }
 }
 
 /// Runs `f` on the JS thread owning `context`, from any thread.

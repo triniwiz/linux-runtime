@@ -60,6 +60,7 @@ impl Runtime {
         isolate.set_promise_reject_callback(event_loop::promise_reject_callback);
         isolate.set_host_import_module_dynamically_callback(modules::dynamic_import);
         isolate.set_host_initialize_import_meta_object_callback(modules::import_meta);
+        napi::keep_symbols();
         let state = Rc::new(State::new(metadata));
         *state.parent.borrow_mut() = parent;
         state.isolate.set(&mut **isolate as *mut v8::Isolate);
@@ -204,6 +205,9 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         workers::shutdown(&self.state);
+        if !self.state.napi_envs.borrow().is_empty() {
+            event_loop::with_js(&self.state, |_| napi::teardown(&self.state));
+        }
         event_loop::set_current(None);
         self.state.timers.borrow_mut().clear();
         self.state.rejections.borrow_mut().clear();

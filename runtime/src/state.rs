@@ -32,6 +32,8 @@ pub struct State {
     pub ws_dispatch: RefCell<Option<v8::Global<v8::Function>>>,
     pub workers: RefCell<HashMap<u32, std::sync::Arc<crate::workers::Link>>>,
     pub worker_dispatch: RefCell<Option<v8::Global<v8::Function>>>,
+    pub napi_envs: RefCell<Vec<Box<crate::napi::Env>>>,
+    pub napi_addons: RefCell<HashMap<std::path::PathBuf, v8::Global<v8::Value>>>,
     /// set in worker runtimes
     pub parent: RefCell<Option<crate::workers::Parent>>,
     pub timers: RefCell<HashMap<u32, crate::event_loop::Timer>>,
@@ -70,6 +72,8 @@ impl State {
             workers: Default::default(),
             worker_dispatch: Default::default(),
             parent: Default::default(),
+            napi_envs: Default::default(),
+            napi_addons: Default::default(),
             timers: Default::default(),
             next_timer: Cell::new(0),
             loop_refs: Cell::new(0),
