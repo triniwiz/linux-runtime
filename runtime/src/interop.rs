@@ -575,6 +575,40 @@ fn interop_string_from_cstring<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<
     rv.set(v8::String::new(scope, &s).unwrap().into());
 }
 
+/// `interop.callback(fn, { returns, args })`: C function pointer calling `fn`
+/// with an explicit signature (for untyped callbacks such as GCallback).
+fn interop_callback<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let Ok(function) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
+        return throw_error(scope, "interop.callback expects a function");
+    };
+    let result = (|| -> Result<usize, String> {
+        let spec = args.get(1);
+        let spec = spec.to_object(scope).filter(|_| spec.is_object()).ok_or("expected { returns, args }")?;
+        let key = v8::String::new(scope, "returns").unwrap();
+        let returns = spec.get(scope, key.into()).unwrap();
+        let ret = if returns.is_undefined() {
+            Type::Void
+        } else {
+            type_from_value(scope, &st, returns).ok_or("invalid return type")?
+        };
+        let mut signature = vec![ret];
+        let key = v8::String::new(scope, "args").unwrap();
+        let list = spec.get(scope, key.into()).unwrap();
+        if let Ok(list) = v8::Local::<v8::Array>::try_from(list) {
+            for i in 0..list.length() {
+                let t = list.get_index(scope, i).unwrap();
+                signature.push(type_from_value(scope, &st, t).ok_or_else(|| format!("invalid type for argument {}", i + 1))?);
+            }
+        }
+        ffi::closure_for(scope, &st, function, &signature)
+    })();
+    match result {
+        Ok(addr) => rv.set(new_pointer(scope, &st, addr, Some(function.into())).into()),
+        Err(e) => throw_error(scope, &e),
+    }
+}
+
 fn interop_buffer_from_data<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let Some(addr) = pointer_address(scope, args.get(0)) else {
         return throw_error(scope, "interop.bufferFromData expects a Pointer and a length");
@@ -644,6 +678,7 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, global: v8::Loc
     set_function(scope, interop, "handleof", interop_handleof);
     set_function(scope, interop, "stringFromCString", interop_string_from_cstring);
     set_function(scope, interop, "bufferFromData", interop_buffer_from_data);
+    set_function(scope, interop, "callback", interop_callback);
 
     let key = v8::String::new(scope, "interop").unwrap();
     global.set(scope, key.into(), interop.into());

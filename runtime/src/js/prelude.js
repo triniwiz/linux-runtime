@@ -123,4 +123,54 @@
     },
   };
   define('console', console);
+
+// GObject conveniences: g_signal_connect is a C macro, so it isn't in the
+// metadata. Handlers get arguments typed from the signal's GSignalQuery.
+(function () {
+  'use strict';
+  const g = globalThis;
+  if (g.g_signal_connect !== undefined || typeof g.g_signal_connect_data !== 'function') return;
+
+  const t = interop.types;
+  // fundamental GType -> interop type (G_TYPE_* = n << 2)
+  const fundamentals = {
+    4: t.void, 12: t.int8, 16: t.uint8, 20: t.int32, 24: t.int32, 28: t.uint32, 32: t.long, 36: t.ulong,
+    40: t.int64, 44: t.uint64, 48: t.int32, 52: t.uint32, 56: t.float, 60: t.double, 64: t.UTF8CString,
+  };
+  // mask G_SIGNAL_TYPE_STATIC_SCOPE, GTypes are pointer sized so use BigInts
+  const typeFor = (gtype) => fundamentals[Number(g_type_fundamental(BigInt(gtype) & ~1n))] || t.pointer;
+  const signatures = new Map();
+
+  function signature(instance, signal) {
+    const name = String(signal).split('::')[0];
+    const itype = g_type_from_instance_ptr(instance);
+    const key = `${itype}:${name}`;
+    let sig = signatures.get(key);
+    if (sig) return sig;
+    const id = g_signal_lookup(name, itype);
+    if (!id) throw new Error(`unknown signal '${name}'`);
+    const query = new _GSignalQuery();
+    g_signal_query(id, query);
+    const args = [t.pointer];
+    const params = query.n_params ? new BigUint64Array(interop.bufferFromData(query.param_types, query.n_params * 8)) : [];
+    for (const p of params) args.push(typeFor(p));
+    args.push(t.pointer);
+    sig = { returns: typeFor(query.return_type), args };
+    signatures.set(key, sig);
+    return sig;
+  }
+
+  // G_TYPE_FROM_INSTANCE: instance->g_class->g_type
+  function g_type_from_instance_ptr(instance) {
+    const klass = new interop.Reference(t.pointer, instance).value;
+    return new interop.Reference(t.ulong, klass).value;
+  }
+
+  const define = (name, value) =>
+    Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false });
+  define('g_signal_connect', (instance, signal, handler, data = null) =>
+    g_signal_connect_data(instance, signal, interop.callback(handler, signature(instance, signal)), data, null, 0));
+  define('g_signal_connect_after', (instance, signal, handler, data = null) =>
+    g_signal_connect_data(instance, signal, interop.callback(handler, signature(instance, signal)), data, null, 1 /* G_CONNECT_AFTER */));
+})();
 });

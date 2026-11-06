@@ -17,17 +17,22 @@ EXPECTEDOUTPUTDIR="$TESTSDIR/ExpectedOutput-linux-$ARCH"
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
 
+# module map, umbrella header and include paths for the libraries in linux/sdk.json
+# (set NS_SYSROOT to a sysroot made with linux/fetch-sysroot.sh for headers
+# that aren't installed, e.g. GTK)
+python3 "$TESTSDIR/../linux/gen-sdk.py" --out "$OUTDIR/sdk" ${NS_SYSROOT:+--sysroot "$NS_SYSROOT"} ${NS_SDK_MODULES:+--only "$NS_SDK_MODULES"}
+mapfile -t CLANG_ARGS < "$OUTDIR/sdk/clang-args.txt"
+
 # clang looks for its builtin headers relative to the executable (./lib/clang)
 pushd "$(dirname "$MDG")" > /dev/null
 "$MDG" -verbose \
-    -input-umbrella "$TESTSDIR/AllSystemFrameworks.h" \
-    -output-umbrella "$OUTDIR/umbrella.h" \
+    -input-umbrella "$OUTDIR/sdk/umbrella.h" \
     -output-bin "$OUTDIR/metadata-$ARCH.bin" \
     -output-yaml "$OUTDIR/yaml" \
     -output-typescript "$OUTDIR/typings" \
     Xclang \
-    -fmodule-map-file="$TESTSDIR/linux/module.modulemap" \
-    $(pkg-config --cflags-only-I glib-2.0 libxml-2.0 2>/dev/null) \
+    -fmodule-map-file="$OUTDIR/sdk/module.modulemap" \
+    "${CLANG_ARGS[@]}" \
     > "$OUTDIR/verbose.out" 2>&1 || { tail -20 "$OUTDIR/verbose.out"; exit 1; }
 popd > /dev/null
 

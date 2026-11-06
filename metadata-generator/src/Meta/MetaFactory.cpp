@@ -392,8 +392,34 @@ void MetaFactory::createFromEnum(const clang::EnumDecl& enumeration,
   std::vector<std::string> fieldNames;
   for (clang::EnumConstantDecl* enumField : enumeration.enumerators())
     fieldNames.push_back(enumField->getNameAsString());
-  size_t fieldNamePrefixLength =
-      Utils::calculateEnumFieldsPrefix(enumMeta.jsName, fieldNames).size();
+  // C enumerators share a SCREAMING_CASE prefix (GTK_ORIENTATION_VERTICAL):
+  // the short names drop the common prefix up to the last '_' so the enum
+  // object reads like GtkOrientation.VERTICAL. Full names are kept as well.
+  size_t fieldNamePrefixLength = 0;
+  if (fieldNames.size() > 1) {
+    std::string prefix = fieldNames[0];
+    for (const std::string& name : fieldNames) {
+      size_t i = 0;
+      while (i < prefix.size() && i < name.size() && prefix[i] == name[i])
+        i++;
+      prefix.resize(i);
+    }
+    size_t cut = prefix.rfind('_');
+    while (cut != std::string::npos) {
+      bool valid = true;
+      for (const std::string& name : fieldNames) {
+        if (name.size() <= cut + 1 || std::isdigit((unsigned char)name[cut + 1])) {
+          valid = false;
+          break;
+        }
+      }
+      if (valid) {
+        fieldNamePrefixLength = cut + 1;
+        break;
+      }
+      cut = cut == 0 ? std::string::npos : prefix.rfind('_', cut - 1);
+    }
+  }
 
   for (clang::EnumConstantDecl* enumField : enumeration.enumerators()) {
     // Convert values having the signed bit set to 1 to signed in order to

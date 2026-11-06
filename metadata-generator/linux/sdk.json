@@ -1,0 +1,275 @@
+{
+  "modules": [
+    {
+      "name": "libc",
+      "umbrella": [
+        "/usr/include"
+      ],
+      "link": [
+        "c",
+        "m"
+      ],
+      "headers": [
+        "sys/types.h",
+        "stdlib.h",
+        "stddef.h",
+        "sys/cdefs.h",
+        "stdio.h",
+        "complex.h",
+        "ctype.h",
+        "err.h",
+        "errno.h",
+        "sys/errno.h",
+        "fenv.h",
+        "inttypes.h",
+        "locale.h",
+        "math.h",
+        "setjmp.h",
+        "signal.h",
+        "stdlib.h",
+        "string.h",
+        "time.h",
+        "wchar.h",
+        "wctype.h",
+        "aio.h",
+        "arpa/inet.h",
+        "cpio.h",
+        "dirent.h",
+        "dlfcn.h",
+        "fcntl.h",
+        "sys/fcntl.h",
+        "fmtmsg.h",
+        "fnmatch.h",
+        "ftw.h",
+        "glob.h",
+        "grp.h",
+        "iconv.h",
+        "ifaddrs.h",
+        "sys/ioctl.h",
+        "langinfo.h",
+        "libgen.h",
+        "monetary.h",
+        "netdb.h",
+        "net/if.h",
+        "netinet/in.h",
+        "netinet/tcp.h",
+        "nl_types.h",
+        "poll.h",
+        "sys/poll.h",
+        "pthread.h",
+        "pwd.h",
+        "regex.h",
+        "sched.h",
+        "search.h",
+        "semaphore.h",
+        "spawn.h",
+        "strings.h",
+        "sys/ipc.h",
+        "sys/mman.h",
+        "sys/msg.h",
+        "sys/resource.h",
+        "sys/select.h",
+        "sys/sem.h",
+        "sys/shm.h",
+        "sys/socket.h",
+        "sys/stat.h",
+        "sys/statvfs.h",
+        "sys/time.h",
+        "sys/times.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/utsname.h",
+        "sys/wait.h",
+        "sys/xattr.h",
+        "syslog.h",
+        "sys/syslog.h",
+        "tar.h",
+        "termios.h",
+        "sys/termios.h",
+        "ulimit.h",
+        "unistd.h",
+        "sys/unistd.h",
+        "utime.h",
+        "utmpx.h",
+        "wordexp.h",
+        "getopt.h",
+        "locale.h",
+        "wctype.h",
+        "alloca.h",
+        "net/if.h",
+        "pthread.h",
+        "sys/file.h",
+        "sys/mount.h",
+        "sys/param.h",
+        "sys/queue.h",
+        "sys/quota.h",
+        "sys/signal.h",
+        "sys/syscall.h",
+        "sys/sysctl.h",
+        "sys/timeb.h",
+        "sys/ttydefaults.h",
+        "sys/ucontext.h",
+        "sysexits.h"
+      ]
+    },
+    {
+      "name": "zlib",
+      "pkg-config": [
+        "zlib"
+      ],
+      "files": [
+        "/usr/include/zlib.h",
+        "/usr/include/zconf.h"
+      ],
+      "headers": [
+        "zlib.h"
+      ]
+    },
+    {
+      "name": "uuid",
+      "pkg-config": [
+        "uuid"
+      ],
+      "headers": [
+        "uuid/uuid.h"
+      ]
+    },
+    {
+      "name": "GLib",
+      "pkg-config": [
+        "glib-2.0",
+        "gobject-2.0",
+        "gio-2.0",
+        "gio-unix-2.0"
+      ],
+      "headers": [
+        "glib.h",
+        "glib-object.h",
+        "gio/gio.h"
+      ]
+    },
+    {
+      "name": "libxml2",
+      "pkg-config": [
+        "libxml-2.0"
+      ],
+      "headers": [
+        "libxml/HTMLparser.h",
+        "libxml/SAX.h",
+        "libxml/SAX2.h",
+        "libxml/globals.h",
+        "libxml/parser.h",
+        "libxml/threads.h",
+        "libxml/tree.h",
+        "libxml/xlink.h",
+        "libxml/xmlmemory.h",
+        "libxml/HTMLtree.h",
+        "libxml/c14n.h",
+        "libxml/catalog.h",
+        "libxml/chvalid.h",
+        "libxml/debugXML.h",
+        "libxml/dict.h",
+        "libxml/encoding.h",
+        "libxml/entities.h",
+        "libxml/hash.h",
+        "libxml/list.h",
+        "libxml/nanoftp.h",
+        "libxml/nanohttp.h",
+        "libxml/parserInternals.h",
+        "libxml/pattern.h",
+        "libxml/relaxng.h",
+        "libxml/schemasInternals.h",
+        "libxml/schematron.h",
+        "libxml/uri.h",
+        "libxml/valid.h",
+        "libxml/xinclude.h",
+        "libxml/xmlIO.h",
+        "libxml/xmlautomata.h",
+        "libxml/xmlerror.h",
+        "libxml/xmlexports.h",
+        "libxml/xmlmodule.h",
+        "libxml/xmlreader.h",
+        "libxml/xmlregexp.h",
+        "libxml/xmlsave.h",
+        "libxml/xmlschemas.h",
+        "libxml/xmlschemastypes.h",
+        "libxml/xmlstring.h",
+        "libxml/xmlunicode.h",
+        "libxml/xmlversion.h",
+        "libxml/xmlwriter.h",
+        "libxml/xpath.h",
+        "libxml/xpathInternals.h",
+        "libxml/xpointer.h"
+      ]
+    },
+    {
+      "name": "icu",
+      "pkg-config": [
+        "icu-uc"
+      ],
+      "umbrella": [
+        "/usr/include/unicode"
+      ],
+      "headers": [
+        "unicode/localpointer.h",
+        "unicode/parseerr.h",
+        "unicode/platform.h",
+        "unicode/ptypes.h",
+        "unicode/putil.h",
+        "unicode/uchar.h",
+        "unicode/uconfig.h",
+        "unicode/uiter.h",
+        "unicode/umachine.h",
+        "unicode/uregex.h",
+        "unicode/urename.h",
+        "unicode/ustring.h",
+        "unicode/utext.h",
+        "unicode/utf.h",
+        "unicode/utf16.h",
+        "unicode/utf8.h",
+        "unicode/utf_old.h",
+        "unicode/utypes.h",
+        "unicode/uvernum.h",
+        "unicode/uversion.h"
+      ]
+    },
+    {
+      "name": "EGL",
+      "pkg-config": [
+        "egl"
+      ],
+      "umbrella": [
+        "/usr/include/EGL",
+        "/usr/include/KHR"
+      ],
+      "headers": [
+        "EGL/egl.h"
+      ]
+    },
+    {
+      "name": "GLES",
+      "pkg-config": [
+        "glesv2"
+      ],
+      "umbrella": [
+        "/usr/include/GLES2",
+        "/usr/include/GLES3",
+        "/usr/include/GLES"
+      ],
+      "headers": [
+        "GLES2/gl2.h",
+        "GLES2/gl2ext.h",
+        "GLES3/gl3.h"
+      ]
+    },
+    {
+      "name": "Gtk",
+      "pkg-config": [
+        "gtk4"
+      ],
+      "headers": [
+        "gtk/gtk.h"
+      ]
+    }
+  ]
+}
