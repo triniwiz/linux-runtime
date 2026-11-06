@@ -8,7 +8,7 @@ use std::ffi::{c_void, CString};
 use std::rc::Rc;
 
 pub struct State {
-    pub meta: MetaFile,
+    pub meta: std::sync::Arc<MetaFile>,
     pub isolate: Cell<*mut v8::Isolate>,
     pub context: RefCell<Option<v8::Global<v8::Context>>>,
     pub thread: std::thread::ThreadId,
@@ -30,6 +30,10 @@ pub struct State {
     pub requests: RefCell<HashMap<u32, v8::Global<v8::PromiseResolver>>>,
     pub websockets: RefCell<HashMap<u32, std::sync::mpsc::Sender<crate::net::WsCommand>>>,
     pub ws_dispatch: RefCell<Option<v8::Global<v8::Function>>>,
+    pub workers: RefCell<HashMap<u32, std::sync::Arc<crate::workers::Link>>>,
+    pub worker_dispatch: RefCell<Option<v8::Global<v8::Function>>>,
+    /// set in worker runtimes
+    pub parent: RefCell<Option<crate::workers::Parent>>,
     pub timers: RefCell<HashMap<u32, crate::event_loop::Timer>>,
     pub next_timer: Cell<u32>,
     pub loop_refs: Cell<i32>,
@@ -43,7 +47,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(meta: MetaFile) -> Self {
+    pub fn new(meta: std::sync::Arc<MetaFile>) -> Self {
         State {
             meta,
             isolate: Cell::new(std::ptr::null_mut()),
@@ -63,6 +67,9 @@ impl State {
             requests: Default::default(),
             websockets: Default::default(),
             ws_dispatch: Default::default(),
+            workers: Default::default(),
+            worker_dispatch: Default::default(),
+            parent: Default::default(),
             timers: Default::default(),
             next_timer: Cell::new(0),
             loop_refs: Cell::new(0),

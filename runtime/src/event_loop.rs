@@ -376,5 +376,30 @@ pub fn post(context: usize, release: bool, f: Completion) {
         0
     }
     let data = Box::into_raw(Box::new(Job { release, f })) as gpointer;
-    unsafe { g_main_context_invoke_full(context as gpointer, G_PRIORITY_DEFAULT, dispatch, data, None) };
+    queue(context, dispatch, data);
+}
+
+/// Always deferred, unlike g_main_context_invoke which runs inline when the
+/// caller can acquire the context.
+fn queue(context: usize, func: SourceFunc, data: gpointer) {
+    unsafe {
+        let source = g_idle_source_new();
+        g_source_set_priority(source, G_PRIORITY_DEFAULT);
+        g_source_set_callback(source, func, data, None);
+        g_source_attach(source, context as gpointer);
+        g_source_unref(source);
+    }
+}
+
+/// Runs `f` on the thread owning `context` without entering JS.
+pub fn post_state(context: usize, f: Box<dyn FnOnce(&State) + Send>) {
+    unsafe extern "C" fn dispatch(data: gpointer) -> gboolean {
+        let f = Box::from_raw(data as *mut Box<dyn FnOnce(&State) + Send>);
+        if let Some(st) = current() {
+            f(&st);
+        }
+        0
+    }
+    let data = Box::into_raw(Box::new(f)) as gpointer;
+    queue(context, dispatch, data);
 }

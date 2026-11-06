@@ -13,12 +13,14 @@ mod natives;
 mod net;
 mod state;
 mod structs;
+mod workers;
 
 pub use nativescript_metadata::MetaFile;
 
 use state::State;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::Once;
 
 static V8_INIT: Once = Once::new();
@@ -32,6 +34,19 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(metadata: MetaFile) -> Result<Self, String> {
+        Self::build(Arc::new(metadata), None)
+    }
+
+    /// Runtime sharing already loaded metadata (e.g. with other threads).
+    pub fn with_metadata(metadata: Arc<MetaFile>) -> Result<Self, String> {
+        Self::build(metadata, None)
+    }
+
+    pub(crate) fn new_worker(metadata: Arc<MetaFile>, parent: workers::Parent) -> Result<Self, String> {
+        Self::build(metadata, Some(parent))
+    }
+
+    fn build(metadata: Arc<MetaFile>, parent: Option<workers::Parent>) -> Result<Self, String> {
         V8_INIT.call_once(|| {
             let platform = v8::new_default_platform(0, false).make_shared();
             v8::V8::initialize_platform(platform);
@@ -46,6 +61,7 @@ impl Runtime {
         isolate.set_host_import_module_dynamically_callback(modules::dynamic_import);
         isolate.set_host_initialize_import_meta_object_callback(modules::import_meta);
         let state = Rc::new(State::new(metadata));
+        *state.parent.borrow_mut() = parent;
         state.isolate.set(&mut **isolate as *mut v8::Isolate);
         isolate.set_slot(state.clone());
 
@@ -70,7 +86,7 @@ impl Runtime {
                 global.set(scope, key.into(), require.into());
             }
             v8::tc_scope!(let tc, scope);
-            if let Err(e) = globals::install(tc) {
+            if let Err(e) = globals::install(tc, &state) {
                 if let Some(exception) = tc.exception() {
                     let message = tc.message();
                     report_exception(tc, exception, message);
@@ -187,6 +203,7 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        workers::shutdown(&self.state);
         event_loop::set_current(None);
         self.state.timers.borrow_mut().clear();
         self.state.rejections.borrow_mut().clear();
