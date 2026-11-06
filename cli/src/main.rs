@@ -25,13 +25,14 @@ fn main() -> ExitCode {
     let mut metadata = None;
     let mut script = None;
     let mut eval = None;
+    let mut rest = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            _ if script.is_some() || eval.is_some() => rest.push(arg),
             "--metadata" => metadata = args.next().map(PathBuf::from),
             "-e" | "--eval" => eval = args.next(),
             "-h" | "--help" => return usage(),
-            _ if script.is_none() => script = Some(PathBuf::from(arg)),
-            _ => return usage(),
+            _ => script = Some(PathBuf::from(arg)),
         }
     }
     if script.is_none() && eval.is_none() {
@@ -56,6 +57,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // node style: [exe, script, ...args]
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut argv = vec![exe];
+    if let Some(script) = &script {
+        argv.push(std::fs::canonicalize(script).unwrap_or(script.clone()).to_string_lossy().into_owned());
+    }
+    argv.extend(rest);
+    runtime.set_argv(&argv);
     let result = match (eval, script) {
         (Some(code), _) => runtime.run_script(&code, "[eval]"),
         (None, Some(path)) => runtime.run_file(path),

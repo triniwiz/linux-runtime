@@ -111,35 +111,24 @@ fn resolve<'s>(
     }))
 }
 
-const PRELUDE: &str = include_str!("js/prelude.js");
+const PRELUDES: [(&str, &str); 2] = [
+    ("nativescript:prelude", include_str!("js/prelude.js")),
+    ("nativescript:web", include_str!("js/web.js")),
+];
 
-/// Runs the JS prelude (console, __tsEnum, global...).
+/// Runs the JS preludes (console, web APIs, process...).
 pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>) -> Result<(), String> {
-    let print = v8::Function::new(
-        scope,
-        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
-            use std::io::Write;
-            let stream = args.get(0).int32_value(scope).unwrap_or(1);
-            let text = args.get(1).to_rust_string_lossy(scope);
-            // flush C stdio first so output from printf() & co stays in order
-            unsafe { libc::fflush(std::ptr::null_mut()) };
-            if stream == 2 {
-                let _ = writeln!(std::io::stderr(), "{text}");
-            } else {
-                let mut out = std::io::stdout().lock();
-                let _ = writeln!(out, "{text}");
-                let _ = out.flush();
-            }
-        },
-    )
-    .unwrap();
-    let source = v8::String::new(scope, PRELUDE).unwrap();
-    let name = v8::String::new(scope, "nativescript:prelude").unwrap();
-    let origin = v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 0, None, false, false, false, None);
-    let script = v8::Script::compile(scope, source, Some(&origin)).ok_or("failed to compile prelude")?;
-    let init = script.run(scope).ok_or("failed to run prelude")?;
-    let init = v8::Local::<v8::Function>::try_from(init).map_err(|_| "prelude must evaluate to a function")?;
-    let recv = v8::undefined(scope).into();
-    init.call(scope, recv, &[print.into()]).ok_or("prelude failed")?;
+    let argv: Vec<String> = std::env::args().collect();
+    let natives = crate::natives::create(scope, &argv);
+    for (name, code) in PRELUDES {
+        let source = v8::String::new(scope, code).unwrap();
+        let name = v8::String::new(scope, name).unwrap();
+        let origin = v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 0, None, false, false, false, None);
+        let script = v8::Script::compile(scope, source, Some(&origin)).ok_or("failed to compile prelude")?;
+        let init = script.run(scope).ok_or("failed to run prelude")?;
+        let init = v8::Local::<v8::Function>::try_from(init).map_err(|_| "prelude must evaluate to a function")?;
+        let recv = v8::undefined(scope).into();
+        init.call(scope, recv, &[natives.into()]).ok_or("prelude failed")?;
+    }
     Ok(())
 }

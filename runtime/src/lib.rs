@@ -9,6 +9,7 @@ mod longdouble;
 mod marshal;
 mod modules;
 mod napi;
+mod natives;
 mod state;
 mod structs;
 
@@ -111,6 +112,21 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+
+    /// Sets `process.argv`.
+    pub fn set_argv(&mut self, argv: &[String]) {
+        v8::scope!(let scope, &mut **self.isolate);
+        let context = v8::Local::new(scope, &self.context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let items: Vec<v8::Local<v8::Value>> = argv.iter().map(|a| v8::String::new(scope, a).unwrap().into()).collect();
+        let array = v8::Array::new_with_elements(scope, &items);
+        let global = context.global(scope);
+        let key = v8::String::new(scope, "process").unwrap();
+        if let Some(process) = global.get(scope, key.into()).and_then(|p| p.to_object(scope)) {
+            let key = v8::String::new(scope, "argv").unwrap();
+            process.set(scope, key.into(), array.into());
+        }
     }
 
     /// Evaluates `source` and returns the result as a string.

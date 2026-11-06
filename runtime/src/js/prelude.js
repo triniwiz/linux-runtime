@@ -1,6 +1,6 @@
-// Evaluated once per context, receives the native print(stream, text) function.
-(function (print) {
+(function (natives) {
   'use strict';
+  const print = natives.print;
   const g = globalThis;
   const define = (name, value) =>
     Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false });
