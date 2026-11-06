@@ -1,7 +1,8 @@
 //! Live struct / union views: field accessors read and write the C memory;
 //! an owner (ArrayBuffer or parent view) keeps it alive.
 
-use crate::interop::{self, keys};
+use crate::handles::{self, Kind};
+use crate::interop::keys;
 use crate::marshal::{self, CallCx, Mem};
 use crate::state::{state, State};
 use crate::throw_error;
@@ -10,34 +11,19 @@ use nativescript_metadata::Type;
 type Args<'s> = v8::FunctionCallbackArguments<'s>;
 type Rv<'s> = v8::ReturnValue<'s, v8::Value>;
 
-fn private_of<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    v: v8::Local<'s, v8::Value>,
-    key: v8::Local<'s, v8::Private>,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let object = v8::Local::<v8::Object>::try_from(v).ok()?;
-    object.get_private(scope, key).filter(|v| !v.is_undefined())
-}
-
 /// Address of the memory behind a struct view.
-pub fn address<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
-    if !v.is_object() {
-        return None;
-    }
-    let key = keys::struct_address(scope);
-    private_of(scope, v, key)
-        .and_then(|a| v8::Local::<v8::BigInt>::try_from(a).ok())
-        .map(|b| b.u64_value().0 as usize)
+#[inline]
+pub fn address<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
+    handles::is(v, Kind::Struct).map(handles::address)
 }
 
 fn this_view<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+    _scope: &mut v8::PinScope<'s, '_>,
     st: &State,
     this: v8::Local<'s, v8::Object>,
 ) -> Option<(usize, Type)> {
-    let addr = address(scope, this.into())?;
-    let ty = interop::type_from_value(scope, st, this.into())?;
-    Some((addr, ty))
+    let o = handles::is(this.into(), Kind::Struct)?;
+    Some((handles::address(o), st.type_at(handles::type_index(o)?)?))
 }
 
 fn field_get<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
@@ -112,7 +98,7 @@ fn template<'s>(
     st: &State,
     ty: &Type,
     index: u32,
-) -> Result<v8::Local<'s, v8::FunctionTemplate>, String> {
+) -> Result<v8::Local<'s, v8::ObjectTemplate>, String> {
     if let Some(t) = st.struct_templates.borrow().get(&index) {
         return Ok(v8::Local::new(scope, t));
     }
@@ -136,8 +122,12 @@ fn template<'s>(
     let key = v8::String::new(scope, "toJSON").unwrap();
     let json = v8::FunctionTemplate::new(scope, to_json);
     proto.set(key.into(), json.into());
-    st.struct_templates.borrow_mut().insert(index, v8::Global::new(scope, tmpl));
-    Ok(tmpl)
+    let instances = tmpl.instance_template(scope);
+    instances.set_internal_field_count(handles::FIELDS);
+    // instantiates the class so instances get its prototype
+    tmpl.get_function(scope).ok_or("failed to create struct class")?;
+    st.struct_templates.borrow_mut().insert(index, v8::Global::new(scope, instances));
+    Ok(instances)
 }
 
 /// Live view of the record `ty` at `addr`.
@@ -148,21 +138,10 @@ pub fn view<'s>(
     addr: usize,
     owner: Option<v8::Local<'s, v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, String> {
-    let index = st.register_type(ty.clone());
+    let index = st.register_type(ty);
     let tmpl = template(scope, st, ty, index)?;
-    let ctor = tmpl.get_function(scope).ok_or("failed to create struct class")?;
-    let key = v8::String::new(scope, "prototype").unwrap();
-    let proto = ctor.get(scope, key.into()).ok_or("struct prototype")?;
-    let object = v8::Object::new(scope);
-    object.set_prototype(scope, proto);
-    let key = keys::struct_address(scope);
-    let a = v8::BigInt::new_from_u64(scope, addr as u64);
-    object.set_private(scope, key, a.into());
-    interop::tag_type(scope, st, object, ty.clone());
-    if let Some(owner) = owner {
-        let key = keys::owner(scope);
-        object.set_private(scope, key, owner);
-    }
+    let object = tmpl.new_instance(scope).ok_or("failed to create struct view")?;
+    handles::init(scope, object, Kind::Struct, addr, Some(index), owner);
     Ok(object.into())
 }
 
@@ -187,8 +166,6 @@ pub fn allocate<'s>(
     st: &State,
     ty: &Type,
 ) -> Result<(v8::Local<'s, v8::ArrayBuffer>, usize), String> {
-    let size = st.layout(ty)?.size.max(1);
-    let buffer = v8::ArrayBuffer::new(scope, size);
-    let addr = buffer.data().map(|p| p.as_ptr() as usize).ok_or("allocation failed")?;
-    Ok((buffer, addr))
+    let size = st.layout(ty)?.size;
+    Ok(st.struct_memory(scope, size))
 }

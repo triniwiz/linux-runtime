@@ -73,7 +73,11 @@ fn resolve<'s>(
 ) -> Result<Option<(v8::Local<'s, v8::Value>, bool)>, String> {
     Ok(Some(match meta.kind() {
         MetaKind::Function => {
-            let data = v8::Integer::new_from_unsigned(scope, meta.offset());
+            // missing symbols resolve to undefined, like on iOS
+            let Ok(function) = ffi::function_for(st, meta.offset()) else {
+                return Ok(Some((v8::undefined(scope).into(), true)));
+            };
+            let data = v8::External::new(scope, std::rc::Rc::as_ptr(&function) as *mut std::ffi::c_void);
             let f = v8::Function::builder(ffi::c_function_callback)
                 .data(data.into())
                 .build(scope)
@@ -81,7 +85,8 @@ fn resolve<'s>(
             let name = v8::String::new(scope, meta.js_name()).unwrap();
             f.set_name(name);
             let key = keys::function_meta(scope);
-            f.set_private(scope, key, data.into());
+            let offset = v8::Integer::new_from_unsigned(scope, meta.offset());
+            f.set_private(scope, key, offset.into());
             (f.into(), true)
         }
         // variables are read on every access, their value can change

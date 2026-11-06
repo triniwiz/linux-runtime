@@ -57,7 +57,7 @@ impl TypeTag {
 }
 
 /// Decoded type encoding.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Void,
     Bool,
@@ -124,14 +124,14 @@ impl Type {
 
 /// Layout of a struct / union as computed by clang (accounts for bitfields,
 /// packed and aligned attributes).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecordLayout {
     pub size: u32,
     pub align: u32,
     pub fields: Vec<FieldLayout>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldLayout {
     /// offset from the start of the record, in bits
     pub offset_bits: u32,

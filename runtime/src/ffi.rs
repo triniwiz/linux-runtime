@@ -19,6 +19,51 @@ pub struct CFunction {
     pub variadic: bool,
     /// prepared once for non variadic functions
     cif: Option<Cif>,
+    /// argument slot sizes and the return slot size (non variadic)
+    slots: Vec<usize>,
+    ret_size: usize,
+    /// owning runtime, avoids the isolate slot lookup per call
+    state: *const State,
+    /// register-only call without libffi, when the signature allows it
+    fast: Option<FastCall>,
+}
+
+/// Int and float args use separate register sequences (x86_64 SysV, AArch64): one
+/// fn type taking all registers calls any signature that fits in them.
+#[derive(Clone)]
+struct FastCall {
+    /// per argument: true = float register
+    float_args: Vec<bool>,
+    float_ret: bool,
+}
+
+#[cfg(target_arch = "x86_64")]
+const INT_REGS: usize = 6;
+#[cfg(target_arch = "aarch64")]
+const INT_REGS: usize = 8;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const INT_REGS: usize = 0;
+const FLOAT_REGS: usize = 8;
+
+type IntFn = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, f64, f64, f64, f64, f64, f64, f64, f64) -> i64;
+type FloatFn = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64;
+
+impl FastCall {
+    fn new(signature: &[Type]) -> Option<Self> {
+        let class = |t: &Type| -> Option<bool> {
+            match t {
+                Type::Float | Type::Double => Some(true),
+                Type::Bool | Type::Char | Type::UChar | Type::Short | Type::UShort | Type::Unichar | Type::Int | Type::UInt => Some(false),
+                Type::Long | Type::ULong | Type::LongLong | Type::ULongLong => Some(false),
+                t if t.is_pointer_like() => Some(false),
+                _ => None,
+            }
+        };
+        let float_ret = if signature[0].is_void() { false } else { class(&signature[0])? };
+        let float_args = signature[1..].iter().map(class).collect::<Option<Vec<_>>>()?;
+        let floats = float_args.iter().filter(|f| **f).count();
+        (INT_REGS > 0 && float_args.len() - floats <= INT_REGS.min(6) && floats <= FLOAT_REGS).then_some(FastCall { float_args, float_ret })
+    }
 }
 
 /// Arguments of type `T[N]` decay to `T*`.
@@ -37,12 +82,20 @@ impl CFunction {
         } else {
             Some(Self::prep(st, &signature, None)?)
         };
+        let fast = if variadic { None } else { FastCall::new(&signature) };
+        let slots = signature[1..].iter().map(|t| st.layout(t).map(|l| l.size.max(8))).collect::<Result<_, _>>()?;
+        // small integer returns are widened to ffi_arg by libffi
+        let ret_size = st.layout(&signature[0])?.size.max(16);
         Ok(CFunction {
             name: name.to_owned(),
             address,
             signature,
             variadic,
             cif,
+            slots,
+            ret_size,
+            state: st,
+            fast,
         })
     }
 
@@ -105,6 +158,10 @@ impl CFunction {
             ));
         }
 
+        if let Some(fast) = &self.fast {
+            return self.call_fast(scope, st, args, fast);
+        }
+
         let variadic_sig;
         let variadic_cif;
         let (signature, cif) = if self.variadic {
@@ -120,18 +177,27 @@ impl CFunction {
         };
 
         let mut cx = CallCx::default();
-        let mut argv: Vec<*mut c_void> = Vec::with_capacity(argc);
+        let mut argv_inline = [std::ptr::null_mut::<c_void>(); 16];
+        let mut argv_heap = Vec::new();
+        let argv: &mut [*mut c_void] = if argc <= 16 {
+            &mut argv_inline[..argc]
+        } else {
+            argv_heap.resize(argc, std::ptr::null_mut());
+            &mut argv_heap
+        };
         for (i, ty) in signature[1..].iter().enumerate() {
-            let size = st.layout(ty)?.size.max(8);
+            let size = match self.slots.get(i) {
+                Some(s) => *s,
+                None => st.layout(ty)?.size.max(8),
+            };
             let slot = cx.scratch(size);
             unsafe { marshal::write(scope, st, ty, args.get(i as i32), slot, &mut cx) }
                 .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
-            argv.push(slot as *mut c_void);
+            argv[i] = slot as *mut c_void;
         }
 
         let ret_ty = &signature[0];
-        // small integer returns are widened to ffi_arg by libffi
-        let ret = cx.scratch(st.layout(ret_ty)?.size.max(16));
+        let ret = cx.scratch(if self.variadic { st.layout(ret_ty)?.size.max(16) } else { self.ret_size });
 
         unsafe {
             raw::ffi_call(
@@ -148,21 +214,59 @@ impl CFunction {
     }
 }
 
-/// JS callback for C functions: `args.data()` holds the metadata offset.
+impl CFunction {
+    fn call_fast<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        args: &v8::FunctionCallbackArguments<'s>,
+        fast: &FastCall,
+    ) -> Result<v8::Local<'s, v8::Value>, String> {
+        let mut cx = CallCx::default();
+        let mut ints = [0i64; 8];
+        let mut floats = [0f64; 8];
+        let (mut ni, mut nf) = (0, 0);
+        for (i, ty) in self.signature[1..].iter().enumerate() {
+            let mut slot = 0u128;
+            unsafe { marshal::write(scope, st, ty, args.get(i as i32), &mut slot as *mut u128 as *mut u8, &mut cx) }
+                .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+            if fast.float_args[i] {
+                // a float sits in the low 32 bits of the register
+                floats[nf] = f64::from_bits(slot as u64);
+                nf += 1;
+            } else {
+                ints[ni] = slot as u64 as i64;
+                ni += 1;
+            }
+        }
+        let ret: u128 = unsafe {
+            let [a, b, c, d, e, f, g, h] = ints;
+            let [p, q, r, s, t, u, v, w] = floats;
+            if fast.float_ret {
+                let fun: FloatFn = std::mem::transmute(self.address);
+                fun(a, b, c, d, e, f, g, h, p, q, r, s, t, u, v, w).to_bits() as u128
+            } else {
+                let fun: IntFn = std::mem::transmute(self.address);
+                fun(a, b, c, d, e, f, g, h, p, q, r, s, t, u, v, w) as u64 as u128
+            }
+        };
+        let result = unsafe { marshal::read(scope, st, &self.signature[0], &ret as *const u128 as *const u8, Mem::Temp)? };
+        cx.finish(scope, st)?;
+        Ok(result)
+    }
+}
+
+/// JS callback for C functions: `args.data()` points at the `CFunction`
+/// (kept alive by `State::functions`).
 pub fn c_function_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
-    let st = state(scope);
-    let Some(offset) = args.data().uint32_value(scope) else {
-        return;
-    };
-    let function = match function_for(&st, offset) {
-        Ok(f) => f,
-        Err(e) => return throw_error(scope, &e),
-    };
-    match function.call(scope, &st, &args) {
+    let Ok(ext) = v8::Local::<v8::External>::try_from(args.data()) else { return };
+    let function = unsafe { &*(ext.value() as *const CFunction) };
+    let st = unsafe { &*function.state };
+    match function.call(scope, st, &args) {
         Ok(v) => rv.set(v),
         Err(e) => throw_error(scope, &e),
     }

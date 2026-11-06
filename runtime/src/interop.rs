@@ -3,6 +3,7 @@
 
 use crate::ffi;
 use crate::marshal::{self, CallCx, Mem};
+use crate::handles::{self, Kind};
 use crate::structs;
 use crate::state::{state, State};
 use crate::throw_error;
@@ -18,10 +19,6 @@ pub mod keys {
         v8::Private::for_api(scope, Some(name))
     }
 
-    /// BigInt address of a Pointer
-    pub fn pointer<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#pointer")
-    }
     /// Keeps memory backing a Pointer / Reference alive (ArrayBuffer)
     pub fn owner<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
         key(scope, "ns#owner")
@@ -30,13 +27,6 @@ pub mod keys {
     pub fn type_tag<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
         key(scope, "ns#type")
     }
-    pub fn reference<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#reference")
-    }
-    /// BigInt address of a Reference's storage
-    pub fn storage<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#storage")
-    }
     /// Value of a Reference that has no storage yet
     pub fn pending<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
         key(scope, "ns#pending")
@@ -44,10 +34,6 @@ pub mod keys {
     /// Extra memory kept alive by a Reference (e.g. a C string it points to)
     pub fn keep<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
         key(scope, "ns#keep")
-    }
-    /// BigInt address of the memory behind a struct view
-    pub fn struct_address<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#struct")
     }
     /// Memory for a string stored in a struct field
     pub fn keep_field<'s>(scope: &v8::PinScope<'s, '_, ()>, field: &str) -> v8::Local<'s, v8::Private> {
@@ -85,9 +71,9 @@ fn bigint_usize(v: v8::Local<v8::Value>) -> Option<usize> {
 }
 
 /// Address held by an `interop.Pointer`.
-pub fn pointer_address<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
-    let key = keys::pointer(scope);
-    private_value(scope, v, key).and_then(bigint_usize)
+#[inline]
+pub fn pointer_address<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
+    handles::is(v, Kind::Pointer).map(handles::address)
 }
 
 pub fn new_pointer<'s>(
@@ -96,48 +82,26 @@ pub fn new_pointer<'s>(
     address: usize,
     owner: Option<v8::Local<'s, v8::Value>>,
 ) -> v8::Local<'s, v8::Object> {
-    let object = v8::Object::new(scope);
-    if let Some(proto) = st.pointer_prototype.borrow().as_ref() {
-        let proto = v8::Local::new(scope, proto);
-        object.set_prototype(scope, proto.into());
-    }
-    init_pointer(scope, object, address, owner);
+    let template = st.pointer_template.borrow().clone().expect("interop not installed");
+    let object = v8::Local::new(scope, template).new_instance(scope).unwrap();
+    handles::init(scope, object, Kind::Pointer, address, None, owner);
     object
 }
 
-fn init_pointer<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-    address: usize,
-    owner: Option<v8::Local<'s, v8::Value>>,
-) {
-    let key = keys::pointer(scope);
-    let value = v8::BigInt::new_from_u64(scope, address as u64);
-    object.set_private(scope, key, value.into());
-    if let Some(owner) = owner {
-        let key = keys::owner(scope);
-        object.set_private(scope, key, owner);
-    }
-}
-
-pub fn is_reference<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> bool {
-    let key = keys::reference(scope);
-    private_value(scope, v, key).is_some()
+#[inline]
+pub fn is_reference<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> bool {
+    handles::is(v, Kind::Reference).is_some()
 }
 
 /// Storage address of a Reference, if it has storage.
-pub fn reference_storage<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
-    if !is_reference(scope, v) {
-        return None;
-    }
-    let key = keys::storage(scope);
-    private_value(scope, v, key).and_then(bigint_usize)
+#[inline]
+pub fn reference_storage<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
+    handles::is(v, Kind::Reference).map(handles::address).filter(|a| *a != 0)
 }
 
-fn reference_type<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, v: v8::Local<'s, v8::Value>) -> Option<Type> {
-    let key = keys::type_tag(scope);
-    let index = private_value(scope, v, key)?.uint32_value(scope)?;
-    st.type_at(index)
+fn reference_type<'s>(_scope: &mut v8::PinScope<'s, '_>, st: &State, v: v8::Local<'s, v8::Value>) -> Option<Type> {
+    let o = handles::is(v, Kind::Reference)?;
+    st.type_at(handles::type_index(o)?)
 }
 
 /// Storage of a Reference passed for a `pointee*` argument, allocated on first use.
@@ -179,22 +143,17 @@ fn allocate_reference_storage<'s>(
 }
 
 fn set_reference_storage<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+    _scope: &mut v8::PinScope<'s, '_>,
     st: &State,
     object: v8::Local<'s, v8::Object>,
     ty: &Type,
     address: usize,
     owner: Option<v8::Local<'s, v8::Value>>,
 ) {
-    let tag = v8::Integer::new_from_unsigned(scope, st.register_type(ty.clone()));
-    let key = keys::type_tag(scope);
-    object.set_private(scope, key, tag.into());
-    let key = keys::storage(scope);
-    let addr = v8::BigInt::new_from_u64(scope, address as u64);
-    object.set_private(scope, key, addr.into());
+    handles::set_type(object, Some(st.register_type(ty)));
+    handles::set_address(object, address);
     if let Some(owner) = owner {
-        let key = keys::owner(scope);
-        object.set_private(scope, key, owner);
+        handles::set_owner(object, owner);
     }
 }
 
@@ -243,13 +202,16 @@ pub fn native_function_address<'s>(
 
 /// Type described by an `interop.types.*` value, a struct constructor or a struct value.
 pub fn type_from_value<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, v: v8::Local<'s, v8::Value>) -> Option<Type> {
+    if let Some((o, Kind::Struct)) = handles::of(v) {
+        return st.type_at(handles::type_index(o)?);
+    }
     let key = keys::type_tag(scope);
     let index = private_value(scope, v, key)?.uint32_value(scope)?;
     st.type_at(index)
 }
 
 pub fn tag_type<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, object: v8::Local<'s, v8::Object>, ty: Type) {
-    let tag = v8::Integer::new_from_unsigned(scope, st.register_type(ty));
+    let tag = v8::Integer::new_from_unsigned(scope, st.register_type(&ty));
     let key = keys::type_tag(scope);
     object.set_private(scope, key, tag.into());
 }
@@ -264,8 +226,7 @@ fn this_pointer<'s>(scope: &mut v8::PinScope<'s, '_>, args: &v8::FunctionCallbac
 }
 
 fn this_owner<'s>(scope: &mut v8::PinScope<'s, '_>, args: &v8::FunctionCallbackArguments<'s>) -> Option<v8::Local<'s, v8::Value>> {
-    let key = keys::owner(scope);
-    private_value(scope, args.this().into(), key)
+    handles::owner(scope, args.this())
 }
 
 fn address_from_value<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Result<usize, String> {
@@ -316,7 +277,7 @@ fn pointer_ctor<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv
         Err(e) => return throw_error(scope, &e),
     };
     if args.is_construct_call() {
-        init_pointer(scope, args.this(), address, None);
+        handles::init(scope, args.this(), Kind::Pointer, address, None, None);
     } else {
         let st = state(scope);
         rv.set(new_pointer(scope, &st, address, None).into());
@@ -375,6 +336,7 @@ fn pointer_equals<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: 
 
 fn pointer_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
     let tmpl = v8::FunctionTemplate::new(scope, pointer_ctor);
+    tmpl.instance_template(scope).set_internal_field_count(handles::FIELDS);
     let name = v8::String::new(scope, "Pointer").unwrap();
     tmpl.set_class_name(name);
     let proto: v8::Local<v8::Template> = tmpl.prototype_template(scope).into();
@@ -394,9 +356,7 @@ fn reference_ctor<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<
     }
     let st = state(scope);
     let this = args.this();
-    let key = keys::reference(scope);
-    let t = v8::Boolean::new(scope, true);
-    this.set_private(scope, key, t.into());
+    handles::init(scope, this, Kind::Reference, 0, None, None);
 
     let first = args.get(0);
     let result = match type_from_value(scope, &st, first) {
@@ -455,6 +415,7 @@ fn reference_set<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'
 
 fn reference_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
     let tmpl = v8::FunctionTemplate::new(scope, reference_ctor);
+    tmpl.instance_template(scope).set_internal_field_count(handles::FIELDS);
     let name = v8::String::new(scope, "Reference").unwrap();
     tmpl.set_class_name(name);
     let proto = tmpl.prototype_template(scope);
@@ -494,7 +455,7 @@ pub fn struct_constructor<'s>(
     name: &str,
     ty: Type,
 ) -> Option<v8::Local<'s, v8::Function>> {
-    let index = st.register_type(ty.clone());
+    let index = st.register_type(&ty);
     let data = v8::Integer::new_from_unsigned(scope, index);
     let f = v8::Function::builder(struct_ctor).data(data.into()).build(scope)?;
     let name = v8::String::new(scope, name).unwrap();
@@ -516,9 +477,9 @@ fn interop_free<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s
     let Some(addr) = pointer_address(scope, v) else {
         return throw_error(scope, "interop.free expects a Pointer");
     };
-    let key = keys::owner(scope);
     // memory from interop.alloc is garbage collected
-    if private_value(scope, v, key).is_none() {
+    let owned = handles::is(v, Kind::Pointer).and_then(|o| handles::owner(scope, o)).is_some();
+    if !owned {
         unsafe { libc::free(addr as *mut c_void) };
     }
 }
@@ -664,16 +625,14 @@ fn interop_buffer_from_data<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>
 pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, global: v8::Local<'s, v8::Object>) {
     let interop = v8::Object::new(scope);
 
-    let pointer = pointer_template(scope).get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto = pointer.get(scope, proto_key.into()).unwrap();
-    *st.pointer_prototype.borrow_mut() = Some(v8::Global::new(scope, v8::Local::<v8::Object>::try_from(proto).unwrap()));
+    let pointer_tmpl = pointer_template(scope);
+    let pointer = pointer_tmpl.get_function(scope).unwrap();
+    let instances = pointer_tmpl.instance_template(scope);
+    *st.pointer_template.borrow_mut() = Some(v8::Global::new(scope, instances));
     let key = v8::String::new(scope, "Pointer").unwrap();
     interop.set(scope, key.into(), pointer.into());
 
     let reference = reference_template(scope).get_function(scope).unwrap();
-    let proto = reference.get(scope, proto_key.into()).unwrap();
-    *st.reference_prototype.borrow_mut() = Some(v8::Global::new(scope, v8::Local::<v8::Object>::try_from(proto).unwrap()));
     let key = v8::String::new(scope, "Reference").unwrap();
     interop.set(scope, key.into(), reference.into());
 

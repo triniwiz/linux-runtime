@@ -15,15 +15,16 @@ pub struct State {
     /// dlopen handles per module (keyed by module offset)
     libraries: RefCell<HashMap<Offset, Vec<usize>>>,
     pub functions: RefCell<HashMap<Offset, Rc<CFunction>>>,
-    records: RefCell<HashMap<String, Rc<RecordLayout>>>,
+    records: RefCell<HashMap<Type, Rc<RecordLayout>>>,
     /// Types referenced from JS (interop.types.*, struct constructors, references)
     pub types: RefCell<Vec<Type>>,
+    type_index: RefCell<HashMap<Type, u32>>,
+    struct_arena: RefCell<Option<(v8::Global<v8::ArrayBuffer>, usize, usize)>>,
     /// libffi closures handed to C, kept alive for the lifetime of the runtime
     pub closures: RefCell<Vec<Box<ClosureData>>>,
-    pub pointer_prototype: RefCell<Option<v8::Global<v8::Object>>>,
-    pub reference_prototype: RefCell<Option<v8::Global<v8::Object>>>,
-    /// struct view classes, keyed by type index
-    pub struct_templates: RefCell<HashMap<u32, v8::Global<v8::FunctionTemplate>>>,
+    pub pointer_template: RefCell<Option<v8::Global<v8::ObjectTemplate>>>,
+    /// struct view instance templates, keyed by type index
+    pub struct_templates: RefCell<HashMap<u32, v8::Global<v8::ObjectTemplate>>>,
     pub main_context: crate::event_loop::MainContext,
     pub modules: RefCell<crate::modules::ModuleMap>,
     pub next_request: Cell<u32>,
@@ -59,9 +60,10 @@ impl State {
             functions: Default::default(),
             records: Default::default(),
             types: Default::default(),
+            type_index: Default::default(),
+            struct_arena: Default::default(),
             closures: Default::default(),
-            pointer_prototype: Default::default(),
-            reference_prototype: Default::default(),
+            pointer_template: Default::default(),
             struct_templates: Default::default(),
             main_context: crate::event_loop::MainContext::for_current_thread(),
             modules: Default::default(),
@@ -85,13 +87,39 @@ impl State {
     }
 
     /// Registers a type and returns its index (used to tag JS objects).
-    pub fn register_type(&self, ty: Type) -> u32 {
-        let mut types = self.types.borrow_mut();
-        if let Some(i) = types.iter().position(|t| *t == ty) {
-            return i as u32;
+    pub fn register_type(&self, ty: &Type) -> u32 {
+        if let Some(i) = self.type_index.borrow().get(ty) {
+            return *i;
         }
-        types.push(ty);
-        (types.len() - 1) as u32
+        let mut types = self.types.borrow_mut();
+        types.push(ty.clone());
+        let i = (types.len() - 1) as u32;
+        self.type_index.borrow_mut().insert(ty.clone(), i);
+        i
+    }
+
+    /// GC managed memory for small struct copies, bump allocated from a shared
+    /// ArrayBuffer (the returned owner keeps it alive).
+    pub fn struct_memory<'s>(&self, scope: &mut v8::PinScope<'s, '_>, size: usize) -> (v8::Local<'s, v8::ArrayBuffer>, usize) {
+        const ARENA: usize = 64 * 1024;
+        let size = size.max(1).div_ceil(16) * 16;
+        if size > ARENA / 8 {
+            let buffer = v8::ArrayBuffer::new(scope, size);
+            let addr = buffer.data().map(|p| p.as_ptr() as usize).unwrap_or(0);
+            return (buffer, addr);
+        }
+        let mut arena = self.struct_arena.borrow_mut();
+        if let Some((buffer, base, used)) = arena.as_mut() {
+            if *used + size <= ARENA {
+                let addr = *base + *used;
+                *used += size;
+                return (v8::Local::new(scope, &*buffer), addr);
+            }
+        }
+        let buffer = v8::ArrayBuffer::new(scope, ARENA);
+        let base = buffer.data().map(|p| p.as_ptr() as usize).unwrap_or(0);
+        *arena = Some((v8::Global::new(scope, buffer), base, size));
+        (buffer, base)
     }
 
     pub fn type_at(&self, index: u32) -> Option<Type> {
@@ -149,9 +177,12 @@ impl State {
 
     /// Layout of a struct / union type (named or anonymous).
     pub fn record(&self, ty: &Type) -> Result<Rc<RecordLayout>, String> {
-        let (key, union) = match ty {
-            Type::Struct(name) => (format!("s:{name}"), false),
-            Type::Union(name) => (format!("u:{name}"), true),
+        if let Some(layout) = self.records.borrow().get(ty) {
+            return Ok(layout.clone());
+        }
+        let (name, union) = match ty {
+            Type::Struct(name) => (name, false),
+            Type::Union(name) => (name, true),
             Type::AnonymousStruct(fields, layout) => {
                 return Ok(Rc::new(self.compute_record(fields.clone(), false, layout.as_ref())?))
             }
@@ -160,10 +191,6 @@ impl State {
             }
             other => return Err(format!("{other:?} is not a record type")),
         };
-        if let Some(layout) = self.records.borrow().get(&key) {
-            return Ok(layout.clone());
-        }
-        let name = &key[2..];
         let meta = self
             .meta
             .find(name)
@@ -176,7 +203,7 @@ impl State {
             .map(|(n, t)| (n.into_owned(), t))
             .collect();
         let layout = Rc::new(self.compute_record(fields, union, meta.record_layout().as_ref())?);
-        self.records.borrow_mut().insert(key, layout.clone());
+        self.records.borrow_mut().insert(ty.clone(), layout.clone());
         Ok(layout)
     }
 

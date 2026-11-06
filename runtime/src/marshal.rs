@@ -4,7 +4,7 @@ use crate::interop;
 use crate::state::{Field, State};
 use crate::{ffi, longdouble, structs};
 use nativescript_metadata::Type;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
 /// Where memory being read comes from, decides how records are exposed.
 #[derive(Clone, Copy)]
@@ -17,26 +17,57 @@ pub enum Mem<'s> {
     Live(Option<v8::Local<'s, v8::Value>>),
 }
 
-/// Temporaries that must outlive a native call.
-#[derive(Default)]
+const INLINE: usize = 64; // 1 KiB of u128
+
+/// Temporaries that must outlive a native call. Small calls allocate nothing.
 pub struct CallCx<'s> {
-    strings: Vec<CString>,
-    buffers: Vec<Vec<u128>>,
+    inline: [std::mem::MaybeUninit<u128>; INLINE],
+    used: usize,
+    heap: Vec<Box<[u128]>>,
     /// structs passed by pointer from plain JS objects, copied back after the call
     copy_back: Vec<(v8::Local<'s, v8::Object>, Type, *mut u8)>,
 }
 
+impl Default for CallCx<'_> {
+    fn default() -> Self {
+        CallCx { inline: [std::mem::MaybeUninit::uninit(); INLINE], used: 0, heap: Vec::new(), copy_back: Vec::new() }
+    }
+}
+
 impl<'s> CallCx<'s> {
     /// Zeroed, 16-byte aligned scratch memory that lives until the call returns.
+    #[inline]
     pub fn scratch(&mut self, size: usize) -> *mut u8 {
-        let mut buf = vec![0u128; size.div_ceil(16).max(1)];
-        let ptr = buf.as_mut_ptr() as *mut u8;
-        self.buffers.push(buf);
+        let n = size.div_ceil(16).max(1);
+        let ptr = if self.used + n <= INLINE {
+            let p = self.inline[self.used..].as_mut_ptr() as *mut u8;
+            self.used += n;
+            p
+        } else {
+            let mut buf = vec![0u128; n].into_boxed_slice();
+            let p = buf.as_mut_ptr() as *mut u8;
+            self.heap.push(buf);
+            return p;
+        };
+        unsafe { std::ptr::write_bytes(ptr, 0, n * 16) };
         ptr
+    }
+
+    /// NUL terminated UTF-8 copy of a JS string.
+    #[inline]
+    fn c_string(&mut self, scope: &mut v8::PinScope<'s, '_>, s: v8::Local<'s, v8::String>) -> *mut u8 {
+        let len = s.utf8_length(scope);
+        let p = self.scratch(len + 1);
+        let out = unsafe { std::slice::from_raw_parts_mut(p, len) };
+        s.write_utf8_v2(scope, out, v8::WriteFlags::kReplaceInvalidUtf8, None);
+        p
     }
 
     /// Writes structs that were passed by pointer back into their JS objects.
     pub fn finish(self, scope: &mut v8::PinScope<'s, '_>, st: &State) -> Result<(), String> {
+        if self.copy_back.is_empty() {
+            return Ok(());
+        }
         for (object, ty, ptr) in self.copy_back {
             let record = st.record(&ty)?;
             for field in record.fields.iter().filter(|f| !f.name.is_empty()) {
@@ -217,12 +248,8 @@ pub unsafe fn write<'s>(
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, 16);
         }
         Type::CString | Type::ConstCString => {
-            let addr = if value.is_string() {
-                let s = value.to_rust_string_lossy(scope);
-                let c = CString::new(s).map_err(|_| "string contains a NUL character".to_string())?;
-                let p = c.as_ptr() as usize;
-                cx.strings.push(c);
-                p
+            let addr = if let Ok(s) = v8::Local::<v8::String>::try_from(value) {
+                cx.c_string(scope, s) as usize
             } else {
                 pointer_like(scope, st, &Type::Char, value)
                     .ok_or_else(|| type_error("a string, Pointer, Reference, ArrayBuffer or null", ty))?
@@ -318,16 +345,14 @@ fn pointer_like<'s>(
     if value.is_null_or_undefined() {
         return Some(0);
     }
-    if let Some(addr) = interop::pointer_address(scope, value) {
+    if let Some(addr) = buffer_address(value) {
         return Some(addr);
     }
-    if let Some(addr) = structs::address(scope, value) {
-        return Some(addr);
+    match crate::handles::of(value) {
+        Some((o, crate::handles::Kind::Pointer | crate::handles::Kind::Struct)) => Some(crate::handles::address(o)),
+        Some((_, crate::handles::Kind::Reference)) => interop::reference_ensure_storage(scope, st, value, pointee).ok(),
+        None => None,
     }
-    if interop::is_reference(scope, value) {
-        return interop::reference_ensure_storage(scope, st, value, pointee).ok();
-    }
-    buffer_address(value)
 }
 
 /// Value passed for a `T*` parameter.
@@ -342,12 +367,10 @@ unsafe fn pointer_arg<'s>(
         return Ok(addr);
     }
     // conveniences: strings for char* / void*, plain objects for struct pointers
-    if value.is_string() && matches!(pointee, Type::Char | Type::UChar | Type::Void) {
-        let s = value.to_rust_string_lossy(scope);
-        let c = CString::new(s).map_err(|_| "string contains a NUL character".to_string())?;
-        let p = c.as_ptr() as usize;
-        cx.strings.push(c);
-        return Ok(p);
+    if matches!(pointee, Type::Char | Type::UChar | Type::Void) {
+        if let Ok(s) = v8::Local::<v8::String>::try_from(value) {
+            return Ok(cx.c_string(scope, s) as usize);
+        }
     }
     if value.is_object() && !value.is_function() {
         if let Ok(record) = st.record(pointee) {
@@ -400,15 +423,21 @@ pub unsafe fn read<'s>(
             v8::Number::new(scope, (src as *const $t).read_unaligned() as f64).into()
         };
     }
+    // small integers are Smis, no heap number
+    macro_rules! int {
+        ($t:ty) => {
+            v8::Integer::new(scope, (src as *const $t).read_unaligned() as i32).into()
+        };
+    }
     Ok(match ty {
         Type::Void => v8::undefined(scope).into(),
         Type::Bool => v8::Boolean::new(scope, *src != 0).into(),
-        Type::Char => num!(i8),
-        Type::UChar => num!(u8),
-        Type::Short => num!(i16),
-        Type::UShort | Type::Unichar => num!(u16),
-        Type::Int => num!(i32),
-        Type::UInt => num!(u32),
+        Type::Char => int!(i8),
+        Type::UChar => int!(u8),
+        Type::Short => int!(i16),
+        Type::UShort | Type::Unichar => int!(u16),
+        Type::Int => int!(i32),
+        Type::UInt => v8::Integer::new_from_unsigned(scope, (src as *const u32).read_unaligned()).into(),
         Type::Float => num!(f32),
         Type::Double => num!(f64),
         Type::Long | Type::LongLong => number_or_bigint(scope, (src as *const i64).read_unaligned()),

@@ -4,6 +4,7 @@
 mod event_loop;
 mod ffi;
 mod globals;
+mod handles;
 mod interop;
 mod longdouble;
 mod marshal;
