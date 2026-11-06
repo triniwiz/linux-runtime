@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["metadata", "core", "runtime", "cli"]
+members = ["metadata", "core", "runtime", "cli", "napi", "engines/quickjs"]
 
 [workspace.package]
 version = "0.1.0"

@@ -264,7 +264,7 @@ pub fn load_addon<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path)
         instance_data: None,
         cleanup_hooks: Vec::new(),
         finalizers: Rc::new(RefCell::new(Vec::new())),
-        filename: CString::new(crate::modules::path_to_file_url(path)).unwrap_or_default(),
+        filename: CString::new(nativescript_core::resolve::path_to_file_url(path)).unwrap_or_default(),
         callbacks: Vec::new(),
     });
     let env_ptr: napi_env = &mut *env;

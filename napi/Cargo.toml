@@ -1,0 +1,12 @@
+[package]
+name = "nativescript-napi"
+description = "NativeScript Linux runtime written against Node-API (engine independent)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nativescript-core.workspace = true
+nativescript-metadata.workspace = true
+libffi.workspace = true
+libc.workspace = true

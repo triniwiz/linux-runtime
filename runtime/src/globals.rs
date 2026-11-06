@@ -117,11 +117,11 @@ fn resolve<'s>(
 }
 
 const PRELUDES: [(&str, &str); 5] = [
-    ("nativescript:prelude", include_str!("js/prelude.js")),
-    ("nativescript:web", include_str!("js/web.js")),
-    ("nativescript:net", include_str!("js/net.js")),
-    ("nativescript:workers", include_str!("js/workers.js")),
-    ("nativescript:hmr", include_str!("js/hmr.js")),
+    ("nativescript:prelude", include_str!("../../core/js/prelude.js")),
+    ("nativescript:web", include_str!("../../core/js/web.js")),
+    ("nativescript:net", include_str!("../../core/js/net.js")),
+    ("nativescript:workers", include_str!("../../core/js/workers.js")),
+    ("nativescript:hmr", include_str!("../../core/js/hmr.js")),
 ];
 
 /// Runs the JS preludes (console, web APIs, process...).

@@ -617,6 +617,8 @@ dependencies = [
  "libffi",
  "nativescript-metadata",
  "pkg-config",
+ "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -624,6 +626,23 @@ name = "nativescript-metadata"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+]
+
+[[package]]
+name = "nativescript-napi"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "libffi",
+ "nativescript-core",
+ "nativescript-metadata",
+]
+
+[[package]]
+name = "nativescript-quickjs"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

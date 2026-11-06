@@ -86,7 +86,7 @@ impl V8InspectorClientImpl for Client {
         if !name.starts_with('/') {
             return None;
         }
-        let url = crate::modules::path_to_file_url(std::path::Path::new(&name));
+        let url = nativescript_core::resolve::path_to_file_url(std::path::Path::new(&name));
         Some(StringBuffer::create(StringView::from(url.as_bytes())))
     }
 }
