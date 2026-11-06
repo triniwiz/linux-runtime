@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: ns-linux [--metadata <metadata.bin>] <script.js> | -e <code>");
+    eprintln!("usage: ns-linux [--metadata <metadata.bin>] [--inspect[-brk][=port]] <script.js> | -e <code>");
     ExitCode::from(2)
 }
 
@@ -26,10 +26,15 @@ fn main() -> ExitCode {
     let mut script = None;
     let mut eval = None;
     let mut rest = Vec::new();
+    let mut inspect = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             _ if script.is_some() || eval.is_some() => rest.push(arg),
             "--metadata" => metadata = args.next().map(PathBuf::from),
+            a if a.starts_with("--inspect") => {
+                let port = a.split_once('=').and_then(|(_, p)| p.parse().ok()).unwrap_or(9229);
+                inspect = Some((port, a.starts_with("--inspect-brk")));
+            }
             "-e" | "--eval" => eval = args.next(),
             "-h" | "--help" => return usage(),
             _ => script = Some(PathBuf::from(arg)),
@@ -65,6 +70,13 @@ fn main() -> ExitCode {
     }
     argv.extend(rest);
     runtime.set_argv(&argv);
+    if let Some((port, wait)) = inspect {
+        let title = script.as_ref().map(|s| s.display().to_string()).unwrap_or_else(|| "[eval]".into());
+        if let Err(e) = runtime.start_inspector(port, wait, &title) {
+            eprintln!("ns-linux: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     let result = match (eval, script) {
         (Some(code), _) => runtime.run_script(&code, "[eval]"),
         (None, Some(path)) => runtime.run_file(path),

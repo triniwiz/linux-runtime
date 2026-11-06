@@ -102,12 +102,18 @@
 
   const counts = new Map();
   const timers = new Map();
+  // V8's console reports to the inspector (DevTools)
+  const devtools = g.console;
+  const out = (method, stream, args) => {
+    print(stream, format(args));
+    devtools?.[method]?.(...args);
+  };
   const console = {
-    log: (...args) => print(1, format(args)),
-    info: (...args) => print(1, format(args)),
-    debug: (...args) => print(1, format(args)),
-    warn: (...args) => print(2, format(args)),
-    error: (...args) => print(2, format(args)),
+    log: (...args) => out('log', 1, args),
+    info: (...args) => out('info', 1, args),
+    debug: (...args) => out('debug', 1, args),
+    warn: (...args) => out('warn', 2, args),
+    error: (...args) => out('error', 2, args),
     dir: (value) => print(1, inspect(value, 0, [], true)),
     trace: (...args) => print(2, `Trace: ${format(args)}\n${new Error().stack.split('\n').slice(2).join('\n')}`),
     assert: (cond, ...args) => {

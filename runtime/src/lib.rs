@@ -5,6 +5,7 @@ mod event_loop;
 mod ffi;
 mod globals;
 mod handles;
+mod inspector;
 mod interop;
 mod longdouble;
 mod marshal;
@@ -133,6 +134,16 @@ impl Runtime {
         Ok(())
     }
 
+    /// Starts the DevTools inspector on `port`. With `wait`, blocks until a
+    /// frontend attaches and pauses on the first statement.
+    pub fn start_inspector(&mut self, port: u16, wait: bool, title: &str) -> Result<(), String> {
+        inspector::start(&self.state, port, title)?;
+        if wait {
+            inspector::wait_for_debugger(&self.state);
+        }
+        Ok(())
+    }
+
     /// Sets `process.argv`.
     pub fn set_argv(&mut self, argv: &[String]) {
         v8::scope!(let scope, &mut **self.isolate);
@@ -206,6 +217,7 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         workers::shutdown(&self.state);
+        self.state.inspector.borrow_mut().take();
         if !self.state.napi_envs.borrow().is_empty() {
             event_loop::with_js(&self.state, |_| napi::teardown(&self.state));
         }

@@ -34,6 +34,7 @@ pub struct State {
     pub workers: RefCell<HashMap<u32, std::sync::Arc<crate::workers::Link>>>,
     pub worker_dispatch: RefCell<Option<v8::Global<v8::Function>>>,
     pub napi_envs: RefCell<Vec<Box<crate::napi::Env>>>,
+    pub inspector: RefCell<Option<crate::inspector::Inspector>>,
     pub napi_addons: RefCell<HashMap<std::path::PathBuf, v8::Global<v8::Value>>>,
     /// set in worker runtimes
     pub parent: RefCell<Option<crate::workers::Parent>>,
@@ -75,6 +76,7 @@ impl State {
             worker_dispatch: Default::default(),
             parent: Default::default(),
             napi_envs: Default::default(),
+            inspector: Default::default(),
             napi_addons: Default::default(),
             timers: Default::default(),
             next_timer: Cell::new(0),
