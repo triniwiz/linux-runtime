@@ -163,9 +163,21 @@ pub fn is_url(p: &Path) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+static APP_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Root for `~/` specifiers (the app folder), set when the entry runs.
+pub fn set_app_root(path: &Path) {
+    *APP_ROOT.write().unwrap() = Some(path.to_path_buf());
+}
+
 pub fn resolve(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
     if spec.starts_with("http://") || spec.starts_with("https://") {
         return Ok(PathBuf::from(spec));
+    }
+    // NativeScript app-relative specifiers
+    if let Some(rest) = spec.strip_prefix("~/") {
+        let root = APP_ROOT.read().unwrap().clone().unwrap_or_else(|| base.to_path_buf());
+        return resolve_path(&root.join(rest)).ok_or_else(|| format!("Cannot find module '{spec}' from '{}'", root.display()));
     }
     // relative imports inside a remote module
     if is_url(base) && (spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../")) {
@@ -235,7 +247,11 @@ pub fn strip_shebang(src: String) -> String {
 pub fn entry_point(path: &Path) -> Result<PathBuf, String> {
     let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if path.is_dir() {
+        set_app_root(&path);
         return resolve_path(&path).ok_or_else(|| format!("{}: no package.json \"main\" or index.js", path.display()));
+    }
+    if APP_ROOT.read().unwrap().is_none() {
+        set_app_root(&dir_of(&path));
     }
     Ok(path)
 }

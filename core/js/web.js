@@ -333,7 +333,17 @@
     toJSON: () => ({ timeOrigin: natives.timeOrigin }),
   };
   define('performance', performance);
+  // NativeScript runtimes extend WeakRef with get() / clear()
+  if (!WeakRef.prototype.get) {
+    Object.defineProperty(WeakRef.prototype, 'get', { value: WeakRef.prototype.deref, writable: true, configurable: true });
+    Object.defineProperty(WeakRef.prototype, 'clear', { value() {}, writable: true, configurable: true });
+  }
   // @nativescript/core runtime hooks
+  // native timers, kept when core replaces the globals
+  define('__ns__setTimeout', g.setTimeout);
+  define('__ns__setInterval', g.setInterval);
+  define('__ns__clearTimeout', g.clearTimeout);
+  define('__ns__clearInterval', g.clearInterval);
   define('__time', natives.now);
   define('__collect', natives.gc || (() => {}));
 
