@@ -636,6 +636,7 @@ dependencies = [
  "libffi",
  "nativescript-core",
  "nativescript-metadata",
+ "url",
 ]
 
 [[package]]
@@ -643,6 +644,7 @@ name = "nativescript-quickjs"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "nativescript-napi",
 ]
 
 [[package]]

@@ -430,7 +430,7 @@
     arch: natives.arch || 'x64',
     pid: natives.pid,
     version: 'v22.0.0',
-    versions: { nativescript: '0.1.0', v8: natives.v8 },
+    versions: { nativescript: '0.1.0', ...(natives.v8 ? { v8: natives.v8 } : {}), ...(natives.engine ? { [natives.engine]: natives.engineVersion || '' } : {}) },
     exitCode: undefined,
     cwd: natives.cwd,
     chdir: natives.chdir,

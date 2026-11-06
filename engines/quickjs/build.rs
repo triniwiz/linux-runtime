@@ -7,6 +7,8 @@ fn main() {
         .include(&qjs)
         .files(["quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c", "cutils.c"].map(|f| qjs.join(f)))
         .define("_GNU_SOURCE", None)
+        // no leak dumps on stdout at exit
+        .define("NDEBUG", None)
         .std("c11")
         .opt_level(2)
         .warnings(false)

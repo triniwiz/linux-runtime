@@ -275,15 +275,8 @@ pub fn run_on_js_thread(context: usize, f: Box<dyn FnOnce() + '_>) {
         job.cv.notify_all();
         0
     }
-    unsafe {
-        g_main_context_invoke_full(
-            context as gpointer,
-            G_PRIORITY_DEFAULT,
-            dispatch,
-            &job as *const Job as gpointer,
-            None,
-        )
-    };
+    // not g_main_context_invoke: it runs inline on this thread when the context is free
+    queue(context, dispatch, &job as *const Job as gpointer);
     let mut done = job.done.lock().unwrap();
     while !*done {
         done = job.cv.wait(done).unwrap();

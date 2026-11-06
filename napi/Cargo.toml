@@ -10,3 +10,8 @@ nativescript-core.workspace = true
 nativescript-metadata.workspace = true
 libffi.workspace = true
 libc.workspace = true
+url = "2"
+
+[features]
+# node_api.h functions for engines whose shim lacks them
+compat = []

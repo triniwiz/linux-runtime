@@ -109,6 +109,8 @@ impl Runtime {
 
     /// Runs a classic script. Uncaught exceptions are printed and returned as `Err`.
     pub fn run_script(&mut self, source: &str, name: &str) -> Result<(), String> {
+        // includes errors thrown by C -> JS callbacks
+        let before = self.state.uncaught.get();
         v8::scope!(let scope, &mut **self.isolate);
         let context = v8::Local::new(scope, &self.context);
         let scope = &mut v8::ContextScope::new(scope, context);
@@ -124,13 +126,12 @@ impl Runtime {
             return Err(text);
         }
         if ran.is_some() {
-            let before = self.state.uncaught.get();
             event_loop::checkpoint(tc, &self.state);
-            if self.state.uncaught.get() != before {
-                return Err("unhandled promise rejection".into());
-            }
         }
-        Ok(())
+        match self.state.uncaught.get() - before {
+            0 => Ok(()),
+            n => Err(format!("{n} uncaught error(s)")),
+        }
     }
 
     /// Starts the DevTools inspector on `port`. With `wait`, blocks until a
@@ -196,6 +197,7 @@ impl Runtime {
     pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
         let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let before = self.state.uncaught.get();
         v8::scope!(let scope, &mut **self.isolate);
         let context = v8::Local::new(scope, &self.context);
         let scope = &mut v8::ContextScope::new(scope, context);
@@ -209,12 +211,11 @@ impl Runtime {
             eprintln!("Error: {e}");
             return Err(e);
         }
-        let before = self.state.uncaught.get();
         event_loop::checkpoint(tc, &self.state);
-        if self.state.uncaught.get() != before {
-            return Err("unhandled promise rejection".into());
+        match self.state.uncaught.get() - before {
+            0 => Ok(()),
+            n => Err(format!("{n} uncaught error(s)")),
         }
-        Ok(())
     }
 }
 
