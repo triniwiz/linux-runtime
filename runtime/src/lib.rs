@@ -10,6 +10,7 @@ mod marshal;
 mod modules;
 mod napi;
 mod natives;
+mod net;
 mod state;
 mod structs;
 

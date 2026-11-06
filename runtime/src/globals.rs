@@ -111,15 +111,17 @@ fn resolve<'s>(
     }))
 }
 
-const PRELUDES: [(&str, &str); 2] = [
+const PRELUDES: [(&str, &str); 3] = [
     ("nativescript:prelude", include_str!("js/prelude.js")),
     ("nativescript:web", include_str!("js/web.js")),
+    ("nativescript:net", include_str!("js/net.js")),
 ];
 
 /// Runs the JS preludes (console, web APIs, process...).
 pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>) -> Result<(), String> {
     let argv: Vec<String> = std::env::args().collect();
     let natives = crate::natives::create(scope, &argv);
+    crate::net::install(scope, natives);
     for (name, code) in PRELUDES {
         let source = v8::String::new(scope, code).unwrap();
         let name = v8::String::new(scope, name).unwrap();

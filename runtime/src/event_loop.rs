@@ -350,3 +350,31 @@ pub fn run_on_js_thread(context: usize, f: Box<dyn FnOnce() + '_>) {
         done = job.cv.wait(done).unwrap();
     }
 }
+
+type Completion = Box<dyn for<'s, 'i> FnOnce(&mut v8::PinScope<'s, 'i>, &State) + Send>;
+
+/// Keeps the loop alive until a `post` with `release` runs.
+pub fn begin_pending(st: &State) {
+    st.loop_refs.set(st.loop_refs.get() + 1);
+}
+
+/// Runs `f` on the JS thread owning `context`, from any thread.
+pub fn post(context: usize, release: bool, f: Completion) {
+    struct Job {
+        release: bool,
+        f: Completion,
+    }
+    unsafe extern "C" fn dispatch(data: gpointer) -> gboolean {
+        let job = Box::from_raw(data as *mut Job);
+        if let Some(st) = current() {
+            if job.release {
+                st.loop_refs.set((st.loop_refs.get() - 1).max(0));
+            }
+            let f = job.f;
+            with_js(&st, |scope| f(scope, &st));
+        }
+        0
+    }
+    let data = Box::into_raw(Box::new(Job { release, f })) as gpointer;
+    unsafe { g_main_context_invoke_full(context as gpointer, G_PRIORITY_DEFAULT, dispatch, data, None) };
+}

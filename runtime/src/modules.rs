@@ -172,13 +172,24 @@ pub fn path_to_file_url(path: &Path) -> String {
     url
 }
 
+fn is_url(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
 pub fn resolve(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
+    if spec.starts_with("http://") || spec.starts_with("https://") {
+        return Ok(PathBuf::from(spec));
+    }
+    // relative imports inside a remote module
+    if is_url(base) && (spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../")) {
+        let base = url::Url::parse(&format!("{}/", base.to_string_lossy())).map_err(|e| e.to_string())?;
+        return base.join(spec).map(|u| PathBuf::from(u.as_str())).map_err(|e| e.to_string());
+    }
     let found = if spec.starts_with("file://") {
         resolve_path(&file_url_to_path(spec))
     } else if spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == ".." {
         resolve_path(&base.join(spec))
-    } else if spec.starts_with("http://") || spec.starts_with("https://") {
-        return Err(format!("Cannot import '{spec}': URL imports aren't supported yet"));
     } else {
         resolve_package(spec, base, kind)
     };
@@ -194,6 +205,9 @@ fn looks_like_esm(source: &str) -> bool {
 }
 
 pub fn format_of(path: &Path) -> Format {
+    if is_url(path) {
+        return Format::Esm;
+    }
     match path.extension().and_then(|e| e.to_str()) {
         Some("mjs") => Format::Esm,
         Some("cjs") => Format::CommonJs,
@@ -218,7 +232,11 @@ pub fn format_of(path: &Path) -> Format {
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let src = if is_url(path) {
+        crate::net::fetch_text(&path.to_string_lossy())?
+    } else {
+        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?
+    };
     Ok(if src.starts_with("#!") { format!("//{src}") } else { src })
 }
 
@@ -377,8 +395,9 @@ pub fn dynamic_import<'s>(
     let promise = resolver.get_promise(scope);
     let st = state(scope);
     let spec = specifier.to_rust_string_lossy(scope);
-    let referrer = file_url_to_path(&resource.to_rust_string_lossy(scope));
-    let base = if referrer.is_absolute() {
+    let referrer = resource.to_rust_string_lossy(scope);
+    let referrer = if referrer.starts_with("http") { PathBuf::from(referrer) } else { file_url_to_path(&referrer) };
+    let base = if referrer.is_absolute() || is_url(&referrer) {
         dir_of(&referrer)
     } else {
         std::env::current_dir().unwrap_or_default()
@@ -434,8 +453,9 @@ pub unsafe extern "C" fn import_meta(context: v8::Local<v8::Context>, module: v8
         return;
     };
     let dir = dir_of(&path);
+    let url = if is_url(&path) { path.to_string_lossy().into_owned() } else { path_to_file_url(&path) };
     for (k, v) in [
-        ("url", path_to_file_url(&path)),
+        ("url", url),
         ("filename", path.to_string_lossy().into_owned()),
         ("dirname", dir.to_string_lossy().into_owned()),
     ] {
