@@ -610,6 +610,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nativescript-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "libffi",
+ "nativescript-metadata",
+ "pkg-config",
+]
+
+[[package]]
 name = "nativescript-metadata"
 version = "0.1.0"
 dependencies = [
@@ -622,8 +632,8 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "libffi",
+ "nativescript-core",
  "nativescript-metadata",
- "pkg-config",
  "serde_json",
  "tungstenite",
  "ureq",

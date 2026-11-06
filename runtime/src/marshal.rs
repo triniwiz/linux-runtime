@@ -1,8 +1,10 @@
 //! Conversions between JS values and C memory.
 
 use crate::interop;
-use crate::state::{Field, State};
-use crate::{ffi, longdouble, structs};
+use crate::state::State;
+use nativescript_core::Field;
+use crate::{ffi, structs};
+use nativescript_core::longdouble;
 use nativescript_metadata::Type;
 use std::ffi::CStr;
 

@@ -230,7 +230,7 @@ pub fn load_addon<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path)
     PENDING_MODULE.with(|m| m.borrow_mut().take());
     let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
     if handle.is_null() {
-        return Err(Some(format!("{}: {}", path.display(), crate::state::dlerror())));
+        return Err(Some(format!("{}: {}", path.display(), nativescript_core::dlerror())));
     }
     let sym = |name: &str| {
         let name = CString::new(name).unwrap();

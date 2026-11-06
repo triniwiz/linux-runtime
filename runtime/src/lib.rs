@@ -7,7 +7,6 @@ mod globals;
 mod handles;
 mod inspector;
 mod interop;
-mod longdouble;
 mod marshal;
 mod modules;
 mod napi;

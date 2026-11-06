@@ -4,108 +4,30 @@ use crate::interop::keys;
 use crate::marshal::{self, CallCx, Mem};
 use crate::state::{state, State};
 use crate::{report_exception, throw_error};
-use libffi::middle::{Cif, Type as FfiType};
 use libffi::raw;
+use nativescript_core::call::{CallDesc, FastCall};
+use nativescript_core::closure::Closure;
 use nativescript_metadata::Type;
 use std::ffi::c_void;
 use std::rc::Rc;
 
-/// A C function with a prepared call interface.
+/// A C function bound to a runtime.
 pub struct CFunction {
-    pub name: String,
-    pub address: usize,
-    /// return type first
-    pub signature: Vec<Type>,
-    pub variadic: bool,
-    /// prepared once for non variadic functions
-    cif: Option<Cif>,
-    /// argument slot sizes and the return slot size (non variadic)
-    slots: Vec<usize>,
-    ret_size: usize,
+    desc: CallDesc,
     /// owning runtime, avoids the isolate slot lookup per call
     state: *const State,
-    /// register-only call without libffi, when the signature allows it
-    fast: Option<FastCall>,
 }
 
-/// Int and float args use separate register sequences (x86_64 SysV, AArch64): one
-/// fn type taking all registers calls any signature that fits in them.
-#[derive(Clone)]
-struct FastCall {
-    /// per argument: true = float register
-    float_args: Vec<bool>,
-    float_ret: bool,
-}
-
-#[cfg(target_arch = "x86_64")]
-const INT_REGS: usize = 6;
-#[cfg(target_arch = "aarch64")]
-const INT_REGS: usize = 8;
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-const INT_REGS: usize = 0;
-const FLOAT_REGS: usize = 8;
-
-type IntFn = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, f64, f64, f64, f64, f64, f64, f64, f64) -> i64;
-type FloatFn = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64;
-
-impl FastCall {
-    fn new(signature: &[Type]) -> Option<Self> {
-        let class = |t: &Type| -> Option<bool> {
-            match t {
-                Type::Float | Type::Double => Some(true),
-                Type::Bool | Type::Char | Type::UChar | Type::Short | Type::UShort | Type::Unichar | Type::Int | Type::UInt => Some(false),
-                Type::Long | Type::ULong | Type::LongLong | Type::ULongLong => Some(false),
-                t if t.is_pointer_like() => Some(false),
-                _ => None,
-            }
-        };
-        let float_ret = if signature[0].is_void() { false } else { class(&signature[0])? };
-        let float_args = signature[1..].iter().map(class).collect::<Option<Vec<_>>>()?;
-        let floats = float_args.iter().filter(|f| **f).count();
-        (INT_REGS > 0 && float_args.len() - floats <= INT_REGS.min(6) && floats <= FLOAT_REGS).then_some(FastCall { float_args, float_ret })
-    }
-}
-
-/// Arguments of type `T[N]` decay to `T*`.
-fn decay(ty: &Type) -> Type {
-    match ty {
-        Type::ConstantArray(_, inner) => Type::Pointer(inner.clone()),
-        other => other.clone(),
+impl std::ops::Deref for CFunction {
+    type Target = CallDesc;
+    fn deref(&self) -> &CallDesc {
+        &self.desc
     }
 }
 
 impl CFunction {
     pub fn new(st: &State, name: &str, address: usize, signature: Vec<Type>, variadic: bool) -> Result<Self, String> {
-        let signature: Vec<Type> = signature.iter().map(decay).collect();
-        let cif = if variadic {
-            None
-        } else {
-            Some(Self::prep(st, &signature, None)?)
-        };
-        let fast = if variadic { None } else { FastCall::new(&signature) };
-        let slots = signature[1..].iter().map(|t| st.layout(t).map(|l| l.size.max(8))).collect::<Result<_, _>>()?;
-        // small integer returns are widened to ffi_arg by libffi
-        let ret_size = st.layout(&signature[0])?.size.max(16);
-        Ok(CFunction {
-            name: name.to_owned(),
-            address,
-            signature,
-            variadic,
-            cif,
-            slots,
-            ret_size,
-            state: st,
-            fast,
-        })
-    }
-
-    fn prep(st: &State, signature: &[Type], fixed: Option<usize>) -> Result<Cif, String> {
-        let ret = st.ffi_type(&signature[0])?;
-        let args = signature[1..].iter().map(|t| st.ffi_type(t)).collect::<Result<Vec<_>, _>>()?;
-        Ok(match fixed {
-            Some(fixed) => Cif::new_variadic(args, fixed, ret),
-            None => Cif::new(args, ret),
-        })
+        Ok(CFunction { desc: CallDesc::new(st, name, address, signature, variadic)?, state: st })
     }
 
     /// C type used for a variadic argument, inferred from the JS value
@@ -170,10 +92,10 @@ impl CFunction {
                 sig.push(Self::vararg_type(scope, args.get(i as i32))?);
             }
             variadic_sig = sig;
-            variadic_cif = Self::prep(st, &variadic_sig, Some(fixed))?;
+            variadic_cif = CallDesc::prep(st, &variadic_sig, Some(fixed))?;
             (&variadic_sig[..], &variadic_cif)
         } else {
-            (&self.signature[..], self.cif.as_ref().unwrap())
+            (&self.signature[..], self.cif().unwrap())
         };
 
         let mut cx = CallCx::default();
@@ -199,14 +121,7 @@ impl CFunction {
         let ret_ty = &signature[0];
         let ret = cx.scratch(if self.variadic { st.layout(ret_ty)?.size.max(16) } else { self.ret_size });
 
-        unsafe {
-            raw::ffi_call(
-                cif.as_raw_ptr(),
-                Some(std::mem::transmute::<usize, unsafe extern "C" fn()>(self.address)),
-                ret as *mut c_void,
-                argv.as_mut_ptr(),
-            );
-        }
+        unsafe { self.desc.call(cif, argv, ret) };
 
         let result = unsafe { marshal::read(scope, st, ret_ty, ret, Mem::Temp)? };
         cx.finish(scope, st)?;
@@ -239,17 +154,7 @@ impl CFunction {
                 ni += 1;
             }
         }
-        let ret: u128 = unsafe {
-            let [a, b, c, d, e, f, g, h] = ints;
-            let [p, q, r, s, t, u, v, w] = floats;
-            if fast.float_ret {
-                let fun: FloatFn = std::mem::transmute(self.address);
-                fun(a, b, c, d, e, f, g, h, p, q, r, s, t, u, v, w).to_bits() as u128
-            } else {
-                let fun: IntFn = std::mem::transmute(self.address);
-                fun(a, b, c, d, e, f, g, h, p, q, r, s, t, u, v, w) as u64 as u128
-            }
-        };
+        let ret = unsafe { self.desc.call_fast(fast.float_ret, ints, floats) };
         let result = unsafe { marshal::read(scope, st, &self.signature[0], &ret as *const u128 as *const u8, Mem::Temp)? };
         cx.finish(scope, st)?;
         Ok(result)
@@ -353,14 +258,7 @@ pub struct ClosureData {
     main_context: usize,
     signature: Vec<Type>,
     state: *const State,
-    cif: Cif,
-    closure: *mut raw::ffi_closure,
-}
-
-impl Drop for ClosureData {
-    fn drop(&mut self) {
-        unsafe { raw::ffi_closure_free(self.closure as *mut c_void) };
-    }
+    closure: Option<Closure>,
 }
 
 /// C function pointer calling `function`; cached per signature, freed by `interop.release`.
@@ -376,38 +274,16 @@ pub fn closure_for<'s>(
             return Ok(b.u64_value().0 as usize);
         }
     }
-
-    let ret = st.ffi_type(&signature[0])?;
-    let args: Vec<FfiType> = signature[1..].iter().map(|t| st.ffi_type(t)).collect::<Result<_, _>>()?;
-    let cif = Cif::new(args, ret);
-
-    let mut code: *mut c_void = std::ptr::null_mut();
-    let closure = unsafe { raw::ffi_closure_alloc(std::mem::size_of::<raw::ffi_closure>(), &mut code) }
-        as *mut raw::ffi_closure;
-    if closure.is_null() {
-        return Err("ffi_closure_alloc failed".into());
-    }
     let mut data = Box::new(ClosureData {
         function: v8::Global::new(scope, function),
         main_context: st.main_context.context,
         signature: signature.to_vec(),
         state: st as *const State,
-        cif,
-        closure,
+        closure: None,
     });
-    let status = unsafe {
-        raw::ffi_prep_closure_loc(
-            closure,
-            data.cif.as_raw_ptr(),
-            Some(closure_trampoline),
-            &mut *data as *mut ClosureData as *mut c_void,
-            code,
-        )
-    };
-    if status != raw::ffi_status_FFI_OK {
-        return Err(format!("ffi_prep_closure_loc failed ({status})"));
-    }
-    let address = code as usize;
+    let closure = Closure::new(st, signature, closure_trampoline, &mut *data as *mut ClosureData as *mut c_void)?;
+    let address = closure.code as usize;
+    data.closure = Some(closure);
     st.closures.borrow_mut().push(data);
     let value = v8::BigInt::new_from_u64(scope, address as u64);
     function.set_private(scope, key, value.into());

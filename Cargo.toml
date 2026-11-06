@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["metadata", "runtime", "cli"]
+members = ["metadata", "core", "runtime", "cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 nativescript-metadata = { path = "metadata" }
+nativescript-core = { path = "core" }
 nativescript-runtime = { path = "runtime" }
 v8 = "147"
 libffi = "5.1.0"

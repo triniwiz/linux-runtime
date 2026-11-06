@@ -5,38 +5,10 @@
 use crate::state::{state, State};
 use crate::{report_exception, throw_error};
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::{Condvar, Mutex};
 
-#[allow(non_camel_case_types)]
-type gboolean = i32;
-#[allow(non_camel_case_types)]
-type gpointer = *mut c_void;
-type SourceFunc = unsafe extern "C" fn(gpointer) -> gboolean;
-
-const G_PRIORITY_DEFAULT: i32 = 0;
-
-extern "C" {
-    fn g_main_context_default() -> gpointer;
-    fn g_main_context_new() -> gpointer;
-    fn g_main_context_ref(context: gpointer) -> gpointer;
-    fn g_main_context_unref(context: gpointer);
-    fn g_main_context_get_thread_default() -> gpointer;
-    fn g_main_context_push_thread_default(context: gpointer);
-    fn g_main_context_pop_thread_default(context: gpointer);
-    fn g_main_context_iteration(context: gpointer, may_block: gboolean) -> gboolean;
-    fn g_main_context_invoke_full(context: gpointer, priority: i32, func: SourceFunc, data: gpointer, notify: Option<unsafe extern "C" fn(gpointer)>);
-    fn g_timeout_source_new(interval: u32) -> gpointer;
-    fn g_idle_source_new() -> gpointer;
-    fn g_source_set_callback(source: gpointer, func: SourceFunc, data: gpointer, notify: Option<unsafe extern "C" fn(gpointer)>);
-    fn g_source_set_priority(source: gpointer, priority: i32);
-    fn g_source_attach(source: gpointer, context: gpointer) -> u32;
-    fn g_source_destroy(source: gpointer);
-    fn g_source_unref(source: gpointer);
-    fn g_main_current_source() -> gpointer;
-    fn g_source_get_context(source: gpointer) -> gpointer;
-}
+use nativescript_core::glib::*;
 
 pub struct Timer {
     function: v8::Global<v8::Function>,
@@ -52,41 +24,7 @@ impl Drop for Timer {
     }
 }
 
-/// The GMainContext JS runs on for this thread: the process default on the
-/// main thread (GTK needs it there), a new thread-default context elsewhere.
-pub struct MainContext {
-    pub context: usize,
-    pushed: bool,
-}
-
-impl MainContext {
-    pub fn for_current_thread() -> Self {
-        unsafe {
-            let is_main = libc::getpid() == libc::gettid();
-            let existing = g_main_context_get_thread_default();
-            if !existing.is_null() {
-                return MainContext { context: g_main_context_ref(existing) as usize, pushed: false };
-            }
-            if is_main {
-                return MainContext { context: g_main_context_ref(g_main_context_default()) as usize, pushed: false };
-            }
-            let context = g_main_context_new();
-            g_main_context_push_thread_default(context);
-            MainContext { context: context as usize, pushed: true }
-        }
-    }
-}
-
-impl Drop for MainContext {
-    fn drop(&mut self) {
-        unsafe {
-            if self.pushed {
-                g_main_context_pop_thread_default(self.context as gpointer);
-            }
-            g_main_context_unref(self.context as gpointer);
-        }
-    }
-}
+pub use nativescript_core::glib::MainContext;
 
 fn attach(source: gpointer, priority: i32, func: SourceFunc, data: gpointer, st: &State) {
     unsafe {
@@ -391,17 +329,6 @@ pub fn post(context: usize, release: bool, f: Completion) {
     queue(context, dispatch, data);
 }
 
-/// Always deferred, unlike g_main_context_invoke which runs inline when the
-/// caller can acquire the context.
-fn queue(context: usize, func: SourceFunc, data: gpointer) {
-    unsafe {
-        let source = g_idle_source_new();
-        g_source_set_priority(source, G_PRIORITY_DEFAULT);
-        g_source_set_callback(source, func, data, None);
-        g_source_attach(source, context as gpointer);
-        g_source_unref(source);
-    }
-}
 
 /// Runs `f` on the thread owning `context` without entering JS.
 pub fn post_state(context: usize, f: Box<dyn FnOnce(&State) + Send>) {
