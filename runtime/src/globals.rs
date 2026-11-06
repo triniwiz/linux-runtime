@@ -116,11 +116,12 @@ fn resolve<'s>(
     }))
 }
 
-const PRELUDES: [(&str, &str); 4] = [
+const PRELUDES: [(&str, &str); 5] = [
     ("nativescript:prelude", include_str!("js/prelude.js")),
     ("nativescript:web", include_str!("js/web.js")),
     ("nativescript:net", include_str!("js/net.js")),
     ("nativescript:workers", include_str!("js/workers.js")),
+    ("nativescript:hmr", include_str!("js/hmr.js")),
 ];
 
 /// Runs the JS preludes (console, web APIs, process...).
@@ -129,6 +130,7 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State) -> Result<(), S
     let natives = crate::natives::create(scope, &argv);
     crate::net::install(scope, natives);
     crate::workers::install(scope, st, natives);
+    crate::modules::install_hmr(scope, natives);
     for (name, code) in PRELUDES {
         let source = v8::String::new(scope, code).unwrap();
         let name = v8::String::new(scope, name).unwrap();

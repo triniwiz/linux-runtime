@@ -144,6 +144,11 @@ impl Runtime {
         Ok(())
     }
 
+    /// Files of the modules loaded so far (to watch for changes).
+    pub fn loaded_files(&self) -> Vec<std::path::PathBuf> {
+        modules::loaded_files(&self.state)
+    }
+
     /// Sets `process.argv`.
     pub fn set_argv(&mut self, argv: &[String]) {
         v8::scope!(let scope, &mut **self.isolate);

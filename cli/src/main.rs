@@ -1,9 +1,11 @@
+mod watch;
+
 use nativescript_runtime::{MetaFile, Runtime};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: ns-linux [--metadata <metadata.bin>] [--inspect[-brk][=port]] <script.js> | -e <code>");
+    eprintln!("usage: ns-linux [--metadata <metadata.bin>] [--inspect[-brk][=port]] [--watch] <script.js> | -e <code>");
     ExitCode::from(2)
 }
 
@@ -27,6 +29,7 @@ fn main() -> ExitCode {
     let mut eval = None;
     let mut rest = Vec::new();
     let mut inspect = None;
+    let mut watch = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             _ if script.is_some() || eval.is_some() => rest.push(arg),
@@ -37,11 +40,17 @@ fn main() -> ExitCode {
             }
             "-e" | "--eval" => eval = args.next(),
             "-h" | "--help" => return usage(),
+            "--watch" => watch = true,
             _ => script = Some(PathBuf::from(arg)),
         }
     }
     if script.is_none() && eval.is_none() {
         return usage();
+    }
+    if watch {
+        let Some(script) = &script else { return usage() };
+        let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--watch").collect();
+        return watch::run(script, args);
     }
 
     let Some(metadata) = find_metadata(metadata) else {

@@ -603,3 +603,103 @@ pub fn run_entry<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) 
         Format::Json | Format::Addon => Err(Some(format!("{} isn't a script", path.display()))),
     }
 }
+
+// ---------- HMR / LiveSync primitives ----------
+
+/// Drops `path` from the module caches so the next import/require reloads it.
+pub fn invalidate(st: &State, path: &Path) {
+    let mut map = st.modules.borrow_mut();
+    if let Some(m) = map.esm.remove(path) {
+        map.paths.retain(|_, p| p != path);
+        drop(m);
+    }
+    map.cjs.remove(path);
+    map.resolutions.retain(|_, p| p != path);
+}
+
+pub fn clear(st: &State) {
+    let mut map = st.modules.borrow_mut();
+    map.esm.clear();
+    map.paths.clear();
+    map.resolutions.clear();
+    map.cjs.clear();
+}
+
+/// Files of every loaded module (for watchers).
+pub fn loaded_files(st: &State) -> Vec<PathBuf> {
+    let map = st.modules.borrow();
+    map.esm.keys().chain(map.cjs.keys()).filter(|p| !is_url(p)).cloned().collect()
+}
+
+type Args<'s> = v8::FunctionCallbackArguments<'s>;
+type Rv<'s> = v8::ReturnValue<'s, v8::Value>;
+
+/// hmrResolve(specifier, parentPath?) -> absolute path
+fn hmr_resolve<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let spec = args.get(0).to_rust_string_lossy(scope);
+    let parent = if args.get(1).is_string() { args.get(1).to_rust_string_lossy(scope) } else { String::new() };
+    let base = if parent.is_empty() { std::env::current_dir().unwrap_or_default() } else { dir_of(Path::new(&parent)) };
+    match resolve(&spec, &base, Kind::Import) {
+        Ok(p) => rv.set(str(scope, &p.to_string_lossy()).into()),
+        Err(e) => throw_error(scope, &e),
+    }
+}
+
+fn hmr_invalidate<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    let st = state(scope);
+    let path = args.get(0).to_rust_string_lossy(scope);
+    invalidate(&st, Path::new(&path));
+}
+
+fn hmr_clear<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, _rv: Rv<'s>) {
+    clear(&state(scope));
+}
+
+/// hmrLoad(path) -> exports / namespace, (re)loading after invalidation
+fn hmr_load<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let path = PathBuf::from(args.get(0).to_rust_string_lossy(scope));
+    match require_any(scope, &st, &path) {
+        Ok(v) => rv.set(v),
+        Err(Some(e)) => throw_error(scope, &e),
+        Err(None) => {}
+    }
+}
+
+fn read_text<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let path = args.get(0).to_rust_string_lossy(scope);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => rv.set(str(scope, &text).into()),
+        Err(e) => throw_error(scope, &format!("{path}: {e}")),
+    }
+}
+
+/// copyFile(source, destination), creating the destination directory
+fn copy_file<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    let src = args.get(0).to_rust_string_lossy(scope);
+    let dst = PathBuf::from(args.get(1).to_rust_string_lossy(scope));
+    let result = dst
+        .parent()
+        .map(std::fs::create_dir_all)
+        .unwrap_or(Ok(()))
+        .and_then(|_| std::fs::copy(&src, &dst).map(|_| ()));
+    if let Err(e) = result {
+        throw_error(scope, &format!("copy {src} -> {}: {e}", dst.display()));
+    }
+}
+
+pub fn install_hmr<'s>(scope: &mut v8::PinScope<'s, '_>, natives: v8::Local<'s, v8::Object>) {
+    macro_rules! set {
+        ($name:literal, $f:expr) => {{
+            let f = v8::Function::new(scope, $f).unwrap();
+            let k = str(scope, $name);
+            natives.set(scope, k.into(), f.into());
+        }};
+    }
+    set!("hmrResolve", hmr_resolve);
+    set!("hmrInvalidate", hmr_invalidate);
+    set!("hmrClear", hmr_clear);
+    set!("hmrLoad", hmr_load);
+    set!("readText", read_text);
+    set!("copyFile", copy_file);
+}

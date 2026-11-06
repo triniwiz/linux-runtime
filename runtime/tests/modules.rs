@@ -50,3 +50,27 @@ fn errors_are_reported() {
     assert!(rt.run_file(dir.join("bad.mjs")).unwrap_err().contains("Cannot find module"));
     assert!(rt.run_file(dir.join("throws.mjs")).unwrap_err().contains("top level"));
 }
+
+#[test]
+fn hmr_and_livesync() {
+    let Some(mut rt) = runtime() else { return };
+    let dir = std::env::temp_dir().join(format!("ns-hmr-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = dir.join("value.js");
+    std::fs::write(&module, "module.exports = 1;").unwrap();
+    std::fs::write(dir.join("build.js"), "module.exports = 3;").unwrap();
+    let m = module.display();
+    let d = dir.display();
+    let out = rt
+        .eval_to_string(&format!(
+            r#"
+        const a = require('{m}');
+        nativescript.hmr.invalidate('{m}');
+        nativescript.livesync.sync('{d}/build.js', '{m}');
+        const b = require('{m}');
+        [a, b, nativescript.hmr.applyFromFile('{m}')].join(',');
+    "#
+        ))
+        .unwrap();
+    assert_eq!(out, "1,3,3");
+}

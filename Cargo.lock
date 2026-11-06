@@ -604,6 +604,7 @@ dependencies = [
 name = "nativescript-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "nativescript-metadata",
  "nativescript-runtime",
 ]
