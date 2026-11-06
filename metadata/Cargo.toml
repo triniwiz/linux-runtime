@@ -1,0 +1,9 @@
+[package]
+name = "nativescript-metadata"
+description = "Reader for the binary metadata produced by the NativeScript metadata generator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memmap2.workspace = true

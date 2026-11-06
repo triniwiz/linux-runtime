@@ -1,0 +1,12 @@
+[package]
+name = "nativescript-runtime"
+description = "NativeScript runtime for Linux (V8 + C interop driven by generated metadata)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nativescript-metadata.workspace = true
+v8.workspace = true
+libffi.workspace = true
+libc.workspace = true
