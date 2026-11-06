@@ -608,17 +608,27 @@ fn interop_release<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv:
     rv.set(v8::Integer::new(scope, released as i32).into());
 }
 
+/// `interop.bufferFromData(ptr, length, free?)`: zero-copy ArrayBuffer; `free` (e.g. g_free) runs on GC.
 fn interop_buffer_from_data<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
     let Some(addr) = pointer_address(scope, args.get(0)) else {
         return throw_error(scope, "interop.bufferFromData expects a Pointer and a length");
     };
     let len = args.get(1).integer_value(scope).unwrap_or(0).max(0) as usize;
-    unsafe extern "C" fn no_free(_: *mut c_void, _: usize, _: *mut c_void) {}
-    // the memory is not owned by the buffer
-    let store = unsafe {
-        v8::ArrayBuffer::new_backing_store_from_ptr(addr as *mut c_void, len, no_free, std::ptr::null_mut())
+    let free = match v8::Local::<v8::Function>::try_from(args.get(2)) {
+        Ok(f) => match native_function_address(scope, &st, f) {
+            Some(a) => a,
+            None => return throw_error(scope, "the free function must be a native function such as free or g_free"),
+        },
+        Err(_) => 0,
+    };
+    unsafe extern "C" fn release(data: *mut c_void, _: usize, free: *mut c_void) {
+        if !free.is_null() {
+            let free: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(free);
+            free(data);
+        }
     }
-    .make_shared();
+    let store = unsafe { v8::ArrayBuffer::new_backing_store_from_ptr(addr as *mut c_void, len, release, free as *mut c_void) }.make_shared();
     rv.set(v8::ArrayBuffer::with_backing_store(scope, &store).into());
 }
 
