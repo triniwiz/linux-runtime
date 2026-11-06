@@ -25,6 +25,7 @@ pub struct State {
     /// struct view classes, keyed by type index
     pub struct_templates: RefCell<HashMap<u32, v8::Global<v8::FunctionTemplate>>>,
     pub main_context: crate::event_loop::MainContext,
+    pub modules: RefCell<crate::modules::ModuleMap>,
     pub timers: RefCell<HashMap<u32, crate::event_loop::Timer>>,
     pub next_timer: Cell<u32>,
     pub loop_refs: Cell<i32>,
@@ -53,6 +54,7 @@ impl State {
             reference_prototype: Default::default(),
             struct_templates: Default::default(),
             main_context: crate::event_loop::MainContext::for_current_thread(),
+            modules: Default::default(),
             timers: Default::default(),
             next_timer: Cell::new(0),
             loop_refs: Cell::new(0),

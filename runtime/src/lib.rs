@@ -7,6 +7,8 @@ mod globals;
 mod interop;
 mod longdouble;
 mod marshal;
+mod modules;
+mod napi;
 mod state;
 mod structs;
 
@@ -39,6 +41,8 @@ impl Runtime {
         isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 50);
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         isolate.set_promise_reject_callback(event_loop::promise_reject_callback);
+        isolate.set_host_import_module_dynamically_callback(modules::dynamic_import);
+        isolate.set_host_initialize_import_meta_object_callback(modules::import_meta);
         let state = Rc::new(State::new(metadata));
         state.isolate.set(&mut **isolate as *mut v8::Isolate);
         isolate.set_slot(state.clone());
@@ -58,6 +62,11 @@ impl Runtime {
             let global = context.global(scope);
             interop::install(scope, &state, global);
             event_loop::install(scope, global);
+            let cwd = std::env::current_dir().unwrap_or_default();
+            if let Some(require) = modules::require_function(scope, &cwd) {
+                let key = v8::String::new(scope, "require").unwrap();
+                global.set(scope, key.into(), require.into());
+            }
             v8::tc_scope!(let tc, scope);
             if let Err(e) = globals::install(tc) {
                 if let Some(exception) = tc.exception() {
@@ -104,6 +113,23 @@ impl Runtime {
         Ok(())
     }
 
+    /// Evaluates `source` and returns the result as a string.
+    pub fn eval_to_string(&mut self, source: &str) -> Result<String, String> {
+        v8::scope!(let scope, &mut **self.isolate);
+        let context = v8::Local::new(scope, &self.context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        v8::tc_scope!(let tc, scope);
+        let source = v8::String::new(tc, source).ok_or("script too large")?;
+        let value = v8::Script::compile(tc, source, None).and_then(|s| s.run(tc));
+        match value {
+            Some(v) => Ok(v.to_rust_string_lossy(tc)),
+            None => {
+                let e = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default();
+                Err(e)
+            }
+        }
+    }
+
     /// Runs timers and other pending work until nothing keeps the loop alive.
     /// Returns an error if uncaught errors were reported meanwhile.
     pub fn run_event_loop(&mut self) -> Result<(), String> {
@@ -115,30 +141,30 @@ impl Runtime {
         }
     }
 
+    /// Runs a file as an ES module or CommonJS module (by extension,
+    /// package.json "type" or syntax).
     pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
-        let source = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        // allow `#!/usr/bin/env ns-linux` scripts
-        let source = if source.starts_with("#!") {
-            format!("//{source}")
-        } else {
-            source
-        };
-        let name = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let dir = name.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        self.set_global_string("__filename", &name.to_string_lossy());
-        self.set_global_string("__dirname", &dir);
-        self.run_script(&source, &name.to_string_lossy())
-    }
-
-    fn set_global_string(&mut self, key: &str, value: &str) {
+        let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
         v8::scope!(let scope, &mut **self.isolate);
         let context = v8::Local::new(scope, &self.context);
         let scope = &mut v8::ContextScope::new(scope, context);
-        let global = context.global(scope);
-        let key = v8::String::new(scope, key).unwrap();
-        let value = v8::String::new(scope, value).unwrap();
-        global.set(scope, key.into(), value.into());
+        v8::tc_scope!(let tc, scope);
+        let outcome = modules::run_entry(tc, &self.state, &path);
+        if let Some(exception) = tc.exception() {
+            let message = tc.message();
+            return Err(report_exception(tc, exception, message));
+        }
+        if let Err(Some(e)) = outcome {
+            eprintln!("Error: {e}");
+            return Err(e);
+        }
+        let before = self.state.uncaught.get();
+        event_loop::checkpoint(tc, &self.state);
+        if self.state.uncaught.get() != before {
+            return Err("unhandled promise rejection".into());
+        }
+        Ok(())
     }
 }
 
