@@ -4,17 +4,20 @@
 # Usage: scripts/pack-npm.sh [version]
 #   METADATA=<metadata.bin dir>  default: metadata-generator/tests/TestOutput
 #   TYPINGS=<typings dir>        default: $METADATA/typings
+#   MDG=<generator bin dir>      metadata-generator + lib/clang, for app/plugin native code
 #
 # Layout (see nativescript-cli lib/services/linux-project-service.ts):
 #   framework/__PROJECT_NAME__/app
 #   framework/runtime/<x64|arm64>/ns-linux, metadata-<x86_64|aarch64>.bin
 #   framework/typings/*.d.ts
+#   framework/tools/<x64|arm64>/metadata-generator, lib/clang/<version>/include
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:-$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "nativescript-runtime"))')}"
 METADATA="${METADATA:-metadata-generator/tests/TestOutput}"
 TYPINGS="${TYPINGS:-$METADATA/typings}"
+MDG="${MDG:-metadata-generator/build/bin}"
 RUST_ARCH="$(uname -m)"
 case "$RUST_ARCH" in
     x86_64) ARCH=x64 ;;
@@ -35,6 +38,14 @@ pack() {
     strip "$out/framework/runtime/$ARCH/ns-linux"
     cp "$METADATA/metadata-$RUST_ARCH.bin" "$out/framework/runtime/$ARCH/"
     cp "$TYPINGS"/*.d.ts "$out/framework/typings/" 2>/dev/null || true
+    if [ -x "$MDG/metadata-generator" ]; then
+        mkdir -p "$out/framework/tools/$ARCH/lib"
+        install -m 755 "$MDG/metadata-generator" "$out/framework/tools/$ARCH/"
+        strip "$out/framework/tools/$ARCH/metadata-generator"
+        cp -r "$MDG/lib/clang" "$out/framework/tools/$ARCH/lib/"
+    else
+        echo "warning: no metadata generator in $MDG, app/plugin native code won't build" >&2
+    fi
     cat > "$out/package.json" <<JSON
 {
   "name": "@nativescript/$name",
