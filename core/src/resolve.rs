@@ -183,14 +183,133 @@ pub fn is_url(p: &Path) -> bool {
 
 static APP_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 
+/// Dev loader settings (`ns:module` `configureLoader`, sent by the Vite dev server).
+#[derive(Default)]
+struct Loader {
+    /// import map entries, longest key first
+    imports: Vec<(String, String)>,
+    /// URLs containing one of these are re-fetched on every import
+    volatile: Vec<String>,
+    strip_params: Vec<String>,
+    for_prefixes: Vec<String>,
+    preserve_query: Vec<String>,
+}
+
+static LOADER: std::sync::RwLock<Option<Loader>> = std::sync::RwLock::new(None);
+
+/// `{ importMap: { imports }, volatilePatterns?, canonicalization? }`
+pub fn configure_loader(config: &serde_json::Value) {
+    let strings = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut imports: Vec<(String, String)> = config["importMap"]["imports"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    imports.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    let c = &config["canonicalization"];
+    *LOADER.write().unwrap() = Some(Loader {
+        imports,
+        volatile: strings(&config["volatilePatterns"]),
+        strip_params: strings(&c["stripParams"]),
+        for_prefixes: strings(&c["forPathPrefixes"]),
+        preserve_query: strings(&c["preserveQueryFor"]),
+    });
+}
+
+/// Import map target of a bare specifier (exact key, or the longest `prefix/` key).
+fn import_map(spec: &str) -> Option<String> {
+    let loader = LOADER.read().unwrap();
+    loader.as_ref()?.imports.iter().find_map(|(key, target)| {
+        if key == spec {
+            Some(target.clone())
+        } else if key.ends_with('/') {
+            spec.strip_prefix(key.as_str())
+                .map(|rest| format!("{target}{rest}"))
+        } else {
+            None
+        }
+    })
+}
+
+/// Whether `url` must be fetched and evaluated again on every import.
+pub fn is_volatile(path: &Path) -> bool {
+    let url = path.to_string_lossy();
+    LOADER
+        .read()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|l| l.volatile.iter().any(|p| url.contains(p.as_str())))
+}
+
+/// Module registry key of a dev server URL: no fragment, no cache-buster
+/// params, sorted query (unless the query is the module's identity).
+pub fn canonical(path: PathBuf) -> PathBuf {
+    if !is_url(&path) {
+        return path;
+    }
+    let loader = LOADER.read().unwrap();
+    let Ok(mut url) = url::Url::parse(&path.to_string_lossy()) else {
+        return path;
+    };
+    url.set_fragment(None);
+    if let Some(l) = loader.as_ref() {
+        let route = url.path();
+        let normalize = l.for_prefixes.iter().any(|p| route.starts_with(p.as_str()))
+            && !l.preserve_query.iter().any(|p| route.contains(p.as_str()));
+        if normalize && url.query().is_some() {
+            let mut pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .filter(|(k, _)| !l.strip_params.iter().any(|s| s == k))
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            pairs.sort();
+            if pairs.is_empty() {
+                url.set_query(None);
+            } else {
+                url.query_pairs_mut().clear().extend_pairs(pairs);
+            }
+        }
+    }
+    PathBuf::from(String::from(url))
+}
+
+/// Builtin modules (`ns:module`), resolved by the engine.
+pub fn is_builtin(path: &Path) -> bool {
+    path.to_string_lossy().starts_with("ns:")
+}
+
 /// Root for `~/` specifiers (the app folder), set when the entry runs.
 pub fn set_app_root(path: &Path) {
     *APP_ROOT.write().unwrap() = Some(path.to_path_buf());
 }
 
 pub fn resolve(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
-    if spec.starts_with("http://") || spec.starts_with("https://") {
+    resolve_uncanonical(spec, base, kind).map(|p| if is_volatile(&p) { p } else { canonical(p) })
+}
+
+fn resolve_uncanonical(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
+    if spec.starts_with("http://") || spec.starts_with("https://") || spec.starts_with("ns:") {
         return Ok(PathBuf::from(spec));
+    }
+    let bare = !(spec.starts_with('/')
+        || spec.starts_with('.')
+        || spec.starts_with("~/")
+        || spec.starts_with("file:"));
+    if bare {
+        if let Some(target) = import_map(spec) {
+            return resolve_uncanonical(&target, base, kind);
+        }
     }
     // NativeScript app-relative specifiers
     if let Some(rest) = spec.strip_prefix("~/") {

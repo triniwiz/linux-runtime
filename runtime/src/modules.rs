@@ -22,6 +22,8 @@ pub struct ModuleMap {
     synthetic_exports: HashMap<i32, Vec<(String, v8::Global<v8::Value>)>>,
     /// CommonJS `module` objects
     cjs: HashMap<PathBuf, v8::Global<v8::Object>>,
+    /// `ns:module` (dev host API for tooling)
+    builtin: Option<v8::Global<v8::Object>>,
 }
 
 fn str<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> v8::Local<'s, v8::String> {
@@ -56,42 +58,57 @@ pub fn load<'s>(
     st: &State,
     path: &Path,
 ) -> Load<v8::Local<'s, v8::Module>> {
-    if let Some(m) = st.modules.borrow().esm.get(path) {
-        return Ok(v8::Local::new(scope, m));
+    if !is_volatile(path) {
+        if let Some(m) = st.modules.borrow().esm.get(path) {
+            return Ok(v8::Local::new(scope, m));
+        }
     }
-    let module = match format_of(path) {
-        Format::Esm => {
-            let source = read_source(path)?;
-            let source =
-                v8::String::new(scope, &source).ok_or(Some("module too large".to_string()))?;
-            let origin = origin(scope, path, true);
-            let mut source = v8::script_compiler::Source::new(source, Some(&origin));
-            v8::script_compiler::compile_module(scope, &mut source).ok_or(None)?
+    let module = if is_builtin(path) {
+        let exports = builtin(scope, st, path)?;
+        let mut pairs = vec![("default".to_owned(), exports.into())];
+        if let Some(keys) = exports.get_own_property_names(scope, Default::default()) {
+            for i in 0..keys.length() {
+                let k = keys.get_index(scope, i).unwrap();
+                let v = exports.get(scope, k).unwrap();
+                pairs.push((k.to_rust_string_lossy(scope), v));
+            }
         }
-        Format::Json => {
-            let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-            let text = str(scope, &text);
-            let value = v8::json::parse(scope, text).ok_or(None)?;
-            synthetic(scope, st, path, vec![("default".into(), value)])
-        }
-        Format::CommonJs => {
-            let exports = require_cjs(scope, st, path)?;
-            let mut pairs = vec![("default".to_owned(), exports)];
-            if let Some(obj) = exports.to_object(scope).filter(|_| exports.is_object()) {
-                if let Some(keys) = obj.get_own_property_names(scope, Default::default()) {
-                    for i in 0..keys.length() {
-                        let k = keys.get_index(scope, i).unwrap();
-                        let name = k.to_rust_string_lossy(scope);
-                        if name != "default" {
-                            let v = obj.get(scope, k).unwrap();
-                            pairs.push((name, v));
+        synthetic(scope, st, path, pairs)
+    } else {
+        match format_of(path) {
+            Format::Esm => {
+                let source = read_source(path)?;
+                let source =
+                    v8::String::new(scope, &source).ok_or(Some("module too large".to_string()))?;
+                let origin = origin(scope, path, true);
+                let mut source = v8::script_compiler::Source::new(source, Some(&origin));
+                v8::script_compiler::compile_module(scope, &mut source).ok_or(None)?
+            }
+            Format::Json => {
+                let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+                let text = str(scope, &text);
+                let value = v8::json::parse(scope, text).ok_or(None)?;
+                synthetic(scope, st, path, vec![("default".into(), value)])
+            }
+            Format::CommonJs => {
+                let exports = require_cjs(scope, st, path)?;
+                let mut pairs = vec![("default".to_owned(), exports)];
+                if let Some(obj) = exports.to_object(scope).filter(|_| exports.is_object()) {
+                    if let Some(keys) = obj.get_own_property_names(scope, Default::default()) {
+                        for i in 0..keys.length() {
+                            let k = keys.get_index(scope, i).unwrap();
+                            let name = k.to_rust_string_lossy(scope);
+                            if name != "default" {
+                                let v = obj.get(scope, k).unwrap();
+                                pairs.push((name, v));
+                            }
                         }
                     }
                 }
+                synthetic(scope, st, path, pairs)
             }
-            synthetic(scope, st, path, pairs)
+            Format::Addon => return Err(Some("native addons can't be imported yet".into())),
         }
-        Format::Addon => return Err(Some("native addons can't be imported yet".into())),
     };
     let hash = module.get_identity_hash().get();
     {
@@ -401,11 +418,27 @@ pub fn require_cjs<'s>(
     Ok(module.get(scope, key.into()).unwrap())
 }
 
+/// Builtin module object (`ns:module`).
+fn builtin<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    path: &Path,
+) -> Load<v8::Local<'s, v8::Object>> {
+    let map = st.modules.borrow();
+    match (path.to_string_lossy().as_ref(), map.builtin.as_ref()) {
+        ("ns:module", Some(o)) => Ok(v8::Local::new(scope, o)),
+        (name, _) => Err(Some(format!("Cannot find module '{name}'"))),
+    }
+}
+
 fn require_any<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     st: &State,
     path: &Path,
 ) -> Load<v8::Local<'s, v8::Value>> {
+    if is_builtin(path) {
+        return builtin(scope, st, path).map(Into::into);
+    }
     match format_of(path) {
         Format::CommonJs => require_cjs(scope, st, path),
         Format::Json => {
@@ -593,6 +626,74 @@ fn copy_file<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) 
     }
 }
 
+// ---------- ns:module (dev host API, see @nativescript/vite browser-runtime-contract.ts) ----------
+
+/// Path or registry key of a module URL (`file:` URLs become paths).
+fn module_key(url: &str) -> PathBuf {
+    if url.starts_with("file:") {
+        file_url_to_path(url)
+    } else {
+        canonical(PathBuf::from(url))
+    }
+}
+
+fn dev_configure<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    let json = args.get(0).to_rust_string_lossy(scope);
+    match serde_json::from_str(&json) {
+        Ok(config) => configure_loader(&config),
+        Err(e) => throw_error(scope, &format!("configureLoader: {e}")),
+    }
+}
+
+fn dev_invalidate<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    let st = state(scope);
+    let Ok(urls) = v8::Local::<v8::Array>::try_from(args.get(0)) else {
+        return;
+    };
+    for i in 0..urls.length() {
+        let url = urls
+            .get_index(scope, i)
+            .unwrap()
+            .to_rust_string_lossy(scope);
+        invalidate(&st, &module_key(&url));
+    }
+}
+
+fn dev_loaded<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let urls: Vec<String> = {
+        let map = st.modules.borrow();
+        map.esm
+            .keys()
+            .chain(map.cjs.keys())
+            .filter(|p| !is_builtin(p))
+            .map(|p| {
+                if is_url(p) {
+                    p.to_string_lossy().into_owned()
+                } else {
+                    path_to_file_url(p)
+                }
+            })
+            .collect()
+    };
+    let items: Vec<v8::Local<v8::Value>> = urls.iter().map(|u| str(scope, u).into()).collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// createRequire(fileOrUrl): `require` relative to that module
+fn dev_create_require<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let file = module_key(&args.get(0).to_rust_string_lossy(scope));
+    if let Some(f) = require_function(scope, &dir_of(&file)) {
+        rv.set(f.into());
+    }
+}
+
+fn dev_set_builtin<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    if let Ok(o) = v8::Local::<v8::Object>::try_from(args.get(0)) {
+        state(scope).modules.borrow_mut().builtin = Some(v8::Global::new(scope, o));
+    }
+}
+
 pub fn install_hmr<'s>(scope: &mut v8::PinScope<'s, '_>, natives: v8::Local<'s, v8::Object>) {
     macro_rules! set {
         ($name:literal, $f:expr) => {{
@@ -607,4 +708,9 @@ pub fn install_hmr<'s>(scope: &mut v8::PinScope<'s, '_>, natives: v8::Local<'s, 
     set!("hmrLoad", hmr_load);
     set!("readText", read_text);
     set!("copyFile", copy_file);
+    set!("devConfigure", dev_configure);
+    set!("devInvalidate", dev_invalidate);
+    set!("devLoaded", dev_loaded);
+    set!("devCreateRequire", dev_create_require);
+    set!("devSetBuiltin", dev_set_builtin);
 }

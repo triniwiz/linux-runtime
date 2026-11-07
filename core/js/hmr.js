@@ -27,4 +27,16 @@
 
   Object.defineProperty(ns, 'hmr', { value: hmr, enumerable: true });
   Object.defineProperty(ns, 'livesync', { value: livesync, enumerable: true });
+
+  // `ns:module`: dev host primitives for @nativescript/vite (policy stays in JS there)
+  if (natives.devSetBuiltin) {
+    natives.devSetBuiltin(
+      Object.freeze({
+        configureLoader: (config) => natives.devConfigure(JSON.stringify(config ?? {})),
+        invalidateModules: (urls) => natives.devInvalidate(Array.from(urls ?? [], String)),
+        getLoadedModuleUrls: () => natives.devLoaded(),
+        createRequire: (file) => natives.devCreateRequire(String(file?.href ?? file)),
+      }),
+    );
+  }
 });
