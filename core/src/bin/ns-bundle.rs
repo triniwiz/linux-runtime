@@ -6,13 +6,14 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage:
   ns-bundle pack --input <dir> --output <app.nsbundle> [--unpack <glob>]... [--no-default-unpack]
-                 [--seal [--key-hex <64 hex> | --write-key <file>]]
+                 [--seal [--key-file <file> | --key-hex <64 hex> | --write-key <file>]]
                  [--exe <runtime executable> [--fuse <name>=on|off]...]
   ns-bundle fuses <runtime executable> [--fuse <name>=on|off]...
-  ns-bundle list <app.nsbundle> [--key-hex <64 hex> | --exe <runtime executable>]
+  ns-bundle list <app.nsbundle> [--key-file <file> | --key-hex <64 hex> | --exe <runtime executable>]
 
-Sealing embeds the key (random per run unless --key-hex) in --exe; without --exe the
+Sealing embeds the key (random per run unless given) in --exe; without --exe the
 shared default key is used. --exe also embeds the bundle's integrity hash.
+The key can also come from $NS_BUNDLE_KEY_HEX (argv is visible to other users).
 Fuses: bundleIntegrity, onlyLoadAppFromBundle, inspector, envOverrides.";
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
@@ -48,6 +49,19 @@ fn print_fuses(f: &fuses::Fuses) {
     }
 }
 
+/// Key file for `--write-key`: owner-only, never through a planted link.
+fn write_key_file(path: &PathBuf, key: &[u8; 32]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::remove_file(path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(crypto::to_hex(key).as_bytes())
+}
+
 fn patch(exe: &PathBuf, update: impl FnOnce(&mut fuses::Fuses)) -> Result<fuses::Fuses, String> {
     let mut binary = std::fs::read(exe).map_err(|e| format!("{}: {e}", exe.display()))?;
     let mut f = fuses::read(&binary).map_err(|e| format!("{}: {e}", exe.display()))?;
@@ -64,8 +78,8 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
-    let (mut input, mut output, mut exe, mut key_hex, mut write_key) =
-        (None, None, None, None, None);
+    let (mut input, mut output, mut exe, mut key_hex, mut write_key, mut key_file) =
+        (None, None, None, None, None, None);
     let (mut unpack, mut set, mut seal, mut default_unpack) = (Vec::new(), Vec::new(), false, true);
     let mut positional = Vec::new();
     let mut it = args[1..].iter();
@@ -80,6 +94,7 @@ fn main() -> ExitCode {
             "--seal" => seal = true,
             "--key-hex" => key_hex = value(),
             "--write-key" => write_key = value().map(PathBuf::from),
+            "--key-file" => key_file = value().map(PathBuf::from),
             "--fuse" => match value().as_deref().map(parse_fuse) {
                 Some(Ok(f)) => set.push(f),
                 Some(Err(e)) => return fail(e),
@@ -93,8 +108,18 @@ fn main() -> ExitCode {
             other => positional.push(PathBuf::from(other)),
         }
     }
+    if let Some(path) = &key_file {
+        match std::fs::read_to_string(path) {
+            Ok(hex) => key_hex = Some(hex),
+            Err(e) => return fail(format!("{}: {e}", path.display())),
+        }
+    } else if key_hex.is_none() {
+        key_hex = std::env::var("NS_BUNDLE_KEY_HEX")
+            .ok()
+            .filter(|k| !k.is_empty());
+    }
     let key = match key_hex.as_deref().map(crypto::parse_hex_key) {
-        Some(None) => return fail("--key-hex must be 64 hex characters (32 bytes)"),
+        Some(None) => return fail("the key must be 64 hex characters (32 bytes)"),
         Some(Some(k)) => Some(k),
         None => None,
     };
@@ -118,7 +143,7 @@ fn main() -> ExitCode {
                 eprintln!("ns-bundle: warning: no --exe, sealing with the shared default key");
             }
             if let (Some(path), Some((KeyMode::Embedded, k))) = (&write_key, &seal) {
-                if let Err(e) = std::fs::write(path, crypto::to_hex(k)) {
+                if let Err(e) = write_key_file(path, k) {
                     return fail(format!("{}: {e}", path.display()));
                 }
             }
