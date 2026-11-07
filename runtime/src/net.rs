@@ -42,8 +42,6 @@ fn array_buffer<'s>(
     v8::ArrayBuffer::with_backing_store(scope, &store)
 }
 
-// ---------- HTTP ----------
-
 struct HttpResponse {
     status: u16,
     status_text: String,
@@ -57,8 +55,12 @@ fn agent(follow: bool) -> &'static ureq::Agent {
     static MANUAL: OnceLock<ureq::Agent> = OnceLock::new();
     let cell = if follow { &FOLLOW } else { &MANUAL };
     cell.get_or_init(|| {
+        // idle timeouts, not a total one: slow downloads keep going while bytes arrive
         ureq::AgentBuilder::new()
             .redirects(if follow { 20 } else { 0 })
+            .timeout_connect(Duration::from_secs(30))
+            .timeout_read(Duration::from_secs(120))
+            .timeout_write(Duration::from_secs(120))
             .build()
     })
 }
@@ -206,8 +208,6 @@ fn http_request<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv
         );
     });
 }
-
-// ---------- WebSocket ----------
 
 pub enum WsCommand {
     Text(String),
@@ -438,6 +438,8 @@ fn ws_set_dispatch<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv
 /// Blocking GET used for URL module imports.
 pub fn fetch_text(url: &str) -> Result<String, String> {
     let r = http("GET", url, &[], None, true)?;
+    // an https module may redirect to http
+    nativescript_core::resolve::check_remote(&r.url)?;
     if r.status >= 400 {
         return Err(format!("{url}: HTTP {}", r.status));
     }

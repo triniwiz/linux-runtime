@@ -180,6 +180,55 @@ pub fn is_url(p: &Path) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// Remote modules in release builds: off unless the app's `security.allowRemoteModules`,
+/// then `security.remoteModuleAllowlist` (empty: any URL), https only.
+pub fn check_remote(url: &str) -> Result<(), String> {
+    if vfs::fuses::get().is_on(vfs::Fuse::EnvOverrides) {
+        return Ok(());
+    }
+    if url.starts_with("http://") {
+        return Err(format!(
+            "Cannot import '{url}': release builds only load modules over https"
+        ));
+    }
+    static SECURITY: std::sync::OnceLock<(bool, Vec<String>)> = std::sync::OnceLock::new();
+    let (allowed, allowlist) = SECURITY.get_or_init(|| {
+        let config = app_root()
+            .and_then(|root| read_json(&root.join("package.json")))
+            .map(|j| j["security"].clone())
+            .unwrap_or_default();
+        let list = config["remoteModuleAllowlist"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (config["allowRemoteModules"].as_bool() == Some(true), list)
+    });
+    if !allowed {
+        return Err(format!(
+            "Cannot import '{url}': remote modules are off (security.allowRemoteModules)"
+        ));
+    }
+    if !allowlist.is_empty() && !allowlist.iter().any(|e| allowlist_match(url, e)) {
+        return Err(format!(
+            "Cannot import '{url}': not in security.remoteModuleAllowlist"
+        ));
+    }
+    Ok(())
+}
+
+/// `entry` prefixes `url` up to a component boundary: "https://cdn.x.com" doesn't allow
+/// "https://cdn.x.com.evil.com/" or "https://cdn.x.com:9999/".
+fn allowlist_match(url: &str, entry: &str) -> bool {
+    let Some(rest) = url.strip_prefix(entry) else {
+        return false;
+    };
+    rest.is_empty() || entry.ends_with('/') || rest.starts_with(['/', '?', '#'])
+}
+
 static APP_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 
 /// A Worker script path: `~/` and relative paths are in the app folder (bundled worker chunks
@@ -348,9 +397,10 @@ pub fn resolve(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
 
 fn resolve_uncanonical(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
     if spec.starts_with("http://") || spec.starts_with("https://") || spec.starts_with("ns:") {
+        check_remote(spec)?;
         return Ok(PathBuf::from(spec));
     }
-    // native libraries bundled with the app, in lib/ next to the executable (as on Android and Windows)
+    // native libraries bundled with the app, in lib/ next to the executable
     if let Some(rest) = spec.strip_prefix("system_lib://") {
         if Path::new(rest)
             .components()
@@ -561,6 +611,29 @@ mod esm_detection {
         assert!(!looks_like_esm("const s = `\nexport default 1\n`;"));
         assert!(!looks_like_esm("// export const x = 1\nrequire('./x');"));
         assert!(!looks_like_esm("import('./lazy');"));
+    }
+}
+
+#[cfg(test)]
+mod remote {
+    use super::allowlist_match;
+
+    #[test]
+    fn allowlist_stops_at_component_boundaries() {
+        let e = "https://cdn.example.com";
+        assert!(allowlist_match("https://cdn.example.com", e));
+        assert!(allowlist_match("https://cdn.example.com/x.js", e));
+        assert!(allowlist_match("https://cdn.example.com?v=1", e));
+        assert!(!allowlist_match("https://cdn.example.com.evil.com/x.js", e));
+        assert!(!allowlist_match("https://cdn.example.com:9999/x.js", e));
+        assert!(allowlist_match(
+            "https://cdn.example.com/lib/a.js",
+            "https://cdn.example.com/lib/"
+        ));
+        assert!(!allowlist_match(
+            "https://cdn.example.com/library.js",
+            "https://cdn.example.com/lib"
+        ));
     }
 }
 
