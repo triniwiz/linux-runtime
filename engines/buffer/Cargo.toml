@@ -1,0 +1,9 @@
+[package]
+name = "nativescript-napi-buffer"
+description = "node_api.h Buffer functions over typed arrays, for engine shims without them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nativescript-napi = { path = "../../napi" }

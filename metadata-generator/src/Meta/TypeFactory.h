@@ -45,9 +45,17 @@ public:
 
     static std::shared_ptr<Type> getCString();
 
+    static std::shared_ptr<Type> getConstCString();
+
+    // Fills field offsets / bitfield widths from clang's record layout
+    // (accounts for bitfields, packed and aligned attributes).
+    static RecordLayout computeLayout(const clang::RecordDecl& record, std::vector<RecordField>& fields);
+
     static std::shared_ptr<Type> getFloat();
 
     static std::shared_ptr<Type> getDouble();
+
+    static std::shared_ptr<Type> getLongDouble();
 
     static std::shared_ptr<Type> getVaList();
 
@@ -99,6 +107,8 @@ private:
     std::shared_ptr<Type> createFromAttributedType(const clang::AttributedType* type);
 
     std::shared_ptr<Type> createFromObjCTypeParamType(const clang::ObjCTypeParamType* type);
+    
+    std::shared_ptr<Type> createFromMacroQualifiedParamType(const clang::MacroQualifiedType* type);
 
     // helpers
     bool isSpecificTypedefType(const clang::TypedefType* type, const std::string& typedefName);

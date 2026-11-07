@@ -1,9 +1,11 @@
 #pragma once
 
-#include "TypeVisitor.h"
-#include "Utils/Noncopyable.h"
 #include <string>
 #include <vector>
+
+#include "TypeVisitor.h"
+#include "Utils/Noncopyable.h"
+#include <llvm/Support/ErrorHandling.h>
 
 namespace Meta {
 class ProtocolMeta;
@@ -13,370 +15,368 @@ class UnionMeta;
 class EnumMeta;
 
 enum TypeType {
-    TypeVoid,
-    TypeBool,
-    TypeShort,
-    TypeUShort,
-    TypeInt,
-    TypeUInt,
-    TypeLong,
-    TypeULong,
-    TypeLongLong,
-    TypeULongLong,
-    TypeSignedChar,
-    TypeUnsignedChar,
-    TypeUnichar,
-    TypeCString,
-    TypeFloat,
-    TypeDouble,
-    TypeVaList,
-    TypeSelector,
-    TypeInstancetype,
-    TypeProtocol,
-    TypeClass,
-    TypeId,
-    TypeConstantArray,
-    TypeIncompleteArray,
-    TypePointer,
-    TypeBlock,
-    TypeFunctionPointer,
-    TypeInterface,
-    TypeBridgedInterface,
-    TypeStruct,
-    TypeUnion,
-    TypeAnonymousStruct,
-    TypeAnonymousUnion,
-    TypeEnum,
-    TypeTypeArgument,
-    TypeExtVector
+  TypeVoid,
+  TypeBool,
+  TypeShort,
+  TypeUShort,
+  TypeInt,
+  TypeUInt,
+  TypeLong,
+  TypeULong,
+  TypeLongLong,
+  TypeULongLong,
+  TypeSignedChar,
+  TypeUnsignedChar,
+  TypeUnichar,
+  TypeCString,
+  TypeConstCString,
+  TypeFloat,
+  TypeDouble,
+  TypeLongDouble,
+  TypeVaList,
+  TypeSelector,
+  TypeInstancetype,
+  TypeProtocol,
+  TypeClass,
+  TypeId,
+  TypeConstantArray,
+  TypeIncompleteArray,
+  TypePointer,
+  TypeBlock,
+  TypeFunctionPointer,
+  TypeInterface,
+  TypeBridgedInterface,
+  TypeStruct,
+  TypeUnion,
+  TypeAnonymousStruct,
+  TypeAnonymousUnion,
+  TypeEnum,
+  TypeTypeArgument,
+  TypeExtVector,
+  TypeNullable,
+  TypeNonNullable
 };
 
 class Type {
-    MAKE_NONCOPYABLE(Type);
+  MAKE_NONCOPYABLE(Type);
 
-public:
-    Type(TypeType type)
-        : type(type)
-    {
+ public:
+  Type(TypeType type) : type(type) {}
+
+  TypeType getType() const { return type; }
+
+  template <class T>
+  const T& as() const {
+    return *static_cast<const T*>(this);
+  }
+
+  template <class T>
+  T& as() {
+    return *static_cast<T*>(this);
+  }
+
+  bool is(TypeType type) const { return this->type == type; }
+
+  // Returns the underlying type with any NullableType/NonNullableType wrappers
+  // removed (handles arbitrarily nested wrappers). Use this before inspecting
+  // the structure of a type (e.g. is(TypePointer), as<InterfaceType>()), since
+  // nullability annotations are represented as wrapper nodes in the type tree.
+  Type* stripNullability();
+  const Type* stripNullability() const {
+    return const_cast<Type*>(this)->stripNullability();
+  }
+
+  template <class T>
+  T visit(TypeVisitor<T>& visitor) const {
+    switch (this->type) {
+      case TypeVoid:
+        return visitor.visitVoid();
+      case TypeBool:
+        return visitor.visitBool();
+      case TypeShort:
+        return visitor.visitShort();
+      case TypeUShort:
+        return visitor.visitUShort();
+      case TypeInt:
+        return visitor.visitInt();
+      case TypeUInt:
+        return visitor.visitUInt();
+      case TypeLong:
+        return visitor.visitLong();
+      case TypeULong:
+        return visitor.visitUlong();
+      case TypeLongLong:
+        return visitor.visitLongLong();
+      case TypeULongLong:
+        return visitor.visitULongLong();
+      case TypeSignedChar:
+        return visitor.visitSignedChar();
+      case TypeUnsignedChar:
+        return visitor.visitUnsignedChar();
+      case TypeUnichar:
+        return visitor.visitUnichar();
+      case TypeCString:
+        return visitor.visitCString();
+      case TypeConstCString:
+        return visitor.visitConstCString();
+      case TypeFloat:
+        return visitor.visitFloat();
+      case TypeDouble:
+        return visitor.visitDouble();
+      case TypeLongDouble:
+        return visitor.visitLongDouble();
+      case TypeVaList:
+        return visitor.visitVaList();
+      case TypeSelector:
+        return visitor.visitSelector();
+      case TypeInstancetype:
+        return visitor.visitInstancetype();
+      case TypeProtocol:
+        return visitor.visitProtocol();
+      case TypeClass:
+        return visitor.visitClass(as<ClassType>());
+      case TypeId:
+        return visitor.visitId(as<IdType>());
+      case TypeConstantArray:
+        return visitor.visitConstantArray(as<ConstantArrayType>());
+      case TypeIncompleteArray:
+        return visitor.visitIncompleteArray(as<IncompleteArrayType>());
+      case TypePointer:
+        return visitor.visitPointer(as<PointerType>());
+      case TypeBlock:
+        return visitor.visitBlock(as<BlockType>());
+      case TypeFunctionPointer:
+        return visitor.visitFunctionPointer(as<FunctionPointerType>());
+      case TypeInterface:
+        return visitor.visitInterface(as<InterfaceType>());
+      case TypeBridgedInterface:
+        return visitor.visitBridgedInterface(as<BridgedInterfaceType>());
+      case TypeStruct:
+        return visitor.visitStruct(as<StructType>());
+      case TypeUnion:
+        return visitor.visitUnion(as<UnionType>());
+      case TypeAnonymousStruct:
+        return visitor.visitAnonymousStruct(as<AnonymousStructType>());
+      case TypeAnonymousUnion:
+        return visitor.visitAnonymousUnion(as<AnonymousUnionType>());
+      case TypeEnum:
+        return visitor.visitEnum(as<EnumType>());
+      case TypeTypeArgument:
+        return visitor.visitTypeArgument(as<TypeArgumentType>());
+      case TypeExtVector:
+        return visitor.visitExtVector(as<ExtVectorType>());
+      case TypeNullable:
+        return visitor.visitNullable(as<NullableType>());
+      case TypeNonNullable:
+        return visitor.visitNonNullable(as<NonNullableType>());
     }
+    llvm_unreachable("unknown TypeType");
+  }
 
-    TypeType getType() const
-    {
-        return type;
-    }
-
-    template <class T>
-    const T& as() const
-    {
-        return *static_cast<const T*>(this);
-    }
-
-    template <class T>
-    T& as()
-    {
-        return *static_cast<T*>(this);
-    }
-
-    bool is(TypeType type) const
-    {
-        return this->type == type;
-    }
-
-    template <class T>
-    T visit(TypeVisitor<T>& visitor) const
-    {
-        switch (this->type) {
-        case TypeVoid:
-            return visitor.visitVoid();
-        case TypeBool:
-            return visitor.visitBool();
-        case TypeShort:
-            return visitor.visitShort();
-        case TypeUShort:
-            return visitor.visitUShort();
-        case TypeInt:
-            return visitor.visitInt();
-        case TypeUInt:
-            return visitor.visitUInt();
-        case TypeLong:
-            return visitor.visitLong();
-        case TypeULong:
-            return visitor.visitUlong();
-        case TypeLongLong:
-            return visitor.visitLongLong();
-        case TypeULongLong:
-            return visitor.visitULongLong();
-        case TypeSignedChar:
-            return visitor.visitSignedChar();
-        case TypeUnsignedChar:
-            return visitor.visitUnsignedChar();
-        case TypeUnichar:
-            return visitor.visitUnichar();
-        case TypeCString:
-            return visitor.visitCString();
-        case TypeFloat:
-            return visitor.visitFloat();
-        case TypeDouble:
-            return visitor.visitDouble();
-        case TypeVaList:
-            return visitor.visitVaList();
-        case TypeSelector:
-            return visitor.visitSelector();
-        case TypeInstancetype:
-            return visitor.visitInstancetype();
-        case TypeProtocol:
-            return visitor.visitProtocol();
-        case TypeClass:
-            return visitor.visitClass(as<ClassType>());
-        case TypeId:
-            return visitor.visitId(as<IdType>());
-        case TypeConstantArray:
-            return visitor.visitConstantArray(as<ConstantArrayType>());
-        case TypeIncompleteArray:
-            return visitor.visitIncompleteArray(as<IncompleteArrayType>());
-        case TypePointer:
-            return visitor.visitPointer(as<PointerType>());
-        case TypeBlock:
-            return visitor.visitBlock(as<BlockType>());
-        case TypeFunctionPointer:
-            return visitor.visitFunctionPointer(as<FunctionPointerType>());
-        case TypeInterface:
-            return visitor.visitInterface(as<InterfaceType>());
-        case TypeBridgedInterface:
-            return visitor.visitBridgedInterface(as<BridgedInterfaceType>());
-        case TypeStruct:
-            return visitor.visitStruct(as<StructType>());
-        case TypeUnion:
-            return visitor.visitUnion(as<UnionType>());
-        case TypeAnonymousStruct:
-            return visitor.visitAnonymousStruct(as<AnonymousStructType>());
-        case TypeAnonymousUnion:
-            return visitor.visitAnonymousUnion(as<AnonymousUnionType>());
-        case TypeEnum:
-            return visitor.visitEnum(as<EnumType>());
-        case TypeTypeArgument:
-            return visitor.visitTypeArgument(as<TypeArgumentType>());
-        case TypeExtVector:
-            return visitor.visitExtVector(as<ExtVectorType>());
-            default:
-            return 0;
-        }
-    }
-
-protected:
-    TypeType type;
+ protected:
+  TypeType type;
 };
 
 struct RecordField {
-    RecordField()
-        : RecordField("", nullptr)
-    {
-    }
+  RecordField() : RecordField("", nullptr) {}
 
-    RecordField(std::string name, Type* encoding)
-        : name(name)
-        , encoding(encoding)
-    {
-    }
+  RecordField(std::string name, Type* encoding)
+      : name(name), encoding(encoding) {}
 
-    std::string name;
-    Type* encoding;
+  std::string name;
+  Type* encoding;
+  // from clang's ASTRecordLayout, -1 when unknown
+  int64_t offsetBits = -1;
+  // 0 when the field isn't a bitfield
+  unsigned bitWidth = 0;
+};
+
+struct RecordLayout {
+  int64_t size = -1;
+  int64_t align = -1;
 };
 
 class IdType : public Type {
-public:
-    IdType(std::vector<ProtocolMeta*> protocols = {})
-        : Type(TypeType::TypeId)
-        , protocols(protocols)
-    {
-    }
+ public:
+  IdType(std::vector<ProtocolMeta*> protocols = {})
+      : Type(TypeType::TypeId), protocols(protocols) {}
 
-    std::vector<ProtocolMeta*> protocols;
+  std::vector<ProtocolMeta*> protocols;
 };
 
 class ClassType : public Type {
-public:
-    ClassType(std::vector<ProtocolMeta*> protocols = {})
-        : Type(TypeType::TypeClass)
-        , protocols(protocols)
-    {
-    }
+ public:
+  ClassType(std::vector<ProtocolMeta*> protocols = {})
+      : Type(TypeType::TypeClass), protocols(protocols) {}
 
-    std::vector<ProtocolMeta*> protocols;
+  std::vector<ProtocolMeta*> protocols;
 };
 
 class TypeArgumentType : public Type {
-public:
-    TypeArgumentType(Type* underlyingType, const std::string& name, std::vector<ProtocolMeta*> protocols = {})
-        : Type(TypeType::TypeTypeArgument)
-        , underlyingType(underlyingType)
-        , name(name)
-        , protocols(protocols)
-    {
-    }
+ public:
+  TypeArgumentType(Type* underlyingType, const std::string& name,
+                   std::vector<ProtocolMeta*> protocols = {})
+      : Type(TypeType::TypeTypeArgument),
+        underlyingType(underlyingType),
+        name(name),
+        protocols(protocols) {}
 
-    Type* underlyingType;
-    std::string name;
-    std::vector<ProtocolMeta*> protocols;
+  Type* underlyingType;
+  std::string name;
+  std::vector<ProtocolMeta*> protocols;
 };
 
 class InterfaceType : public Type {
-public:
-    InterfaceType(InterfaceMeta* interface, std::vector<ProtocolMeta*> protocols, std::vector<Type*> typeArguments)
-        : Type(TypeType::TypeInterface)
-        , interface(interface)
-        , protocols(protocols)
-        , typeArguments(typeArguments)
-    {
-    }
+ public:
+  InterfaceType(InterfaceMeta* interface, std::vector<ProtocolMeta*> protocols,
+                std::vector<Type*> typeArguments)
+      : Type(TypeType::TypeInterface),
+        interface(interface),
+        protocols(protocols),
+        typeArguments(typeArguments) {}
 
-    InterfaceMeta* interface;
-    std::vector<ProtocolMeta*> protocols;
-    std::vector<Type*> typeArguments;
+  InterfaceMeta* interface;
+  std::vector<ProtocolMeta*> protocols;
+  std::vector<Type*> typeArguments;
 };
 
 class BridgedInterfaceType : public Type {
-public:
-    BridgedInterfaceType(std::string name, InterfaceMeta* bridgedInterface)
-        : Type(TypeType::TypeBridgedInterface)
-        , name(name)
-        , bridgedInterface(bridgedInterface)
-    {
-    }
+ public:
+  BridgedInterfaceType(std::string name, InterfaceMeta* bridgedInterface)
+      : Type(TypeType::TypeBridgedInterface),
+        name(name),
+        bridgedInterface(bridgedInterface) {}
 
-    bool isId() const
-    {
-        return name == "id";
-    }
+  bool isId() const { return name == "id"; }
 
-    std::string name;
-    InterfaceMeta* bridgedInterface;
+  std::string name;
+  InterfaceMeta* bridgedInterface;
 };
 
 class IncompleteArrayType : public Type {
-public:
-    IncompleteArrayType(Type* innerType)
-        : Type(TypeType::TypeIncompleteArray)
-        , innerType(innerType)
-    {
-    }
+ public:
+  IncompleteArrayType(Type* innerType)
+      : Type(TypeType::TypeIncompleteArray), innerType(innerType) {}
 
-    Type* innerType;
+  Type* innerType;
 };
 
 class ConstantArrayType : public Type {
-public:
-    ConstantArrayType(Type* innerType, int size)
-        : Type(TypeType::TypeConstantArray)
-        , innerType(innerType)
-        , size(size)
-    {
-    }
+ public:
+  ConstantArrayType(Type* innerType, int size)
+      : Type(TypeType::TypeConstantArray), innerType(innerType), size(size) {}
 
-    Type* innerType;
-    int size;
+  Type* innerType;
+  int size;
 };
-    
+
 class ExtVectorType : public Type {
-public:
-    ExtVectorType(Type* innerType, int size)
-    : Type(TypeType::TypeExtVector)
-    , innerType(innerType)
-    , size(size)
-    {
-    }
-    
-    Type* innerType;
-    int size;
+ public:
+  ExtVectorType(Type* innerType, int size)
+      : Type(TypeType::TypeExtVector), innerType(innerType), size(size) {}
+
+  Type* innerType;
+  int size;
 };
 
 class PointerType : public Type {
-public:
-    PointerType(Type* innerType)
-        : Type(TypeType::TypePointer)
-        , innerType(innerType)
-    {
-    }
+ public:
+  PointerType(Type* innerType)
+      : Type(TypeType::TypePointer), innerType(innerType) {}
 
-    Type* innerType;
+  Type* innerType;
 };
 
 class BlockType : public Type {
-public:
-    BlockType(std::vector<Type*> signature)
-        : Type(TypeType::TypeBlock)
-        , signature(signature)
-    {
-    }
+ public:
+  BlockType(std::vector<Type*> signature)
+      : Type(TypeType::TypeBlock), signature(signature) {}
 
-    std::vector<Type*> signature;
+  std::vector<Type*> signature;
 };
 
 class FunctionPointerType : public Type {
-public:
-    FunctionPointerType(std::vector<Type*> signature)
-        : Type(TypeType::TypeFunctionPointer)
-        , signature(signature)
-    {
-    }
+ public:
+  FunctionPointerType(std::vector<Type*> signature)
+      : Type(TypeType::TypeFunctionPointer), signature(signature) {}
 
-    std::vector<Type*> signature;
+  std::vector<Type*> signature;
 };
 
 class StructType : public Type {
-public:
-    StructType(StructMeta* structMeta)
-        : Type(TypeType::TypeStruct)
-        , structMeta(structMeta)
-    {
-    }
+ public:
+  StructType(StructMeta* structMeta)
+      : Type(TypeType::TypeStruct), structMeta(structMeta) {}
 
-    StructMeta* structMeta;
+  StructMeta* structMeta;
 };
 
 class UnionType : public Type {
-public:
-    UnionType(UnionMeta* unionMeta)
-        : Type(TypeType::TypeUnion)
-        , unionMeta(unionMeta)
-    {
-    }
+ public:
+  UnionType(UnionMeta* unionMeta)
+      : Type(TypeType::TypeUnion), unionMeta(unionMeta) {}
 
-    UnionMeta* unionMeta;
+  UnionMeta* unionMeta;
 };
 
 class AnonymousStructType : public Type {
-public:
-    AnonymousStructType(std::vector<RecordField> fields)
-        : Type(TypeType::TypeAnonymousStruct)
-        , fields(fields)
-    {
-    }
+ public:
+  AnonymousStructType(std::vector<RecordField> fields, RecordLayout layout = {})
+      : Type(TypeType::TypeAnonymousStruct), fields(fields), layout(layout) {}
 
-    std::vector<RecordField> fields;
+  std::vector<RecordField> fields;
+  RecordLayout layout;
 };
 
 class AnonymousUnionType : public Type {
-public:
-    AnonymousUnionType(std::vector<RecordField> fields)
-        : Type(TypeType::TypeAnonymousUnion)
-        , fields(fields)
-    {
-    }
+ public:
+  AnonymousUnionType(std::vector<RecordField> fields, RecordLayout layout = {})
+      : Type(TypeType::TypeAnonymousUnion), fields(fields), layout(layout) {}
 
-    std::vector<RecordField> fields;
+  std::vector<RecordField> fields;
+  RecordLayout layout;
 };
 
 class EnumType : public Type {
-public:
-    EnumType(Type* underlyingType, EnumMeta* enumMeta)
-        : Type(TypeType::TypeEnum)
-        , underlyingType(underlyingType)
-        , enumMeta(enumMeta)
-    {
-    }
+ public:
+  EnumType(Type* underlyingType, EnumMeta* enumMeta)
+      : Type(TypeType::TypeEnum),
+        underlyingType(underlyingType),
+        enumMeta(enumMeta) {}
 
-    Type* underlyingType;
-    EnumMeta* enumMeta;
+  Type* underlyingType;
+  EnumMeta* enumMeta;
 };
+
+class NullableType : public Type {
+ public:
+  NullableType(Type* innerType)
+      : Type(TypeType::TypeNullable), innerType(innerType) {}
+
+  Type* innerType;
+};
+
+class NonNullableType : public Type {
+ public:
+  NonNullableType(Type* innerType)
+      : Type(TypeType::TypeNonNullable), innerType(innerType) {}
+
+  Type* innerType;
+};
+
+inline Type* Type::stripNullability() {
+  Type* current = this;
+  while (true) {
+    Type* inner = nullptr;
+    if (current->is(TypeType::TypeNullable)) {
+      inner = current->as<NullableType>().innerType;
+    } else if (current->is(TypeType::TypeNonNullable)) {
+      inner = current->as<NonNullableType>().innerType;
+    }
+    if (inner == nullptr) {
+      return current;
+    }
+    current = inner;
+  }
 }
+}  // namespace Meta

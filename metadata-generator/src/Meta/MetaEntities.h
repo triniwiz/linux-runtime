@@ -62,6 +62,19 @@ struct Version {
     bool operator >=(const Version& other) const {
         return !(*this < other);
     }
+    std::string toString() const {
+        std::string result;
+        if (Major >= 0) {
+            result.append(std::to_string(Major));
+            if (Minor >= 0) {
+                result.append("." + std::to_string(Minor));
+                if (SubMinor >= 0) {
+                    result.append("." + std::to_string(SubMinor));
+                }
+            }
+        }
+        return result;
+    }
 };
 
 enum MetaFlags : uint16_t {
@@ -238,6 +251,7 @@ public:
 class RecordMeta : public Meta {
 public:
     std::vector<RecordField> fields;
+    RecordLayout layout;
 };
 
 class StructMeta : public RecordMeta {
@@ -279,6 +293,8 @@ public:
     }
 
     std::string value;
+    /// TypeScript type of `value` (macros can be strings or BigInts)
+    std::string tsType = "number";
 
     bool isScoped = false;
 

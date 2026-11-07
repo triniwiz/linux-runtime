@@ -1,0 +1,68 @@
+name: Setup
+description: >
+  Build dependencies, Rust, LLVM (cached), the metadata generator and the SDK metadata in
+  metadata-generator/tests/TestOutput, which the tests and npm packages use.
+
+inputs:
+  cache-key:
+    description: Extra key for the Rust build cache
+    required: false
+    default: ""
+  jsc:
+    description: Install WebKitGTK's JavaScriptCore for the jsc engine
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      env:
+        JSC: ${{ inputs.jsc }}
+      run: |
+        pkgs=(build-essential cmake ninja-build lld pkg-config python3
+              libglib2.0-dev libgtk-4-dev libgles-dev libegl-dev libxml2-dev libicu-dev uuid-dev
+              zlib1g-dev libfontconfig-dev libpango1.0-dev)
+        if [ "$JSC" = "true" ]; then pkgs+=(libjavascriptcoregtk-6.0-dev); fi
+        sudo apt-get update -q
+        sudo apt-get install -y -q --no-install-recommends "${pkgs[@]}"
+
+    - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      with:
+        toolchain: stable
+
+    # build_llvm.sh is the cache key: changing the LLVM version or its configuration rebuilds it
+    - name: Cache LLVM
+      id: llvm
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: llvm
+        key: llvm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build_llvm.sh') }}
+
+    - name: Build the metadata generator (and LLVM on a cache miss)
+      shell: bash
+      run: ./build_metadata_generator.sh
+
+    - name: Generate the SDK metadata
+      shell: bash
+      run: metadata-generator/tests/test-mdg-executable.sh "metadata-generator/dist/$(uname -m)/bin/metadata-generator"
+
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      with:
+        key: ${{ inputs.cache-key }}
+
+    # rusty_v8's build script downloads librusty_v8.a into <profile>/gn_out, which rust-cache
+    # prunes while keeping the script's recorded output: a later v8 rebuild then can't find the
+    # library. Reset the v8 build state so the script downloads it again.
+    - name: Re-fetch rusty_v8's static lib when the cache pruned it
+      shell: bash
+      run: |
+        for build in target/*/build target/*/*/build; do
+          [ -d "$build" ] || continue
+          profile=$(dirname "$build")
+          if ls -d "$build"/v8-* >/dev/null 2>&1 && [ ! -f "$profile/gn_out/obj/librusty_v8.a" ]; then
+            echo "librusty_v8.a missing under $profile; resetting the v8 build script"
+            rm -rf "$build"/v8-* "$profile"/.fingerprint/v8-*
+          fi
+        done

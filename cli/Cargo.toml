@@ -1,0 +1,16 @@
+[package]
+name = "nativescript-cli"
+description = "Runs a script with the NativeScript Linux runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ns-linux"
+path = "src/main.rs"
+
+[dependencies]
+nativescript-runtime.workspace = true
+nativescript-core.workspace = true
+nativescript-metadata.workspace = true
+libc.workspace = true

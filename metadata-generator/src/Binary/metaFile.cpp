@@ -9,11 +9,11 @@ unsigned int binary::MetaFile::size()
 void binary::MetaFile::registerInGlobalTables(const ::Meta::Meta& meta, binary::MetaFileOffset offset)
 {
     this->_globalTableSymbolsJs->add(meta.jsName, offset);
-    
+
     auto& nativeTable = (meta.type == ::Meta::MetaType::Protocol) ? this->_globalTableSymbolsNativeProtocols : this->_globalTableSymbolsNativeInterfaces;
-    
+
     nativeTable->add(meta.name, offset);
-    
+
     if (!meta.demangledName.empty()) {
         nativeTable->add(meta.demangledName, offset);
     }
@@ -56,7 +56,7 @@ void binary::MetaFile::save(std::shared_ptr<utils::Stream> stream)
 {
     // dump global table
     BinaryWriter globalTableStreamWriter = BinaryWriter(stream);
-    BinaryWriter heapWriter = this->heap_writer();							
+    BinaryWriter heapWriter = this->heap_writer();
     std::vector<binary::MetaFileOffset> jsOffsets = this->_globalTableSymbolsJs->serialize(heapWriter);
     globalTableStreamWriter.push_binaryArray(jsOffsets);
 

@@ -1,6 +1,7 @@
 #include "Binary/binarySerializer.h"
 #include "HeadersParser/Parser.h"
 #include "Meta/DeclarationConverterVisitor.h"
+#include "Meta/MacroConstants.h"
 #include "Meta/Filters/HandleExceptionalMetasFilter.h"
 #include "Meta/Filters/HandleMethodsAndPropertiesWithSameNameFilter.h"
 #include "Meta/Filters/MergeCategoriesFilter.h"
@@ -34,10 +35,16 @@ llvm::cl::opt<bool>   cla_applyManualDtsChanges("apply-manual-dts-changes", llvm
 llvm::cl::opt<string> cla_clangArgumentsDelimiter(llvm::cl::Positional, llvm::cl::desc("Xclang"), llvm::cl::init("-"));
 llvm::cl::list<string> cla_clangArguments(llvm::cl::ConsumeAfter, llvm::cl::desc("<clang arguments>..."));
 
+// the parsed source and its clang arguments, re-parsed to evaluate macros
+static std::string umbrellaSource;
+static std::vector<std::string> umbrellaClangArgs;
+
 class MetaGenerationConsumer : public clang::ASTConsumer {
 public:
-    explicit MetaGenerationConsumer(clang::SourceManager& sourceManager, clang::HeaderSearch& headerSearch, Meta::ModulesBlacklist& modulesBlacklist)
-        : _headerSearch(headerSearch)
+    explicit MetaGenerationConsumer(clang::SourceManager& sourceManager, clang::Preprocessor& preprocessor, Meta::ModulesBlacklist& modulesBlacklist)
+        : _headerSearch(preprocessor.getHeaderSearchInfo())
+        , _preprocessor(preprocessor)
+        , _modulesBlacklist(modulesBlacklist)
         , _visitor(sourceManager, _headerSearch, cla_verbose, modulesBlacklist)
     {
     }
@@ -48,6 +55,17 @@ public:
         llvm::SmallVector<clang::Module*, 64> modules;
         _headerSearch.collectAllModules(modules);
         std::list<Meta::Meta*>& metaContainer = _visitor.generateMetadata(Context.getTranslationUnitDecl());
+
+        // constant #defines, unless a declaration already uses the name
+        std::unordered_set<std::string> taken;
+        for (Meta::Meta* meta : metaContainer) {
+            taken.insert(meta->jsName);
+        }
+        _macros = Meta::evaluateMacros(Meta::collectMacroCandidates(_preprocessor, _headerSearch, _modulesBlacklist, taken), umbrellaSource, umbrellaClangArgs);
+        for (auto& macro : _macros) {
+            metaContainer.push_back(macro.get());
+        }
+        std::cout << "Macros: " << _macros.size() << " constants" << std::endl;
 
         // Filters
         Meta::HandleExceptionalMetasFilter().filter(metaContainer);
@@ -96,7 +114,7 @@ public:
 
         // Serialize Meta objects to binary metadata
         if (!cla_outputBinFile.empty()) {
-            binary::MetaFile file(metaContainer.size() / 10); // Average number of hash collisions: 10 per bucket
+            binary::MetaFile file(metaContainer.size() / 2); // ~2 entries per bucket keeps lookups short
             binary::BinarySerializer serializer(&file);
             serializer.serializeContainer(metasByModules);
             file.save(cla_outputBinFile);
@@ -126,7 +144,10 @@ public:
 
 private:
     clang::HeaderSearch& _headerSearch;
+    clang::Preprocessor& _preprocessor;
+    Meta::ModulesBlacklist& _modulesBlacklist;
     Meta::DeclarationConverterVisitor _visitor;
+    std::vector<std::unique_ptr<Meta::EnumConstantMeta>> _macros;
 };
 
 class MetaGenerationFrontendAction : public clang::ASTFrontendAction {
@@ -143,7 +164,7 @@ public:
         // here we set this explicitly in order to keep the same behavior
         Compiler.getPreprocessor().SetSuppressIncludeNotFoundError(!cla_strictIncludes);
 
-        return std::unique_ptr<clang::ASTConsumer>(new MetaGenerationConsumer(Compiler.getASTContext().getSourceManager(), Compiler.getPreprocessor().getHeaderSearchInfo(), _modulesBlacklist));
+        return std::unique_ptr<clang::ASTConsumer>(new MetaGenerationConsumer(Compiler.getASTContext().getSourceManager(), Compiler.getPreprocessor(), _modulesBlacklist));
     }
 
 private:
@@ -230,6 +251,8 @@ int main(int argc, const char** argv)
         }
         // generate metadata for the intermediate sdk header
         Meta::ModulesBlacklist modulesBlacklist(cla_whiteListModuleRegexesFile, cla_blackListModuleRegexesFile);
+        umbrellaSource = umbrellaContent;
+        umbrellaClangArgs = clangArgs;
         clang::tooling::runToolOnCodeWithArgs(std::unique_ptr<MetaGenerationFrontendAction>(new MetaGenerationFrontendAction(/*r*/modulesBlacklist)), umbrellaContent, clangArgs, "umbrella.h", "metadata-generator");
 
         std::clock_t end = clock();

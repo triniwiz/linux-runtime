@@ -3,7 +3,9 @@
 //
 
 #include "DocSetManager.h"
+#ifdef NS_DOCSETS
 #include <libxml/xpath.h>
+#endif
 #include <sstream>
 #include <unistd.h>
 
@@ -30,7 +32,7 @@ std::string& rtrim(std::string& s)
 }
 
 // trim from both ends
-std::string& trim(std::string& s)
+[[maybe_unused]] std::string& trim(std::string& s)
 {
     return ltrim(rtrim(s));
 }
@@ -44,6 +46,7 @@ void findAndReplaceIn(string& str, string searchFor, string replaceBy)
     };
 }
 
+#ifdef NS_DOCSETS
 xmlNodeSetPtr all(const xmlChar* xpath, xmlDocPtr doc, xmlXPathObjectPtr& result)
 {
     xmlXPathContextPtr context = xmlXPathNewContext(doc);
@@ -83,6 +86,7 @@ vector<string> innerTextOf(xmlNodeSetPtr xmlNodes, xmlDocPtr doc)
     }
     return result;
 }
+#endif
 }
 
 namespace TypeScript {
@@ -90,7 +94,7 @@ using namespace std;
 
 std::string TSComment::toString(std::string linePrefix)
 {
-    if (description.length() == 0 && params.size() == 0) {
+    if (description.length() == 0 && params.size() == 0 && deprecatedIn.isUnknown() && introducedIn.isUnknown()) {
         return std::string();
     }
 
@@ -98,11 +102,19 @@ std::string TSComment::toString(std::string linePrefix)
     result << linePrefix << "/**" << std::endl;
     std::string processedDesc = description;
     findAndReplaceIn(processedDesc, "\n", "");
-    result << linePrefix << " * " << processedDesc << std::endl;
+    if (processedDesc.length() > 0) {
+        result << linePrefix << " * " << processedDesc << std::endl;
+    }
     for (std::pair<std::string, std::string>& param : params) {
         // @param paramName - paramDesc
         result << linePrefix << " * "
                << "@param " + param.first + " - " + param.second << std::endl;
+    }
+    if (!introducedIn.isUnknown()) {
+        result << linePrefix << " * " << "@since " << introducedIn.toString() << std::endl;
+    }
+    if (!deprecatedIn.isUnknown()) {
+        result << linePrefix << " * " << "@deprecated " << deprecatedIn.toString() << std::endl;
     }
     result << linePrefix << " */" << std::endl;
     return result.str();
@@ -110,11 +122,19 @@ std::string TSComment::toString(std::string linePrefix)
 
 TSComment DocSetManager::getCommentFor(Meta::Meta* meta, Meta::Meta* parent)
 {
-    return (parent == nullptr) ? getCommentFor(meta->name, meta->type) : getCommentFor(meta->name, meta->type, parent->name, parent->type);
+    auto comment = (parent == nullptr) ? getCommentFor(meta->name, meta->type) : getCommentFor(meta->name, meta->type, parent->name, parent->type);
+    comment.deprecatedIn = meta->deprecatedIn;
+    comment.introducedIn = meta->introducedIn;
+    comment.obsoletedIn = meta->obsoletedIn;
+    return comment;
 }
 
 TSComment DocSetManager::getCommentFor(std::string name, Meta::MetaType type, std::string parentName, Meta::MetaType parentType)
 {
+#ifndef NS_DOCSETS
+    // Apple docsets only (iOS builds)
+    return TSComment();
+#else
     xmlDocPtr doc = getXmlDocFileFor(name, type, parentName, parentType);
 
     TSComment comment;
@@ -167,8 +187,10 @@ TSComment DocSetManager::getCommentFor(std::string name, Meta::MetaType type, st
 
     xmlFreeDoc(doc);
     return comment;
+#endif
 }
 
+#ifdef NS_DOCSETS
 xmlDocPtr DocSetManager::getXmlDocFileFor(std::string name, Meta::MetaType type, std::string parentName, Meta::MetaType parentType)
 {
     std::string parent = (parentName == "") ? "-" : parentName;
@@ -231,4 +253,5 @@ xmlDocPtr DocSetManager::getXmlDocFileFor(std::string name, Meta::MetaType type,
     }
     return nullptr;
 }
+#endif
 }

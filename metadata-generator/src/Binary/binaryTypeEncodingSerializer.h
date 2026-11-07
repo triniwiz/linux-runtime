@@ -1,101 +1,140 @@
 #pragma once
 
+#include <vector>
+
 #include "Meta/TypeEntities.h"
 #include "binaryStructures.h"
 #include "binaryWriter.h"
-#include <vector>
 
 using namespace std;
 
 namespace binary {
 /*
-     * \class BinaryTypeEncodingSerializer
-     * \brief Applies the Visitor pattern for serializing \c typeEncoding::TypeEncoding objects in binary format.
-     */
-class BinaryTypeEncodingSerializer : public ::Meta::TypeVisitor<unique_ptr<binary::TypeEncoding> > {
-private:
-    BinaryWriter _heapWriter;
-
-    unique_ptr<TypeEncoding> serializeRecordEncoding(const binary::BinaryTypeEncodingType encodingType, const std::vector< ::Meta::RecordField>& fields);
+ * \class BinaryTypeEncodingSerializer
+ * \brief Applies the Visitor pattern for serializing \c
+ * typeEncoding::TypeEncoding objects in binary format.
+ */
+class BinaryTypeEncodingSerializer
+    : public ::Meta::TypeVisitor<unique_ptr<binary::TypeEncoding> > {
+ private:
+  // Must alias the serializer's writer, not copy it: BinaryWriter owns the
+  // string-interning map, and a copy interns into a second map, emitting a
+  // duplicate copy of every string reachable from both paths.
+  BinaryWriter& _heapWriter;
 
 public:
-    BinaryTypeEncodingSerializer(BinaryWriter& heapWriter)
-        : _heapWriter(heapWriter)
-    {
-    }
+  // Writes a record layout blob (see RecordMeta::_layout) to the heap
+  static MetaFileOffset writeRecordLayout(
+      BinaryWriter& heapWriter, const ::Meta::RecordLayout& layout,
+      const std::vector< ::Meta::RecordField>& fields);
 
-    MetaFileOffset visit(std::vector< ::Meta::Type*>& types);
+private:
+  unique_ptr<TypeEncoding> serializeRecordEncoding(
+      const binary::BinaryTypeEncodingType encodingType,
+      const std::vector< ::Meta::RecordField>& fields,
+      const ::Meta::RecordLayout& layout);
 
-    virtual unique_ptr<TypeEncoding> visitVoid() override;
+ public:
+  BinaryTypeEncodingSerializer(BinaryWriter& heapWriter)
+      : _heapWriter(heapWriter) {}
 
-    virtual unique_ptr<TypeEncoding> visitBool() override;
+  MetaFileOffset visit(std::vector< ::Meta::Type*>& types);
 
-    virtual unique_ptr<TypeEncoding> visitShort() override;
+  virtual unique_ptr<TypeEncoding> visitVoid() override;
 
-    virtual unique_ptr<TypeEncoding> visitUShort() override;
+  virtual unique_ptr<TypeEncoding> visitBool() override;
 
-    virtual unique_ptr<TypeEncoding> visitInt() override;
+  virtual unique_ptr<TypeEncoding> visitShort() override;
 
-    virtual unique_ptr<TypeEncoding> visitUInt() override;
+  virtual unique_ptr<TypeEncoding> visitUShort() override;
 
-    virtual unique_ptr<TypeEncoding> visitLong() override;
+  virtual unique_ptr<TypeEncoding> visitInt() override;
 
-    virtual unique_ptr<TypeEncoding> visitUlong() override;
+  virtual unique_ptr<TypeEncoding> visitUInt() override;
 
-    virtual unique_ptr<TypeEncoding> visitLongLong() override;
+  virtual unique_ptr<TypeEncoding> visitLong() override;
 
-    virtual unique_ptr<TypeEncoding> visitULongLong() override;
+  virtual unique_ptr<TypeEncoding> visitUlong() override;
 
-    virtual unique_ptr<TypeEncoding> visitSignedChar() override;
+  virtual unique_ptr<TypeEncoding> visitLongLong() override;
 
-    virtual unique_ptr<TypeEncoding> visitUnsignedChar() override;
+  virtual unique_ptr<TypeEncoding> visitULongLong() override;
 
-    virtual unique_ptr<TypeEncoding> visitUnichar() override;
+  virtual unique_ptr<TypeEncoding> visitSignedChar() override;
 
-    virtual unique_ptr<TypeEncoding> visitCString() override;
+  virtual unique_ptr<TypeEncoding> visitUnsignedChar() override;
 
-    virtual unique_ptr<TypeEncoding> visitFloat() override;
+  virtual unique_ptr<TypeEncoding> visitUnichar() override;
 
-    virtual unique_ptr<TypeEncoding> visitDouble() override;
+  virtual unique_ptr<TypeEncoding> visitCString() override;
 
-    virtual unique_ptr<TypeEncoding> visitVaList() override;
+  virtual unique_ptr<TypeEncoding> visitConstCString() override;
 
-    virtual unique_ptr<TypeEncoding> visitSelector() override;
+  virtual unique_ptr<TypeEncoding> visitFloat() override;
 
-    virtual unique_ptr<TypeEncoding> visitInstancetype() override;
+  virtual unique_ptr<TypeEncoding> visitDouble() override;
 
-    virtual unique_ptr<TypeEncoding> visitProtocol() override;
+  virtual unique_ptr<TypeEncoding> visitLongDouble() override;
 
-    virtual unique_ptr<TypeEncoding> visitClass(const ::Meta::ClassType& type) override;
+  virtual unique_ptr<TypeEncoding> visitVaList() override;
 
-    virtual unique_ptr<TypeEncoding> visitId(const ::Meta::IdType& type) override;
+  virtual unique_ptr<TypeEncoding> visitSelector() override;
 
-    virtual unique_ptr<TypeEncoding> visitConstantArray(const ::Meta::ConstantArrayType& type) override;
-    
-    virtual unique_ptr<TypeEncoding> visitExtVector(const ::Meta::ExtVectorType& type) override;
+  virtual unique_ptr<TypeEncoding> visitInstancetype() override;
 
-    virtual unique_ptr<TypeEncoding> visitIncompleteArray(const ::Meta::IncompleteArrayType& type) override;
+  virtual unique_ptr<TypeEncoding> visitProtocol() override;
 
-    virtual unique_ptr<TypeEncoding> visitInterface(const ::Meta::InterfaceType& type) override;
+  virtual unique_ptr<TypeEncoding> visitClass(
+      const ::Meta::ClassType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitBridgedInterface(const ::Meta::BridgedInterfaceType& type) override;
+  virtual unique_ptr<TypeEncoding> visitId(const ::Meta::IdType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitPointer(const ::Meta::PointerType& type) override;
+  virtual unique_ptr<TypeEncoding> visitConstantArray(
+      const ::Meta::ConstantArrayType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitBlock(const ::Meta::BlockType& type) override;
+  virtual unique_ptr<TypeEncoding> visitExtVector(
+      const ::Meta::ExtVectorType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitFunctionPointer(const ::Meta::FunctionPointerType& type) override;
+  virtual unique_ptr<TypeEncoding> visitIncompleteArray(
+      const ::Meta::IncompleteArrayType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitStruct(const ::Meta::StructType& type) override;
+  virtual unique_ptr<TypeEncoding> visitInterface(
+      const ::Meta::InterfaceType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitUnion(const ::Meta::UnionType& type) override;
+  virtual unique_ptr<TypeEncoding> visitBridgedInterface(
+      const ::Meta::BridgedInterfaceType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitAnonymousStruct(const ::Meta::AnonymousStructType& type) override;
+  virtual unique_ptr<TypeEncoding> visitPointer(
+      const ::Meta::PointerType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitAnonymousUnion(const ::Meta::AnonymousUnionType& type) override;
+  virtual unique_ptr<TypeEncoding> visitBlock(
+      const ::Meta::BlockType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitEnum(const ::Meta::EnumType& type) override;
+  virtual unique_ptr<TypeEncoding> visitFunctionPointer(
+      const ::Meta::FunctionPointerType& type) override;
 
-    virtual unique_ptr<TypeEncoding> visitTypeArgument(const ::Meta::TypeArgumentType& type) override;
+  virtual unique_ptr<TypeEncoding> visitStruct(
+      const ::Meta::StructType& type) override;
+
+  virtual unique_ptr<TypeEncoding> visitUnion(
+      const ::Meta::UnionType& type) override;
+
+  virtual unique_ptr<TypeEncoding> visitAnonymousStruct(
+      const ::Meta::AnonymousStructType& type) override;
+
+  virtual unique_ptr<TypeEncoding> visitAnonymousUnion(
+      const ::Meta::AnonymousUnionType& type) override;
+
+  virtual unique_ptr<TypeEncoding> visitEnum(
+      const ::Meta::EnumType& type) override;
+
+  virtual unique_ptr<TypeEncoding> visitTypeArgument(
+      const ::Meta::TypeArgumentType& type) override;
+
+  virtual unique_ptr<TypeEncoding> visitNullable(
+      const ::Meta::NullableType& type) override;
+
+  virtual unique_ptr<TypeEncoding> visitNonNullable(
+      const ::Meta::NonNullableType& type) override;
 };
-}
+}  // namespace binary

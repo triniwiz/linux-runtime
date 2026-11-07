@@ -22,6 +22,7 @@ binary::MetaFileOffset binary::RecordMeta::save(BinaryWriter& writer)
     binary::MetaFileOffset offset = Meta::save(writer);
     writer.push_pointer(this->_fieldNames);
     writer.push_pointer(this->_fieldsEncodings);
+    writer.push_pointer(this->_layout);
     return offset;
 }
 
@@ -43,7 +44,12 @@ binary::MetaFileOffset binary::MethodMeta::save(BinaryWriter& writer)
 {
     binary::MetaFileOffset offset = MemberMeta::save(writer);
     writer.push_pointer(this->_encoding);
-    writer.push_pointer(this->_constructorTokens);
+    // Trailing field, and MethodMeta has no subclass, so it can simply be left
+    // out when unset. The reader keys off MethodHasConstructorTokens and never
+    // touches the slot otherwise.
+    if (this->_flags & BinaryFlags::MethodHasConstructorTokens) {
+      writer.push_pointer(this->_constructorTokens);
+    }
     return offset;
 }
 
@@ -179,5 +185,6 @@ binary::MetaFileOffset binary::AnonymousRecordEncoding::save(binary::BinaryWrite
     for (int i = 0; i < this->_fieldsCount; i++) {
         this->_fieldEncodings[i]->save(writer);
     }
+    writer.push_pointer(this->_layout);
     return offset;
 }

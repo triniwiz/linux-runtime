@@ -1,0 +1,22 @@
+[package]
+name = "nativescript-core"
+description = "Engine independent parts of the NativeScript Linux runtime: metadata, C layouts, calls, closures, GLib loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nativescript-metadata.workspace = true
+libffi.workspace = true
+libc.workspace = true
+serde_json = "1"
+url = "2"
+memmap2.workspace = true
+ring = "0.17"
+
+[[bin]]
+name = "ns-bundle"
+path = "src/bin/ns-bundle.rs"
+
+[build-dependencies]
+pkg-config = "0.3"

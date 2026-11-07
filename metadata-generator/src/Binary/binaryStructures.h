@@ -45,7 +45,10 @@ enum BinaryTypeEncodingType : uint8_t {
     Block,
     AnonymousStruct,
     AnonymousUnion,
-    Vector
+    Vector,
+    // additions for the Linux (C) runtime, keep appended to preserve values
+    LongDouble,
+    ConstCString
 };
 
 // BinaryMetaType values must not exceed
@@ -61,25 +64,26 @@ enum BinaryMetaType : uint8_t {
 };
 
 enum BinaryFlags : uint16_t {
-    // Common
-    HasDemangledName = 1 << 8,
-    HasName = 1 << 7,
-    IsIosAppExtensionAvailable = 1 << 6,
-    // Function
-    FunctionIsVariadic = 1 << 5,
-    FunctionOwnsReturnedCocoaObject = 1 << 4,
-    FunctionReturnsUnmanaged = 1 << 3,
-    // Member
-    MemberIsOptional = 1 << 0,
-    // Method
-    MethodIsInitializer = 1 << 1,
-    MethodIsVariadic = 1 << 2,
-    MethodIsNullTerminatedVariadic = 1 << 3,
-    MethodOwnsReturnedCocoaObject = 1 << 4,
-    MethodHasErrorOutParameter = 1 << 5,
-    // Property
-    PropertyHasGetter = 1 << 2,
-    PropertyHasSetter = 1 << 3
+  // Common
+  HasDemangledName = 1 << 8,
+  HasName = 1 << 7,
+  IsIosAppExtensionAvailable = 1 << 6,
+  // Function
+  FunctionIsVariadic = 1 << 5,
+  FunctionOwnsReturnedCocoaObject = 1 << 4,
+  FunctionReturnsUnmanaged = 1 << 3,
+  // Member
+  MemberIsOptional = 1 << 0,
+  // Method
+  MethodIsInitializer = 1 << 1,
+  MethodIsVariadic = 1 << 2,
+  MethodIsNullTerminatedVariadic = 1 << 3,
+  MethodOwnsReturnedCocoaObject = 1 << 4,
+  MethodHasErrorOutParameter = 1 << 5,
+  MethodHasConstructorTokens = 1 << 9,
+  // Property
+  PropertyHasGetter = 1 << 2,
+  PropertyHasSetter = 1 << 3
 };
 
 #pragma pack(push, 1)
@@ -107,6 +111,8 @@ public:
 
     MetaFileOffset _fieldNames = 0;
     MetaFileOffset _fieldsEncodings = 0;
+    // Linux addition: i32 size, i32 align, i32 count, count x (i32 offsetBits, u8 bitWidth)
+    MetaFileOffset _layout = 0;
 
     virtual MetaFileOffset save(BinaryWriter& writer) override;
 };
@@ -379,6 +385,8 @@ public:
     uint8_t _fieldsCount = 0;
     std::vector<MetaFileOffset> _fieldNames;
     std::vector<std::unique_ptr<TypeEncoding> > _fieldEncodings;
+    // Linux addition, see RecordMeta::_layout
+    MetaFileOffset _layout = 0;
 
     virtual MetaFileOffset save(BinaryWriter& writer) override;
 };

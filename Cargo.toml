@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "metadata",
+    "core",
+    "runtime",
+    "cli",
+    "napi",
+    "engines/quickjs",
+    "engines/buffer",
+    "engines/v8",
+    "engines/jsc",
+    "engines/hermes",
+]
+# jsc and hermes need an engine library (system JavaScriptCore, engines/hermes/build-hermes.sh)
+default-members = [
+    "metadata",
+    "core",
+    "runtime",
+    "cli",
+    "napi",
+    "engines/quickjs",
+    "engines/buffer",
+    "engines/v8",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+nativescript-metadata = { path = "metadata" }
+nativescript-core = { path = "core" }
+nativescript-runtime = { path = "runtime" }
+v8 = "147"
+libffi = "5.1.0"
+libc = "0.2"
+memmap2 = "0.9"
+
+[profile.release]
+debug = 1

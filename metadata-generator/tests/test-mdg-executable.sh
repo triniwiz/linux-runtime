@@ -1,54 +1,48 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
-#DEVELOPER_DIR=${DEVELOPER_DIR:-$(/usr/bin/xcodebuild -version -sdk iphoneos PlatformPath)/../../}
+# Usage: test-mdg-executable.sh <metadata generator executable> [output dir]
 MDG=$1
-#if [ -z "$MDG" ] ; then
-#    cat 1>&2 <<EOF
-#Metadata generator executable not specified.
-#Usage:
-#    $(basename $0) <metadata generator executable>"
-#EOF
-#    exit 1
-#fi
+if [ -z "$MDG" ]; then
+    echo "Usage: $(basename "$0") <metadata generator executable> [output dir]" 1>&2
+    exit 1
+fi
+MDG="$(cd "$(dirname "$MDG")" && pwd)/$(basename "$MDG")"
 
-GenerateMetadata() {
-     MDG=$1
-     HEADER=$2
-     OUTDIR=$3
-     OUT_HEADER=$4
-         cd $(dirname "$MDG")
-         #SYSROOT=$DEVELOPER_DIR/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk
+TESTSDIR="$(cd "$(dirname "$0")" && pwd)"
+ARCH=$(uname -m)
+OUTDIR="${2:-$TESTSDIR/TestOutput}"
+EXPECTEDOUTPUTDIR="$TESTSDIR/ExpectedOutput-linux-$ARCH"
 
-         # delete old output files
-         rm -rf $OUTDIR
-         # start metadata generator and save verbose log to file, while stripping "verbose: " prefixed messages from command's output
-         ./$(basename $MDG) -verbose -output-bin $OUTDIR/metadata-arm64.bin -output-yaml $OUTDIR/metadata-arm64 -output-umbrella $OUTDIR/ -output-typescript $OUTDIR/typings   \
-          Xclang \
-            -I/usr/include -I/usr/local/include -DDEBUG=1 2>&1 | \
-         tee "$(dirname $OUTDIR)/verbose.out" | grep -v "verbose: "
+rm -rf "$OUTDIR"
+mkdir -p "$OUTDIR"
 
-        #  # Omit built-in intrinsics module from comparison (contains entities specific to the LLVM version installed on the machine)
-        #  find $OUTDIR -name _Builtin_intrinsics.yaml -type f -delete
-        #  # Unify paths to SDK stripping quotes
-        #  find $OUTDIR -name \*.yaml -type f -exec perl -pi -e "s|(: *)['\"]?.*(/SDKs/.*?)['\"]? *$|\1/...\2|g" {} \;
-        #  # Remove empty []
-        #  find $OUTDIR -name \*.yaml -type f -exec perl -pi -e "s|\[\] *||g" {} \;
+# module map, umbrella header and include paths for the libraries in linux/sdk.json
+# (set NS_SYSROOT to a sysroot made with linux/fetch-sysroot.sh for headers
+# that aren't installed, e.g. GTK)
+python3 "$TESTSDIR/../linux/gen-sdk.py" --out "$OUTDIR/sdk" ${NS_SYSROOT:+--sysroot "$NS_SYSROOT"} ${NS_SDK_MODULES:+--only "$NS_SDK_MODULES"}
+mapfile -t CLANG_ARGS < "$OUTDIR/sdk/clang-args.txt"
 
- }
+# clang looks for its builtin headers relative to the executable (./lib/clang)
+pushd "$(dirname "$MDG")" > /dev/null
+"$MDG" -verbose \
+    -input-umbrella "$OUTDIR/sdk/umbrella.h" \
+    -output-bin "$OUTDIR/metadata-$ARCH.bin" \
+    -output-yaml "$OUTDIR/yaml" \
+    -output-typescript "$OUTDIR/typings" \
+    Xclang \
+    -fmodule-map-file="$OUTDIR/sdk/module.modulemap" \
+    "${CLANG_ARGS[@]}" \
+    > "$OUTDIR/verbose.out" 2>&1 || { tail -20 "$OUTDIR/verbose.out"; exit 1; }
+popd > /dev/null
 
-TESTSDIR=$(dirname $0)
-#XCODEVERSION=$(/usr/bin/xcodebuild -version | grep Xcode | cut -f2 -d' ')
-#EXPECTEDOUTPUTDIR="$TESTSDIR/ExpectedOutput$XCODEVERSION"
-#if [ ! -d "$EXPECTEDOUTPUTDIR" ]; then
-#    echo 1>&2 "warning: Directory containing expected test results for Xcode version $XCODEVERSION ($EXPECTEDOUTPUTDIR) doesn't exist. Skipping tests!"
-#    exit 0
-#fi
+grep -E '^Result:|^Done' "$OUTDIR/verbose.out"
 
-TESTOUTPUTDIR=$TESTSDIR/TestOutput
-
-GenerateMetadata $MDG $TESTSDIR/AllSystemFrameworks.h $TESTOUTPUTDIR
+if [ ! -d "$EXPECTEDOUTPUTDIR" ]; then
+    echo "warning: no expected output at $EXPECTEDOUTPUTDIR, skipping comparison" 1>&2
+    exit 0
+fi
 
 echo "Comparing test outputs..."
-(diff -qwr $EXPECTEDOUTPUTDIR $TESTOUTPUTDIR && echo "Test run successful, no differences encountered.") ||
-(echo "error: Metadata generator didn't produce the expected output. Fix or accept the new one by replacing $EXPECTEDOUTPUTDIR with $TESTOUTPUTDIR" 1>&2 && false)
+(diff -qwr "$EXPECTEDOUTPUTDIR/yaml" "$OUTDIR/yaml" && echo "Test run successful, no differences encountered.") ||
+(echo "error: Metadata generator didn't produce the expected output. Fix or accept the new one by replacing $EXPECTEDOUTPUTDIR with $OUTDIR" 1>&2 && false)

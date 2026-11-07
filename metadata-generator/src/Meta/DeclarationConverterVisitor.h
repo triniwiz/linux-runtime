@@ -83,9 +83,7 @@ private:
             }
         } catch (MetaCreationException& e) {
             if (e.isError()) {
-                std::stringstream ss;
-                ss << "Exception " << e.getDetailedMessage();
-                log(ss);
+                log(std::stringstream() << "Exception " << e.getDetailedMessage());
             } else {
                   // Uncomment for maximum verbosity when debugging metadata generation issues
 //                auto namedDecl = clang::dyn_cast<clang::NamedDecl>(decl);

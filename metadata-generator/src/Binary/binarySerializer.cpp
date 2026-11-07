@@ -2,6 +2,7 @@
 #include "Meta/Utils.h"
 #include "binarySerializerPrivate.h"
 #include <clang/Basic/FileManager.h>
+#include <llvm/Object/Archive.h>
 #include <llvm/Object/Binary.h>
 #include <llvm/Object/MachO.h>
 #include <llvm/Object/MachOUniversal.h>
@@ -36,7 +37,7 @@ void binary::BinarySerializer::serializeBase(::Meta::Meta* meta, binary::Meta& b
             offsets[nOffsets++] = this->heapWriter.push_string(meta->demangledName);
         }
         binaryMetaStruct._names = this->heapWriter.currentPosition();
-        
+
         for (int i = 0; i < nOffsets; i++) {
             this->heapWriter.push_pointer(offsets[i]);
         }
@@ -139,8 +140,11 @@ void binary::BinarySerializer::serializeBaseClass(::Meta::BaseClassMeta* meta, b
 void binary::BinarySerializer::serializeMember(::Meta::Meta* meta, binary::MemberMeta& binaryMetaStruct)
 {
     this->serializeBase(meta, binaryMetaStruct);
-    binaryMetaStruct._flags &= 0b11111000; // this clears the type information written in the lower 3 bits
-    
+    // Clear only the type information in the lower 3 bits. The old mask also
+    // dropped bits 8 and up, which would silently discard any member flag
+    // stored there.
+    binaryMetaStruct._flags &= ~0b111;
+
     if (meta->getFlags(::Meta::MetaFlags::MemberIsOptional))
         binaryMetaStruct._flags |= BinaryFlags::MemberIsOptional;
 
@@ -149,7 +153,7 @@ void binary::BinarySerializer::serializeMember(::Meta::Meta* meta, binary::Membe
 void binary::BinarySerializer::serializeMethod(::Meta::MethodMeta* meta, binary::MethodMeta& binaryMetaStruct)
 {
     this->serializeMember(meta, binaryMetaStruct);
-    
+
     if (meta->getFlags(::Meta::MetaFlags::MethodIsVariadic))
         binaryMetaStruct._flags |= BinaryFlags::MethodIsVariadic;
     if (meta->getFlags(::Meta::MetaFlags::MethodIsNullTerminatedVariadic))
@@ -162,7 +166,11 @@ void binary::BinarySerializer::serializeMethod(::Meta::MethodMeta* meta, binary:
         binaryMetaStruct._flags |= BinaryFlags::MethodIsInitializer;
 
     binaryMetaStruct._encoding = this->typeEncodingSerializer.visit(meta->signature);
-    binaryMetaStruct._constructorTokens = this->heapWriter.push_string(meta->constructorTokens);
+    if (!meta->constructorTokens.empty()) {
+      binaryMetaStruct._flags |= BinaryFlags::MethodHasConstructorTokens;
+      binaryMetaStruct._constructorTokens =
+          this->heapWriter.push_string(meta->constructorTokens);
+    }
 }
 
 void binary::BinarySerializer::serializeProperty(::Meta::PropertyMeta* meta, binary::PropertyMeta& binaryMetaStruct)
@@ -197,6 +205,7 @@ void binary::BinarySerializer::serializeRecord(::Meta::RecordMeta* meta, binary:
 
     binaryMetaStruct._fieldNames = this->heapWriter.push_binaryArray(nameOffsets);
     binaryMetaStruct._fieldsEncodings = this->typeEncodingSerializer.visit(typeEncodings);
+    binaryMetaStruct._layout = BinaryTypeEncodingSerializer::writeRecordLayout(this->heapWriter, meta->layout, meta->fields);
 }
 
 void binary::BinarySerializer::serializeContainer(std::vector<std::pair<clang::Module*, std::vector< ::Meta::Meta*> > >& container)
@@ -219,7 +228,7 @@ static llvm::ErrorOr<llvm::SmallString<128>> getFrameworkLib(clang::Module* fram
         path::append(path, framework->Directory->getName());
     }
     path::append(path, library);
-    
+
     if (!fs::exists(path)) {
         path.append(".tbd");
         if (fs::exists(path)) {
@@ -228,10 +237,10 @@ static llvm::ErrorOr<llvm::SmallString<128>> getFrameworkLib(clang::Module* fram
             // that come with Xcode by linking to DYLIB libraries instead of storing the actual, larger DYLIB libraries.
             return path;
         }
-        
-        return errc::no_such_file_or_directory;
+
+        return llvm::errc::no_such_file_or_directory;
     }
-    
+
     return path;
 }
 
@@ -242,12 +251,12 @@ static llvm::ErrorOr<bool> isStaticFramework(clang::Module* framework)
     using namespace llvm::sys;
 
     llvm::ErrorOr<SmallString<128>> path = getFrameworkLib(framework, framework->Name);
-    
+
     if(path.getError()) {
         if (framework->LinkLibraries.size() == 0) {
-            return errc::no_such_file_or_directory;
+            return llvm::errc::no_such_file_or_directory;
         }
-        
+
         path = getFrameworkLib(framework, framework->LinkLibraries[0].Library);
     }
 
@@ -289,12 +298,12 @@ static llvm::ErrorOr<bool> isStaticFramework(clang::Module* framework)
             if (isDylib(machObjectFile)) {
                 return false;
             }
-        } else if (Archive* archive = dyn_cast<Archive>(&binary)) {
+        } else if (isa<Archive>(&binary)) {
             return true;
         }
     }
 
-    return errc::invalid_argument;
+    return llvm::errc::invalid_argument;
 }
 
 void binary::BinarySerializer::serializeModule(clang::Module* module, binary::ModuleMeta& binaryModule)

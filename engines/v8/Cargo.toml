@@ -1,0 +1,18 @@
+[package]
+name = "nativescript-v8"
+description = "NativeScript Linux runtime on V8 over Node-API (napi-android V8 shim on rusty_v8), for parity and benchmarks with the raw V8 runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ns-linux-v8"
+path = "src/main.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+nativescript-napi = { path = "../../napi", features = ["compat"] }
+nativescript-napi-buffer = { path = "../buffer" }
+v8.workspace = true
