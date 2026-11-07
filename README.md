@@ -13,7 +13,7 @@ C APIs (libc, GLib, ...) exposed to JavaScript from generated metadata.
 Dependencies: cmake, a C++17 compiler, libxml2-dev, Rust.
 
 ```sh
-# Same LLVM the iOS runtime uses (Apple llvm-project, 17.0.6), built for Linux into llvm/
+# LLVM 17.0.6 (clang libraries) into llvm/
 ./build_llvm.sh
 # Metadata generator -> metadata-generator/dist/<arch>/bin
 ./build_metadata_generator.sh

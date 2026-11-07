@@ -1,19 +1,17 @@
 #!/bin/bash
-# Builds the LLVM the iOS runtime's metadata generator uses (ios-llvm v17.0.6,
-# macOS only) for Linux, into llvm/<version>/{include,lib_<arch>}.
+# Builds llvm-project 17.0.6 (clang libraries) into llvm/<version>/{include,lib_<arch>}.
 set -e
 source "$(dirname "$0")/build_utils.sh"
 
 LLVM_VERSION="17.0.6"
-# keep in sync with https://github.com/NativeScript/ios-llvm/blob/v17.0.6/.github/workflows/build.yml
-APPLE_LLVM_TAG="swift-6.0-DEVELOPMENT-SNAPSHOT-2024-06-08-a"
+LLVM_TAG="llvmorg-$LLVM_VERSION"
 
 ARCH="${LLVM_ARCH:-$(uname -m)}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 WORK_DIR="${LLVM_WORK_DIR:-/tmp/ns-linux-llvm}"
-SRC_DIR="$WORK_DIR/llvm-project-$APPLE_LLVM_TAG"
-BUILD_DIR="$WORK_DIR/build-$ARCH"
-STAGE_DIR="$WORK_DIR/install-$ARCH"
+SRC_DIR="$WORK_DIR/llvm-project-$LLVM_TAG"
+BUILD_DIR="$WORK_DIR/build-$LLVM_TAG-$ARCH"
+STAGE_DIR="$WORK_DIR/install-$LLVM_TAG-$ARCH"
 OUT_DIR="$ROOT/llvm/$LLVM_VERSION"
 NUMJOBS=${NUMJOBS:-$(nproc 2>/dev/null || echo 1)}
 
@@ -31,8 +29,8 @@ fi
 mkdir -p "$WORK_DIR"
 
 if [ ! -d "$SRC_DIR" ]; then
-    checkpoint "Cloning swiftlang/llvm-project ($APPLE_LLVM_TAG)..."
-    git clone --depth 1 --branch "$APPLE_LLVM_TAG" https://github.com/swiftlang/llvm-project.git "$SRC_DIR"
+    checkpoint "Cloning llvm/llvm-project ($LLVM_TAG)..."
+    git clone --depth 1 --branch "$LLVM_TAG" https://github.com/llvm/llvm-project.git "$SRC_DIR"
 fi
 
 GENERATOR="Unix Makefiles"

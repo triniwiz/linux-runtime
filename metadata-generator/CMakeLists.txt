@@ -14,10 +14,10 @@ if (NS_DOCSETS)
     add_compile_definitions(NS_DOCSETS)
 endif ()
 
-# Same LLVM (Apple's llvm-project fork) the NativeScript iOS runtime uses,
-# built for Linux by ../build_llvm.sh
+# LLVM built by ../build_llvm.sh (NS_LLVM_ROOT: another build of it)
 set(LLVM_VERSION "17.0.6")
-get_filename_component(LLVM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../llvm/${LLVM_VERSION}" REALPATH)
+set(NS_LLVM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../llvm/${LLVM_VERSION}" CACHE PATH "LLVM root")
+get_filename_component(LLVM_ROOT "${NS_LLVM_ROOT}" REALPATH)
 set(LLVM_LIBDIR "${LLVM_ROOT}/lib_${METADATA_BINARY_ARCH}")
 if (NOT EXISTS "${LLVM_LIBDIR}")
     message(FATAL_ERROR "LLVM ${LLVM_VERSION} not found at ${LLVM_LIBDIR}, run ./build_llvm.sh first")
