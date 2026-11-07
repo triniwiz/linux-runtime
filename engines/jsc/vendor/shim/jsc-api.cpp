@@ -107,6 +107,20 @@ class JSString {
             if (length == NAPI_AUTO_LENGTH) {
                 return JSStringCreateWithUTF8CString(string);
             }
+            // [linux port] terminate a copy instead of a codecvt round trip, unless it has NULs
+            if (std::memchr(string, 0, length) == nullptr) {
+                char small[256];
+                std::string large;
+                char* copy = small;
+                if (length >= sizeof small) {
+                    large.assign(string, length);
+                    copy = large.data();
+                } else {
+                    std::memcpy(small, string, length);
+                    small[length] = 0;
+                }
+                return JSStringCreateWithUTF8CString(copy);
+            }
 
             std::u16string u16str{std::wstring_convert<
                                   std::codecvt_utf8_utf16<char16_t>, char16_t>{}.from_bytes(string, string + length)};
@@ -216,10 +230,18 @@ class NativeInfo {
             }
         }
 
+    // [linux port] the keys are literals: made once
+    static JSStringRef Key(const char* propertyKey) {
+        static std::unordered_map<const char*, JSStringRef> keys;
+        JSStringRef& key = keys[propertyKey];
+        if (key == nullptr) key = JSStringCreateWithUTF8CString(propertyKey);
+        return key;
+    }
+
     template<typename T>
     static T* GetNativeInfo(JSContextRef ctx, JSObjectRef obj, const char * propertyKey) {
         JSValueRef exception {};
-        JSValueRef native_info = JSObjectGetProperty(ctx, obj, JSString(propertyKey), &exception);
+        JSValueRef native_info = JSObjectGetProperty(ctx, obj, Key(propertyKey), &exception);
         if (exception != nullptr) {
             return nullptr;
         }
@@ -249,7 +271,7 @@ class NativeInfo {
 
     static void SetNativeInfo(JSContextRef ctx, JSObjectRef obj, JSClassRef classRef, const char * propertyKey, void * data) {
             JSObjectRef info{JSObjectMake(ctx, classRef, data)};
-            JSObjectSetProperty(ctx, obj, JSString(propertyKey), info, kJSPropertyAttributeDontEnum | kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete, nullptr);
+            JSObjectSetProperty(ctx, obj, Key(propertyKey), info, kJSPropertyAttributeDontEnum | kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete, nullptr);
         }
 
         protected:
@@ -511,9 +533,6 @@ class BaseInfoT : public NativeInfo {
         public:
         static const NativeType StaticType = TType;
 
-        ~BaseInfoT() {
-            JSClassRelease(_class);
-        }
 
         napi_env Env() const {
             return _env;
@@ -536,10 +555,15 @@ class BaseInfoT : public NativeInfo {
         BaseInfoT(napi_env env, const char* className)
         : NativeInfo{TType}
         , _env{env} {
-            JSClassDefinition definition{kJSClassDefinitionEmpty};
-            definition.className = className;
-            definition.finalize = Finalize;
-            _class = JSClassCreate(&definition);
+            // [linux port] one class per info type: JSC keeps per-class data in the global
+            // object for good, so a class per wrapped object leaked and slowed every wrap
+            static JSClassRef shared = [className] {
+                JSClassDefinition definition{kJSClassDefinitionEmpty};
+                definition.className = className;
+                definition.finalize = Finalize;
+                return JSClassCreate(&definition);
+            }();
+            _class = shared;
         }
 
         // JSObjectFinalizeCallback
@@ -593,8 +617,7 @@ class WrapperInfo : public BaseInfoT<WrapperInfo, NativeType::Wrapper> {
         static napi_status Wrap(napi_env env, napi_value object, WrapperInfo** result) {
             WrapperInfo* info{};
 
-            napi_value propertyKey;
-            napi_create_string_utf8(env, "[[jsc_wrapper_info]]", NAPI_AUTO_LENGTH, &propertyKey);
+            napi_value propertyKey = ToNapi(JSValueMakeString(env->context, Key("[[jsc_wrapper_info]]")));
             bool hasOwnProperty;
             napi_has_own_property(env, object, propertyKey, &hasOwnProperty);
 

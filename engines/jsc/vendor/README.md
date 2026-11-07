@@ -14,6 +14,11 @@ which exports the same C API, the JSWeak* calls the shim uses and a few JSC inte
   JSC only drains when the outermost VM entry returns, which a nested GLib main loop never does
 - unhandled rejections reach `onUnhandledPromiseRejectionTracker` through
   `JSGlobalContextSetUnhandledRejectionCallback`
+- the GC suspends threads with SIGPWR (`JSConfigureSignalForGC`) instead of SIGUSR1, the
+  livesync signal, whose handler made the first collection hang
+- one JSClass per native info type, not per wrapped object (JSC keeps per-class data in the
+  global object: struct views leaked and slowed down); cached property keys; sized UTF-8 strings
+  without a codecvt round trip
 - `napi_get_property_names` passes the object (for-in keys); array buffers are zero-filled
 - the env releases its context last; missing `<climits>`, `<mutex>`, `<cstring>` includes
 - `napi_get_version` is weak: nativescript-napi's compat provides it
