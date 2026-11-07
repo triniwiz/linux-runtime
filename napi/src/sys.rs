@@ -478,6 +478,7 @@ extern "C" {
         rejection: napi_value,
     ) -> napi_status;
     pub fn napi_is_promise(env: napi_env, value: napi_value, is_promise: *mut bool) -> napi_status;
+    pub fn napi_fatal_exception(env: napi_env, err: napi_value) -> napi_status;
     pub fn napi_run_script(
         env: napi_env,
         script: napi_value,

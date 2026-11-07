@@ -1,7 +1,11 @@
 //! NativeScript Linux runtime written against Node-API, for any engine that
-//! provides napi_* plus the jsr host functions (js_create_runtime, ...).
+//! provides napi_* plus the jsr host functions (js_create_runtime, ...), or as
+//! an addon inside an existing Node-API host (`engine` off).
 
+#[cfg(not(feature = "engine"))]
+pub mod addon;
 mod app_bundle;
+#[cfg(feature = "engine")]
 pub mod cli;
 #[cfg(feature = "compat")]
 pub mod compat;
@@ -21,21 +25,33 @@ pub mod sys;
 
 pub use nativescript_metadata::{MetaFile, MetaSet};
 
-use js::{Js, JsResult, Thrown};
-use state::State;
-use std::ffi::CString;
-use std::path::Path;
+use js::{Js, JsResult};
 use std::ptr::null_mut;
-use std::sync::Arc;
 use sys::*;
 
 /// Runs a classic script, returning its completion value.
 pub fn run_script(js: Js, source: &str, name: &str) -> JsResult<napi_value> {
-    let file = CString::new(name).unwrap_or_default();
     let mut result = null_mut();
-    js::ok(unsafe { js_execute_script(js.0, js.string(source), file.as_ptr(), &mut result) })?;
+    #[cfg(feature = "engine")]
+    {
+        let file = std::ffi::CString::new(name).unwrap_or_default();
+        js::ok(unsafe { js_execute_script(js.0, js.string(source), file.as_ptr(), &mut result) })?;
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = name;
+        js::ok(unsafe { napi_run_script(js.0, js.string(source), &mut result) })?;
+    }
     Ok(result)
 }
+
+#[cfg(feature = "engine")]
+mod engine_runtime {
+use super::*;
+use js::Thrown;
+use state::State;
+use std::path::Path;
+use std::sync::Arc;
 
 const PRELUDES: [(&str, &str); 3] = [
     ("nativescript:tslib", include_str!("../../core/js/tslib.js")),
@@ -225,3 +241,7 @@ impl Drop for Runtime {
         state::set_current(std::ptr::null());
     }
 }
+
+}
+#[cfg(feature = "engine")]
+pub use engine_runtime::Runtime;

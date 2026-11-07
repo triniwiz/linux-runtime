@@ -58,7 +58,7 @@ fn is_global(kind: MetaKind) -> bool {
     )
 }
 
-unsafe extern "C" fn lookup_has(env: napi_env, info: napi_callback_info) -> napi_value {
+pub(crate) unsafe extern "C" fn lookup_has(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let (a, ..) = cb_args::<1>(env, info);
     let name = st.js().rust_string(a[0]).unwrap_or_default();
@@ -66,7 +66,7 @@ unsafe extern "C" fn lookup_has(env: napi_env, info: napi_callback_info) -> napi
         .boolean(st.meta.find(&name).is_some_and(|m| is_global(m.kind())))
 }
 
-unsafe extern "C" fn lookup_get(env: napi_env, info: napi_callback_info) -> napi_value {
+pub(crate) unsafe extern "C" fn lookup_get(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
     let (a, ..) = cb_args::<1>(env, info);
@@ -91,7 +91,11 @@ unsafe extern "C" fn lookup_get(env: napi_env, info: napi_callback_info) -> napi
                     attributes: 4,
                     data: null_mut(),
                 };
-                napi_define_properties(env, js.global(), 1, &desc);
+                let target = match st.globals_target.get() {
+                    t if t.is_null() => js.global(),
+                    t => js.deref(t),
+                };
+                napi_define_properties(env, target, 1, &desc);
             }
             value
         }
