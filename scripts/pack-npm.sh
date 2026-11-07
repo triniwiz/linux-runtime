@@ -38,7 +38,12 @@ pack() {
     install -m 755 "target/release/$binary" "$out/framework/runtime/$ARCH/ns-linux"
     strip "$out/framework/runtime/$ARCH/ns-linux"
     cp "$METADATA/metadata-$RUST_ARCH.bin" "$out/framework/runtime/$ARCH/"
-    cp "$TYPINGS"/*.d.ts "$out/framework/typings/" 2>/dev/null || true
+    cp "$TYPINGS"/*.d.ts npm/typings/linux-runtime.d.ts "$out/framework/typings/" 2>/dev/null || true
+    # GUI stack only: libc / icu declarations clash with other platforms' typings
+    for m in GLib Gtk pango cairo gdk_pixbuf graphene harfbuzz; do
+        [ -f "$out/framework/typings/c!$m.d.ts" ] && echo "/// <reference path=\"./c!$m.d.ts\" />"
+    done > "$out/framework/typings/index.d.ts"
+    echo '/// <reference path="./linux-runtime.d.ts" />' >> "$out/framework/typings/index.d.ts"
     mkdir -p "$out/framework/tools/$ARCH"
     install -m 755 target/release/ns-metadata-filter "$out/framework/tools/$ARCH/"
     strip "$out/framework/tools/$ARCH/ns-metadata-filter"
