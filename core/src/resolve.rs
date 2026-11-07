@@ -129,7 +129,7 @@ fn resolve_package(spec: &str, base: &Path, kind: Kind) -> Option<PathBuf> {
         Kind::Import => &["import", "default"],
         Kind::Require => &["require", "default"],
     };
-    for dir in base.ancestors() {
+    for dir in lookup_dirs(base) {
         let pkg_dir = dir.join("node_modules").join(&name);
         if !vfs::is_dir(&pkg_dir) {
             continue;
@@ -316,7 +316,33 @@ pub fn set_app_root(path: &Path) {
     *APP_ROOT.write().unwrap() = Some(path.to_path_buf());
 }
 
+/// Base of specifiers without a referrer (global `require`, `eval`): the app folder, else the
+/// working directory, which a packaged app must not trust.
+pub fn default_base() -> PathBuf {
+    app_root().unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+/// Directories searched for `node_modules` and `package.json`: `base` and its parents, but
+/// packaged apps stop at the app folder (a shared parent like /tmp could plant packages).
+fn lookup_dirs(base: &Path) -> impl Iterator<Item = &Path> {
+    let root = match vfs::mounted() {
+        Some(m) => Some(app_root().unwrap_or_else(|| m.root.clone())),
+        None if !vfs::fuses::get().is_on(vfs::Fuse::EnvOverrides) => app_root(),
+        None => None,
+    };
+    base.ancestors()
+        .filter(move |d| root.as_ref().is_none_or(|r| !r.starts_with(d) || r == d))
+}
+
+/// `base` empty: no referrer, see [`default_base`].
 pub fn resolve(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
+    let fallback;
+    let base = if base.as_os_str().is_empty() {
+        fallback = default_base();
+        &fallback
+    } else {
+        base
+    };
     resolve_uncanonical(spec, base, kind).map(|p| if is_volatile(&p) { p } else { canonical(p) })
 }
 
@@ -326,6 +352,14 @@ fn resolve_uncanonical(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, S
     }
     // native libraries bundled with the app, in lib/ next to the executable (as on Android and Windows)
     if let Some(rest) = spec.strip_prefix("system_lib://") {
+        if Path::new(rest)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(format!(
+                "Cannot find module '{spec}': not a path inside lib/"
+            ));
+        }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let path = exe
             .parent()
@@ -449,7 +483,7 @@ pub fn format_of(path: &Path) -> Format {
         Some("json") => Format::Json,
         Some("node") => Format::Addon,
         _ => {
-            for dir in path.ancestors().skip(1) {
+            for dir in lookup_dirs(path).skip(1) {
                 if let Some(pkg) = read_json(&dir.join("package.json")) {
                     match pkg["type"].as_str() {
                         Some("module") => return Format::Esm,
@@ -527,5 +561,22 @@ mod esm_detection {
         assert!(!looks_like_esm("const s = `\nexport default 1\n`;"));
         assert!(!looks_like_esm("// export const x = 1\nrequire('./x');"));
         assert!(!looks_like_esm("import('./lazy');"));
+    }
+}
+
+#[cfg(test)]
+mod system_lib {
+    use super::*;
+
+    #[test]
+    fn stays_in_lib() {
+        for spec in [
+            "system_lib://../evil.so",
+            "system_lib:///etc/x.so",
+            "system_lib://a/../../b.so",
+        ] {
+            let err = resolve(spec, Path::new("/"), Kind::Require).unwrap_err();
+            assert!(err.contains("inside lib/"), "{spec}: {err}");
+        }
     }
 }

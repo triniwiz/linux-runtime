@@ -93,8 +93,12 @@ impl Runtime {
         run_script(js, POLYFILLS, "nativescript:polyfills")?;
         interop::install(st, global);
         event_loop::install(st, global)?;
-        let cwd = std::env::current_dir().unwrap_or_default();
-        js.set(global, "require", modules::require_function(js, &cwd));
+        // no referrer: resolved from the app folder (see resolve::default_base)
+        js.set(
+            global,
+            "require",
+            modules::require_function(js, Path::new("")),
+        );
         globals::install(st)?;
         let argv: Vec<String> = std::env::args().collect();
         let natives = natives::create(js, &argv, engine);

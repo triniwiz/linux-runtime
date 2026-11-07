@@ -244,7 +244,7 @@ pub fn dynamic_import<'s>(
     let base = if referrer.is_absolute() || is_url(&referrer) {
         dir_of(&referrer)
     } else {
-        std::env::current_dir().unwrap_or_default()
+        PathBuf::new()
     };
 
     v8::tc_scope!(let tc, scope);
@@ -569,7 +569,7 @@ fn hmr_resolve<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<
         String::new()
     };
     let base = if parent.is_empty() {
-        std::env::current_dir().unwrap_or_default()
+        PathBuf::new()
     } else {
         dir_of(Path::new(&parent))
     };

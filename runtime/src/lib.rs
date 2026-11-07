@@ -101,8 +101,8 @@ impl Runtime {
             let global = context.global(scope);
             interop::install(scope, &state, global);
             event_loop::install(scope, global);
-            let cwd = std::env::current_dir().unwrap_or_default();
-            if let Some(require) = modules::require_function(scope, &cwd) {
+            // resolved from the app folder once the entry runs, not the working directory
+            if let Some(require) = modules::require_function(scope, std::path::Path::new("")) {
                 let key = v8::String::new(scope, "require").unwrap();
                 global.set(scope, key.into(), require.into());
             }

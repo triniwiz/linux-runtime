@@ -364,6 +364,18 @@ fn mounted_lookups() {
     // the resolver goes through the bundle
     let resolved = crate::resolve::resolve("./", &root, crate::resolve::Kind::Require).unwrap();
     assert_eq!(resolved, root.join("bundle.js"));
+    // packages planted above the app folder aren't found
+    let planted = root.parent().unwrap().join("node_modules/planted");
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("index.js"), "").unwrap();
+    let kind = crate::resolve::Kind::Require;
+    assert!(crate::resolve::resolve("planted", &root.join("assets"), kind).is_err());
+    assert!(crate::resolve::resolve(
+        "./",
+        &root.parent().unwrap().join("node_modules/planted"),
+        kind
+    )
+    .is_ok());
 }
 
 fn data_offset(raw: &[u8], i: usize) -> usize {
@@ -447,7 +459,10 @@ fn mutated_tables_never_panic() {
         for i in 0..count {
             for field in [16, 24, 32] {
                 for v in [u64::MAX, u64::MAX - 8] {
-                    cases.push((HEADER_LEN + i * RECORD_LEN + field, v.to_le_bytes().to_vec()));
+                    cases.push((
+                        HEADER_LEN + i * RECORD_LEN + field,
+                        v.to_le_bytes().to_vec(),
+                    ));
                 }
             }
         }
