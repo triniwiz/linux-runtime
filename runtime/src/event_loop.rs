@@ -405,6 +405,11 @@ pub fn post_state(context: usize, f: Box<dyn FnOnce(&State) + Send>) {
 
 /// SIGUSR1 calls `global.__onLiveSync()` (the CLI signals after syncing files).
 pub fn install_livesync_signal() {
+    use nativescript_core::nsbundle::{fuses, Fuse};
+    // release builds: no LiveSync hook (any same-user process could reset the UI)
+    if !fuses::get().is_on(Fuse::EnvOverrides) {
+        return;
+    }
     fn fire() {
         with_current(|st| {
             with_js(st, |scope| {

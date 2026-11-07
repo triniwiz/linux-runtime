@@ -22,7 +22,8 @@ pub enum Fuse {
     OnlyLoadAppFromBundle = 1,
     /// `--inspect` (DevTools)
     Inspector = 2,
-    /// runtime flags and env overrides (`--metadata`, `NS_METADATA`, `-e`, scripts)
+    /// runtime flags, env overrides and dev hooks (`--metadata`, `NS_METADATA`, `-e`, scripts,
+    /// SIGUSR1 LiveSync, module lookup above the app folder)
     EnvOverrides = 3,
 }
 

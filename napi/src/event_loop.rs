@@ -293,6 +293,11 @@ pub fn hold(st: &State) {
 
 /// SIGUSR1 calls `global.__onLiveSync()` (the CLI signals after syncing files).
 pub fn install_livesync_signal() {
+    use nativescript_core::nsbundle::{fuses, Fuse};
+    // release builds: no LiveSync hook (any same-user process could reset the UI)
+    if !fuses::get().is_on(Fuse::EnvOverrides) {
+        return;
+    }
     fn fire() {
         if let Some(st) = current() {
             with_js(st, |js| {
