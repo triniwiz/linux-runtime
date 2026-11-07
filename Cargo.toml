@@ -8,6 +8,7 @@ members = [
     "napi",
     "engines/quickjs",
     "engines/buffer",
+    "engines/v8",
 ]
 
 [workspace.package]

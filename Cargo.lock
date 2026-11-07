@@ -623,6 +623,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nativescript-hermes"
+version = "0.1.0"
+dependencies = [
+ "nativescript-napi",
+ "nativescript-napi-buffer",
+]
+
+[[package]]
+name = "nativescript-jsc"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "nativescript-napi",
+ "nativescript-napi-buffer",
+]
+
+[[package]]
 name = "nativescript-metadata"
 version = "0.1.0"
 dependencies = [
@@ -638,6 +655,13 @@ dependencies = [
  "nativescript-core",
  "nativescript-metadata",
  "url",
+]
+
+[[package]]
+name = "nativescript-napi-buffer"
+version = "0.1.0"
+dependencies = [
+ "nativescript-napi",
 ]
 
 [[package]]
@@ -660,6 +684,16 @@ dependencies = [
  "tungstenite",
  "ureq",
  "url",
+ "v8",
+]
+
+[[package]]
+name = "nativescript-v8"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "nativescript-napi",
+ "nativescript-napi-buffer",
  "v8",
 ]
 
