@@ -226,6 +226,25 @@ fn exit<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
 }
 
 /// Full GC (`__collect`).
+fn inspector_active<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, mut rv: Rv<'s>) {
+    rv.set_bool(crate::inspector::is_active(&crate::state::state(scope)));
+}
+
+/// `(domain, dispatch)`: CDP messages for `domain` go to `dispatch(message)`.
+fn inspector_register<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    let domain = args.get(0).to_rust_string_lossy(scope);
+    let Ok(f) = v8::Local::<v8::Function>::try_from(args.get(1)) else {
+        return;
+    };
+    let f = v8::Global::new(scope, f);
+    crate::inspector::register_js_domain(&crate::state::state(scope), domain, f);
+}
+
+fn inspector_send<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    let message = args.get(0).to_rust_string_lossy(scope);
+    crate::inspector::send_from_js(&crate::state::state(scope), message);
+}
+
 fn gc<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, _rv: Rv<'s>) {
     scope.low_memory_notification();
 }
@@ -290,6 +309,9 @@ pub fn create<'s>(scope: &mut v8::PinScope<'s, '_>, argv: &[String]) -> v8::Loca
     set!("hrtime", hrtime);
     set!("exit", exit);
     set!("gc", gc);
+    set!("inspectorActive", inspector_active);
+    set!("inspectorRegister", inspector_register);
+    set!("inspectorSend", inspector_send);
     set!("cwd", cwd);
     set!("chdir", chdir);
     set!("getenv", getenv);

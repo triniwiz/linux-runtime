@@ -149,7 +149,8 @@ fn resolve<'s>(
     }))
 }
 
-const PRELUDES: [(&str, &str); 5] = [
+const PRELUDES: [(&str, &str); 6] = [
+    ("nativescript:tslib", include_str!("../../core/js/tslib.js")),
     (
         "nativescript:prelude",
         include_str!("../../core/js/prelude.js"),

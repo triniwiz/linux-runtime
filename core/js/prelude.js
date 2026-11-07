@@ -184,4 +184,35 @@
   define('g_signal_connect_after', (instance, signal, handler, data = null) =>
     g_signal_connect_data(instance, signal, interop.callback(handler, signature(instance, signal)), data, null, 1 /* G_CONNECT_AFTER */));
 })();
+
+  // DevTools domains implemented in JS (core's inspector_modules: Network, DOM, CSS).
+  // Instances exist only while an inspector runs; other engines just keep the API.
+  (() => {
+    const domains = new Map();
+    const send = (message) => natives.inspectorSend?.(message);
+    const route = (text) => {
+      const { id, method, params } = JSON.parse(text);
+      const dot = method.indexOf('.');
+      const target = domains.get(method.slice(0, dot));
+      const fn = target?.[method.slice(dot + 1)];
+      const reply = (body) => send(JSON.stringify({ id, ...body }));
+      const fail = (e) => reply({ error: { code: -32000, message: String(e?.message ?? e) } });
+      if (typeof fn !== 'function') {
+        return reply({ error: { code: -32601, message: `'${method}' wasn't found` } });
+      }
+      try {
+        Promise.resolve(fn.call(target, params)).then((result) => reply({ result: result ?? {} }), fail);
+      } catch (e) {
+        fail(e);
+      }
+    };
+    define('__registerDomainDispatcher', (domain, klass) => {
+      if (!natives.inspectorActive?.()) return;
+      domains.set(domain, new klass());
+      natives.inspectorRegister(domain, route);
+    });
+    define('__inspectorSendEvent', (message) => send(typeof message === 'string' ? message : JSON.stringify(message)));
+    // CDP MonotonicTime: seconds
+    define('__inspectorTimestamp', () => performance.now() / 1000);
+  })();
 });

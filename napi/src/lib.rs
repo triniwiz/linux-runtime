@@ -34,7 +34,8 @@ pub fn run_script(js: Js, source: &str, name: &str) -> JsResult<napi_value> {
     Ok(result)
 }
 
-const PRELUDES: [(&str, &str); 2] = [
+const PRELUDES: [(&str, &str); 3] = [
+    ("nativescript:tslib", include_str!("../../core/js/tslib.js")),
     (
         "nativescript:prelude",
         include_str!("../../core/js/prelude.js"),

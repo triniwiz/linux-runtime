@@ -28,6 +28,9 @@ struct Inbox {
 pub struct Inspector {
     // the session must drop before the inspector
     session: Option<Rc<V8InspectorSession>>,
+    /// CDP domains implemented in JS (`__registerDomainDispatcher`) and their router
+    js_domains: std::collections::HashSet<String>,
+    js_dispatch: Option<v8::Global<v8::Function>>,
     inspector: V8Inspector,
     inbox: Arc<Inbox>,
     outbox: Arc<Mutex<Option<Sender<String>>>>,
@@ -139,7 +142,57 @@ fn pump(st: &State) {
         let Some(m) = inbox.queue.lock().unwrap().pop_front() else {
             break;
         };
-        session.dispatch_protocol_message(StringView::from(m.as_bytes()));
+        dispatch(st, &session, &m);
+    }
+}
+
+/// `"method":"Domain.name"` of a CDP message, without parsing all of it.
+fn method_of(message: &str) -> Option<&str> {
+    let start = message.find("\"method\":\"")? + 10;
+    let end = message[start..].find('"')?;
+    Some(&message[start..start + end])
+}
+
+/// Routes JS-implemented domains (core's Network, DOM, CSS) to JS, the rest to V8.
+fn dispatch(st: &State, session: &V8InspectorSession, message: &str) {
+    let handler = st.inspector.borrow().as_ref().and_then(|i| {
+        let domain = method_of(message)?.split('.').next()?;
+        i.js_domains
+            .contains(domain)
+            .then(|| i.js_dispatch.clone())
+            .flatten()
+    });
+    let Some(handler) = handler else {
+        session.dispatch_protocol_message(StringView::from(message.as_bytes()));
+        return;
+    };
+    with_js(st, |scope| {
+        let f = v8::Local::new(scope, &handler);
+        let text = v8::String::new(scope, message).unwrap();
+        let recv = v8::undefined(scope).into();
+        f.call(scope, recv, &[text.into()]);
+    });
+}
+
+/// Whether an inspector is running (JS domains are only created then).
+pub fn is_active(st: &State) -> bool {
+    st.inspector.borrow().is_some()
+}
+
+/// Registers a JS domain and the function messages for it are routed to.
+pub fn register_js_domain(st: &State, domain: String, dispatch: v8::Global<v8::Function>) {
+    if let Some(i) = st.inspector.borrow_mut().as_mut() {
+        i.js_domains.insert(domain);
+        i.js_dispatch = Some(dispatch);
+    }
+}
+
+/// Sends a message (event or response) from JS to the frontend.
+pub fn send_from_js(st: &State, message: String) {
+    if let Some(i) = st.inspector.borrow().as_ref() {
+        if let Some(tx) = i.outbox.lock().unwrap().as_ref() {
+            let _ = tx.send(message);
+        }
     }
 }
 
@@ -190,6 +243,8 @@ pub fn start(st: &Rc<State>, port: u16, title: &str) -> Result<(), String> {
         inbox: inbox.clone(),
         outbox: outbox.clone(),
         waiting,
+        js_domains: Default::default(),
+        js_dispatch: None,
     });
 
     let listener = TcpListener::bind(("127.0.0.1", port))
@@ -246,9 +301,7 @@ pub fn wait_for_debugger(st: &State) {
             connect(st);
         }
         if let (Some(m), Some((session, _))) = (message, session_of(st)) {
-            with_js(st, |_| {
-                session.dispatch_protocol_message(StringView::from(m.as_bytes()))
-            });
+            with_js(st, |_| dispatch(st, &session, &m));
         }
     }
     if let Some((session, _)) = session_of(st) {
