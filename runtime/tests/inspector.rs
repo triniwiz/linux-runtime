@@ -11,6 +11,21 @@ fn free_port() -> u16 {
         .port()
 }
 
+fn get(port: u16, path: &str, host: &str) -> String {
+    let mut http = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(http, "GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
+    let mut response = String::new();
+    http.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn ws_url(port: u16) -> String {
+    let body = get(port, "/json/list", "localhost");
+    let json: serde_json::Value =
+        serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    json[0]["webSocketDebuggerUrl"].as_str().unwrap().to_owned()
+}
+
 #[test]
 fn devtools_protocol() {
     let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
@@ -30,14 +45,11 @@ fn devtools_protocol() {
     .unwrap();
 
     let client = std::thread::spawn(move || {
-        let mut http = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        write!(http, "GET /json/list HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-        let mut body = String::new();
-        http.read_to_string(&mut body).unwrap();
-        let json: serde_json::Value =
-            serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        let url = json[0]["webSocketDebuggerUrl"].as_str().unwrap().to_owned();
-
+        // DNS rebinding: a page's own host name
+        assert!(get(port, "/json/list", "evil.example:80").starts_with("HTTP/1.1 403"));
+        // only the advertised (random) target id upgrades
+        assert!(tungstenite::connect(format!("ws://127.0.0.1:{port}/session")).is_err());
+        let url = ws_url(port);
         let (mut ws, _) = tungstenite::connect(url).unwrap();
         let mut call = |id: u64, method: &str, params: serde_json::Value| -> serde_json::Value {
             let msg = serde_json::json!({ "id": id, "method": method, "params": params });
@@ -84,8 +96,7 @@ fn breakpoints_pause_and_resume() {
     .unwrap();
 
     let client = std::thread::spawn(move || {
-        let url = format!("ws://127.0.0.1:{port}/session");
-        let (mut ws, _) = tungstenite::connect(url).unwrap();
+        let (mut ws, _) = tungstenite::connect(ws_url(port)).unwrap();
         let send = |ws: &mut tungstenite::WebSocket<_>,
                     id: u64,
                     method: &str,

@@ -249,9 +249,16 @@ pub fn start(st: &Rc<State>, port: u16, title: &str) -> Result<(), String> {
 
     let listener = TcpListener::bind(("127.0.0.1", port))
         .map_err(|e| format!("inspector port {port}: {e}"))?;
+    // unguessable: web pages can open WebSockets to localhost
+    let r = nativescript_core::nsbundle::crypto::random::<16>();
+    let hex = nativescript_core::nsbundle::crypto::to_hex(&r);
     let id = format!(
-        "{:016x}",
-        (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
     );
     eprintln!("Debugger listening on ws://127.0.0.1:{port}/{id}");
     eprintln!(
@@ -319,6 +326,22 @@ fn http(stream: &mut TcpStream, status: &str, body: &str) {
     );
 }
 
+/// `Host` names a loopback address (DNS rebinding sends the attacker's name).
+fn loopback_host(request: &str) -> bool {
+    let Some(host) = request
+        .lines()
+        .find_map(|l| l.strip_prefix("host:"))
+        .map(str::trim)
+    else {
+        return true;
+    };
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "::1")
+}
+
 fn serve(
     mut stream: TcpStream,
     port: u16,
@@ -329,9 +352,21 @@ fn serve(
     outbox: &Arc<Mutex<Option<Sender<String>>>>,
 ) {
     let mut head = [0u8; 2048];
-    let n = stream.peek(&mut head).unwrap_or(0);
+    // the whole request head (clients may send it in pieces)
+    let mut n = 0;
+    for _ in 0..200 {
+        n = stream.peek(&mut head).unwrap_or(0);
+        if n == 0 || n == head.len() || head[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let request = String::from_utf8_lossy(&head[..n]).to_ascii_lowercase();
     let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
+    if !loopback_host(&request) {
+        let _ = stream.read(&mut vec![0; n]);
+        return http(&mut stream, "403 Forbidden", "{}");
+    }
     if !request.contains("upgrade: websocket") {
         let mut buf = vec![0; n];
         let _ = stream.read(&mut buf);
@@ -357,6 +392,11 @@ fn serve(
             _ => http(&mut stream, "404 Not Found", "{}"),
         }
         return;
+    }
+    // the request was lowercased; the id is lowercase hex
+    if path != format!("/{id}") {
+        let _ = stream.read(&mut vec![0; n]);
+        return http(&mut stream, "404 Not Found", "{}");
     }
     if inbox.connected.swap(true, Ordering::SeqCst) {
         return; // one frontend at a time
