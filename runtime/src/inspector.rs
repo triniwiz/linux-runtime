@@ -266,39 +266,58 @@ pub fn start(st: &Rc<State>, port: u16, title: &str) -> Result<(), String> {
     );
     let context = st.main_context.context;
     let title = title.to_owned();
+    let interrupt = Interrupt {
+        isolate: isolate.thread_safe_handle(),
+        state: Rc::as_ptr(st) as usize,
+    };
     std::thread::Builder::new()
         .name("inspector".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
-                serve(stream, port, &id, &title, context, &inbox, &outbox);
+                serve(
+                    stream, port, &id, &title, context, &inbox, &outbox, &interrupt,
+                );
             }
         })
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// `--inspect-brk`: waits for a frontend and pauses on the first statement.
+/// `--inspect-brk`: waits for a frontend's `Runtime.runIfWaitingForDebugger` (or 3 s after it
+/// connects, for frontends that never send it), then stops before any app code runs.
 pub fn wait_for_debugger(st: &State) {
     let Some(inbox) = st.inspector.borrow().as_ref().map(|i| i.inbox.clone()) else {
         return;
     };
     eprintln!("Waiting for the debugger to attach...");
+    let waiting = || {
+        st.inspector
+            .borrow()
+            .as_ref()
+            .is_some_and(|i| i.waiting.get())
+    };
     if let Some(i) = st.inspector.borrow().as_ref() {
         i.waiting.set(true);
     }
-    while st
-        .inspector
-        .borrow()
-        .as_ref()
-        .is_some_and(|i| i.waiting.get())
-    {
+    let mut deadline: Option<std::time::Instant> = None;
+    while waiting() {
         let message = {
             let mut queue = inbox.queue.lock().unwrap();
-            while queue.is_empty() {
-                queue = inbox.ready.wait(queue).unwrap();
+            loop {
+                if let Some(m) = queue.pop_front() {
+                    break Some(m);
+                }
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    break None;
+                }
+                queue = inbox
+                    .ready
+                    .wait_timeout(queue, Duration::from_millis(100))
+                    .unwrap()
+                    .0;
             }
-            queue.pop_front()
         };
+        let Some(message) = message else { break };
         if st
             .inspector
             .borrow()
@@ -306,15 +325,23 @@ pub fn wait_for_debugger(st: &State) {
             .is_some_and(|i| i.session.is_none())
         {
             connect(st);
+            deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
         }
-        if let (Some(m), Some((session, _))) = (message, session_of(st)) {
-            with_js(st, |_| dispatch(st, &session, &m));
+        if let Some((session, _)) = session_of(st) {
+            with_js(st, |_| dispatch(st, &session, &message));
         }
     }
-    if let Some((session, _)) = session_of(st) {
-        let reason = b"Break on start";
-        session
-            .schedule_pause_on_next_statement(StringView::from(&reason[..]), StringView::empty());
+    if let Some(i) = st.inspector.borrow().as_ref() {
+        i.waiting.set(false);
+    }
+    // a scheduled pause doesn't stop in an ES module entry; this runs before it
+    if session_of(st).is_some() {
+        with_js(st, |scope| {
+            let source = v8::String::new(scope, "debugger;").unwrap();
+            if let Some(script) = v8::Script::compile(scope, source, None) {
+                script.run(scope);
+            }
+        });
     }
 }
 
@@ -342,6 +369,43 @@ fn loopback_host(request: &str) -> bool {
     matches!(name, "localhost" | "127.0.0.1" | "::1")
 }
 
+/// Dispatches queued V8-domain messages (with the `Debugger.pause`) inside running JS;
+/// JS-implemented domains wait for the event loop.
+unsafe extern "C" fn pause_now(_: v8::UnsafeRawIsolatePtr, data: *mut std::ffi::c_void) {
+    let st = &*(data as *const State);
+    let Some((session, inbox)) = session_of(st) else {
+        return;
+    };
+    let js_domains = st
+        .inspector
+        .borrow()
+        .as_ref()
+        .map(|i| i.js_domains.clone())
+        .unwrap_or_default();
+    let in_js = |m: &String| {
+        method_of(m)
+            .and_then(|m| m.split('.').next())
+            .is_some_and(|d| js_domains.contains(d))
+    };
+    let messages: Vec<String> = {
+        let mut queue = inbox.queue.lock().unwrap();
+        let (js, v8): (VecDeque<String>, VecDeque<String>) = queue.drain(..).partition(in_js);
+        *queue = js;
+        v8.into()
+    };
+    for m in messages {
+        session.dispatch_protocol_message(StringView::from(m.as_bytes()));
+    }
+}
+
+/// Wakes the JS thread for `Debugger.pause`.
+struct Interrupt {
+    isolate: v8::IsolateHandle,
+    /// `State`, alive as long as the isolate (`request_interrupt` fails after disposal)
+    state: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn serve(
     mut stream: TcpStream,
     port: u16,
@@ -350,7 +414,10 @@ fn serve(
     context: usize,
     inbox: &Arc<Inbox>,
     outbox: &Arc<Mutex<Option<Sender<String>>>>,
+    interrupt: &Interrupt,
 ) {
+    let state = interrupt.state;
+    let interrupt = &interrupt.isolate;
     let mut head = [0u8; 2048];
     // the whole request head (clients may send it in pieces)
     let mut n = 0;
@@ -424,6 +491,10 @@ fn serve(
         }
         match ws.read() {
             Ok(tungstenite::Message::Text(t)) => {
+                if method_of(&t) == Some("Debugger.pause") {
+                    // JS may be busy and never return to the loop that drains the inbox
+                    interrupt.request_interrupt(pause_now, state as *mut std::ffi::c_void);
+                }
                 inbox.queue.lock().unwrap().push_back(t.to_string());
                 inbox.ready.notify_all();
                 post(context, false, Box::new(|_, st| pump(st)));
