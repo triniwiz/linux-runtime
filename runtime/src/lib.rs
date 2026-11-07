@@ -22,9 +22,23 @@ use state::State;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 static V8_INIT: Once = Once::new();
+static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
+
+/// Runs V8's pending tasks for this isolate (FinalizationRegistry cleanup, GC steps): the
+/// default platform only queues them. True if any ran.
+pub(crate) fn pump_platform(isolate: &v8::Isolate) -> bool {
+    let Some(platform) = PLATFORM.get() else {
+        return false;
+    };
+    let mut ran = false;
+    while v8::Platform::pump_message_loop(platform, isolate, false) {
+        ran = true;
+    }
+    ran
+}
 
 pub struct Runtime {
     // field order matters: handles must be dropped before the isolate
@@ -53,7 +67,8 @@ impl Runtime {
     fn build(metadata: Arc<MetaSet>, parent: Option<workers::Parent>) -> Result<Self, String> {
         V8_INIT.call_once(|| {
             let platform = v8::new_default_platform(0, false).make_shared();
-            v8::V8::initialize_platform(platform);
+            v8::V8::initialize_platform(platform.clone());
+            let _ = PLATFORM.set(platform);
             v8::V8::initialize();
         });
 

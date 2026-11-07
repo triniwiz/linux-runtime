@@ -73,6 +73,9 @@ pub fn with_js(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
 pub fn checkpoint(scope: &mut v8::PinScope<'_, '_>, st: &State) {
     st.microtasks_scheduled.set(false);
     scope.perform_microtask_checkpoint();
+    if crate::pump_platform(scope) {
+        scope.perform_microtask_checkpoint();
+    }
     crate::napi::drain_finalizers(st);
     let rejections = std::mem::take(&mut *st.rejections.borrow_mut());
     for (_, value) in rejections {
