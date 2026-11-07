@@ -1,5 +1,5 @@
-//! Links libhermes.so from `$NS_HERMES_DIR` or vendor/<arch> (build-hermes.sh)
-//! and copies it, with hermesc, beside the binary.
+//! Links libhermes.a from `$NS_HERMES_DIR` or vendor/<arch> (build-hermes.sh)
+//! and copies hermesc beside the binary.
 use std::path::PathBuf;
 
 fn main() {
@@ -7,16 +7,19 @@ fn main() {
     let dir = std::env::var_os("NS_HERMES_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest.join("vendor").join(std::env::consts::ARCH));
-    if !dir.join("libhermes.so").exists() {
+    let lib = dir.join("libhermes.a");
+    if !lib.exists() {
         panic!(
-            "{}/libhermes.so not found: run engines/hermes/build-hermes.sh or set NS_HERMES_DIR",
-            dir.display()
+            "{} not found: run engines/hermes/build-hermes.sh or set NS_HERMES_DIR",
+            lib.display()
         );
     }
     println!("cargo:rustc-link-search=native={}", dir.display());
-    println!("cargo:rustc-link-lib=dylib=hermes");
-    // packaged next to the executable
-    println!("cargo:rustc-link-arg-bins=-Wl,-rpath,$ORIGIN");
+    // napi_* must stay in the binary for addons
+    println!("cargo:rustc-link-lib=static:+whole-archive=hermes");
+    for lib in ["icui18n", "icuuc", "stdc++", "m"] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
     println!("cargo:rustc-link-arg-bins=-rdynamic");
     // OUT_DIR is under target/<profile>/build/
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -25,10 +28,8 @@ fn main() {
         .find(|p| p.file_name().is_some_and(|n| n == "build"))
         .and_then(|p| p.parent());
     if let Some(profile) = profile {
-        for file in ["libhermes.so", "hermesc"] {
-            let _ = std::fs::copy(dir.join(file), profile.join(file));
-        }
+        let _ = std::fs::copy(dir.join("hermesc"), profile.join("hermesc"));
     }
     println!("cargo:rerun-if-env-changed=NS_HERMES_DIR");
-    println!("cargo:rerun-if-changed={}", dir.join("libhermes.so").display());
+    println!("cargo:rerun-if-changed={}", lib.display());
 }

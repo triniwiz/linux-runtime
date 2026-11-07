@@ -5,22 +5,23 @@ NativeScript Linux on Hermes, through the Node-API implementation in
 Windows runtime's `@nativescript/windows-hermes`), built for Linux from source.
 
 ```sh
-engines/hermes/build-hermes.sh          # -> engines/hermes/vendor/<arch>/{libhermes.so,hermesc}
+engines/hermes/build-hermes.sh          # -> engines/hermes/vendor/<arch>/{libhermes.a,hermesc}
 cargo build --release -p nativescript-hermes
 ```
 
 `build-hermes.sh` downloads a pinned hermes-windows revision (`HERMES_REV`, ~43 MB) or uses
-`HERMES_SRC`, and builds two targets with CMake: `libhermes.so` (Hermes VM + Node-API +
-`csrc/hermes_jsr.cpp`, the js_* host API the runtime calls) and `hermesc`. hermes-windows'
+`HERMES_SRC`, and builds two targets with CMake: Hermes VM + Node-API + `csrc/hermes_jsr.cpp`
+(the js_* host API the runtime calls), merged into one `libhermes.a`, and `hermesc`. hermes-windows'
 own `hermes_api.cpp` (the `jsr_*` API) is Windows-only (WER, inspector stubs), so it isn't built.
 Patches applied to the source:
 
 - `include(CTest)`: CMake module names are case sensitive off Windows
 - the global object's prototype may change: metadata globals resolve through a Proxy there
 
-`build.rs` links `libhermes.so` from `vendor/<arch>` (or `NS_HERMES_DIR`) with an `$ORIGIN` rpath and
-copies it and `hermesc` next to the binary. The library needs the system ICU (`libicuuc`,
-`libicui18n`).
+`build.rs` links `libhermes.a` from `vendor/<arch>` (or `NS_HERMES_DIR`) whole, so the executable
+exports `napi_*` to addons like the other engines, and copies `hermesc` next to it. The
+`node_api_*` functions nativescript-napi's compat also defines are weakened in the archive. Hermes
+needs the system ICU (`libicuuc`, `libicui18n`), a soname that differs between distributions.
 
 Notes:
 - promises are Hermes' JS implementation; unhandled rejections are reported through its rejection

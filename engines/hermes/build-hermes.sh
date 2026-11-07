@@ -1,6 +1,6 @@
 #!/bin/bash
-# Builds libhermes.so (Hermes + Node-API + js_* host API) and hermesc from
-# microsoft/hermes-windows into vendor/<arch>/ for build.rs.
+# Builds libhermes.a (Hermes + Node-API + js_* host API, one archive) and
+# hermesc from microsoft/hermes-windows into vendor/<arch>/ for build.rs.
 #
 #   HERMES_REV   hermes-windows commit (default: pinned below)
 #   HERMES_SRC   existing checkout to build instead of downloading
@@ -13,6 +13,7 @@ ARCH="$(uname -m)"
 WORK="${WORK:-$HERE/target-hermes}"
 OUT="$HERE/vendor/$ARCH"
 JOBS="${JOBS:-$(nproc)}"
+WEAK=""
 mkdir -p "$WORK" "$OUT"
 
 SRC="${HERMES_SRC:-$WORK/hermes-windows-$HERMES_REV}"
@@ -38,8 +39,25 @@ cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
     -DHERMES_ENABLE_TEST_SUITE=OFF -DHERMES_BUILD_APPLE_FRAMEWORK=OFF
 cmake --build "$BUILD" --target hermes_ns hermesc -j "$JOBS"
 
-install -m 644 "$(find "$BUILD/API/hermes_ns" -name 'libhermes.so' | head -1)" "$OUT/libhermes.so"
+# one archive for build.rs
+LIB="$OUT/libhermes.a"
+rm -f "$LIB"
+{
+    echo "CREATE $LIB"
+    for a in API/hermes_ns/libhermes_ns.a lib/libhermesvm_a.a API/hermes_node_api/libhermesNodeApi.a \
+        jsi/libjsi.a external/boost/boost_1_86_0/libs/context/libboost_context.a; do
+        [ -f "$BUILD/$a" ] && echo "ADDLIB $BUILD/$a"
+    done
+    echo "SAVE"
+    echo "END"
+} | ar -M
+# node_api.h functions nativescript-napi's compat also defines: its own win
+for sym in $(grep -ohE 'extern "C" fn (napi|node_api)_[a-z0-9_]+' "$HERE/../../napi/src/compat.rs" | awk '{print $4}'); do
+    WEAK+=" -W $sym"
+done
+objcopy $WEAK "$LIB"
+strip --strip-debug "$LIB"
 install -m 755 "$BUILD/bin/hermesc" "$OUT/hermesc"
-strip "$OUT/libhermes.so" "$OUT/hermesc"
+strip "$OUT/hermesc"
 echo "$HERMES_REV" > "$OUT/REVISION"
 ls -la "$OUT"
