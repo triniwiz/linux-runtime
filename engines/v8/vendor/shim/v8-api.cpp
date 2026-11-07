@@ -512,7 +512,7 @@ namespace v8impl {
                 // All other pointers we need are stored in `_bundle`
                 napi_env env = _bundle->env;
                 napi_callback cb = _bundle->cb;
-
+                if (!env->pending_finalizers.empty()) env->DrainPendingFinalizers();
 
                 napi_value result = nullptr;
                 bool exceptionOccurred = false;

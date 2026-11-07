@@ -50,7 +50,8 @@ namespace v8impl {
 
     [[noreturn]] inline void OnFatalError(const char* location,
                                       const char* message) {
-  throw std::runtime_error(std::string{location} + ": " + message);
+  // [linux port] location may be null
+  throw std::runtime_error(std::string{location ? location : "napi"} + ": " + message);
 }
 
 class RefTracker {
@@ -166,6 +167,16 @@ struct napi_env__ {
   // The finalizer can be deleted after this call.
   virtual void DequeueFinalizer(v8impl::RefTracker* finalizer) {
     pending_finalizers.erase(finalizer);
+  }
+
+  // [linux port] runs finalizers the GC queued; called from js_execute_pending_jobs and
+  // napi callbacks, so a hot loop doesn't pile them up
+  inline void DrainPendingFinalizers() {
+    while (!pending_finalizers.empty()) {
+      v8impl::RefTracker* finalizer = *pending_finalizers.begin();
+      pending_finalizers.erase(pending_finalizers.begin());
+      finalizer->Finalize();
+    }
   }
 
   virtual void DeleteMe() {

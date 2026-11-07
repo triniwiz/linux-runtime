@@ -71,7 +71,9 @@ napi_status js_create_napi_env(napi_env *env, napi_runtime__ *rt) {
         v8::HandleScope handle_scope(isolate);
         v8::Local<v8::Context> context = v8::Context::New(isolate);
         context->Enter();
-        *env = new napi_env__(context, NAPI_VERSION_EXPERIMENTAL);
+        // not NAPI_VERSION_EXPERIMENTAL: that runs finalizers inside the GC, where the
+        // runtime's (deleting references) are fatal; these queue for js_execute_pending_jobs
+        *env = new napi_env__(context, 8);
     }
     return napi_ok;
 }
@@ -106,6 +108,7 @@ napi_status js_execute_pending_jobs(napi_env env) {
     v8::Isolate *isolate = env->isolate;
     ns_v8_pump(isolate);
     v8::HandleScope scope(isolate);
+    env->DrainPendingFinalizers();
     v8::TryCatch tc(isolate);
     isolate->PerformMicrotaskCheckpoint();
     if (tc.HasCaught() && !tc.HasTerminated()) {
