@@ -92,7 +92,7 @@ fn resolve<'s>(
 ) -> Result<Option<(v8::Local<'s, v8::Value>, bool)>, String> {
     Ok(Some(match meta.kind() {
         MetaKind::Function => {
-            // missing symbols resolve to undefined, like on iOS
+            // missing symbols resolve to undefined
             let id = st.meta.id(&meta);
             let Ok(function) = ffi::function_for(st, id) else {
                 return Ok(Some((v8::undefined(scope).into(), true)));
@@ -101,9 +101,13 @@ fn resolve<'s>(
                 scope,
                 std::rc::Rc::as_ptr(&function) as *mut std::ffi::c_void,
             );
-            let f = v8::Function::builder(ffi::c_function_callback)
-                .data(data.into())
-                .build(scope)
+            let builder = v8::FunctionTemplate::builder(ffi::c_function_callback).data(data.into());
+            let template = match crate::fast::overload(&function) {
+                Some(fast) => builder.build_fast(scope, &[fast]),
+                None => builder.build(scope),
+            };
+            let f = template
+                .get_function(scope)
                 .ok_or("failed to create function")?;
             let name = v8::String::new(scope, meta.js_name()).unwrap();
             f.set_name(name);

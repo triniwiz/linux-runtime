@@ -83,6 +83,9 @@ fn references_and_structs() {
       eq(r.value, 7, "reference write");
 
       eq(div(17, 5), { quot: 3, rem: 2 }, "struct return");
+      eq(div(-17, 5), { quot: -3, rem: -2 }, "struct return, negative fields");
+      eq(ldiv(1e15 + 7, 10), { quot: 1e14, rem: 7 }, "16-byte struct return");
+      eq(lldiv(-9, 4), { quot: -2, rem: -1 }, "16-byte struct return, negative");
       const t = new tm({ tm_year: 100, tm_mday: 1 });
       eq([t.tm_year, t.tm_mday, t.tm_sec], [100, 1, 0], "struct constructor");
       const secs = new interop.Reference(interop.types.long, 0);
@@ -319,5 +322,62 @@ fn gvariant_dict_keys_stay_data() {
       eq(Object.getPrototypeOf(o) === Object.prototype, true, "prototype kept");
       eq(Object.keys(o), ["__proto__", "a"], "keys");
       eq(o.polluted, undefined, "no inherited keys");
+    "#);
+}
+
+/// Hot call sites get V8 fast API calls once optimized; results and errors must match.
+#[test]
+fn optimized_fast_calls() {
+    run(r#"
+      const buf = new Uint8Array([3, 1, 2, 0]);
+      const hello = interop.alloc(6);
+      new Uint8Array(interop.bufferFromData(hello, 6)).set([104, 101, 108, 108, 111, 0]);
+      function hot(i) {
+        eq(abs(-i), i, "abs(number)");
+        eq(abs(-7n), 7, "abs(bigint)");
+        eq(fabs(-i - 0.5), i + 0.5, "fabs");
+        eq(toupper(97), 65, "toupper");
+        eq(g_str_hash("héllo") === g_str_hash("héllo"), true, "char* from a JS string");
+        eq(g_str_equal("hello", hello), 1, "string vs Pointer");
+        eq(g_str_equal(buf.subarray(3), ""), 1, "typed array as pointer");
+        eq(memcmp(buf, buf, 4), 0, "buffers");
+        let threw = false;
+        try { abs("x"); } catch (e) { threw = /number or bigint/.test(e.message); }
+        eq(threw, true, "bad args throw");
+        threw = false;
+        try { abs(); } catch (e) { threw = /expects 1 argument/.test(e.message); }
+        eq(threw, true, "arity is checked");
+        const ref = new interop.Reference(interop.types.int32, i);
+        eq(memcmp(ref, ref, 4), 0, "Reference takes the full marshalling");
+        eq(g_str_equal(long, long + ""), 1, "strings past the stack buffer");
+        // C calling back into JS (with allocations) from inside a fast call
+        // (the microtask checkpoint source may be dispatched first)
+        const before = dispatched;
+        for (let n = 0; dispatched === before && n < 4; n++) g_main_context_iteration(ctx, 0);
+        eq(dispatched, before + 1, "source dispatched");
+        // Pointer methods with fast overloads
+        const p = new interop.Pointer(4096 + i);
+        eq(p.toNumber(), 4096 + i, "toNumber");
+        eq(p.toBigInt(), BigInt(4096 + i), "toBigInt");
+        eq(p.equals(4096 + i) && p.equals(p.add(0)) && !p.equals(null) && !p.equals("x"), true, "equals");
+        eq(p.add(8).subtract(8).toNumber(), 4096 + i, "add / subtract");
+        threw = false;
+        try { p.toNumber.call({}); } catch (e) { threw = /not an interop.Pointer/.test(e.message); }
+        eq(threw, true, "toNumber on a non-Pointer throws");
+      }
+      const long = "x".repeat(2000);
+      const ctx = g_main_context_new();
+      const source = g_idle_source_new();
+      let dispatched = 0;
+      g_source_set_callback(source, () => {
+        new Array(100).fill({});
+        dispatched++;
+        return 1;
+      }, null, null);
+      g_source_attach(source, ctx);
+      for (let i = 0; i < 30000; i++) hot(i % 1000);
+      g_source_destroy(source);
+      g_main_context_unref(ctx);
+      interop.free(hello);
     "#);
 }

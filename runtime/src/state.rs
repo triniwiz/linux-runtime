@@ -16,9 +16,9 @@ pub struct State {
     struct_arena: RefCell<Option<(v8::Global<v8::ArrayBuffer>, usize, usize)>>,
     /// libffi closures handed to C, kept alive for the lifetime of the runtime
     pub closures: RefCell<Vec<Box<ClosureData>>>,
-    pub pointer_template: RefCell<Option<v8::Global<v8::ObjectTemplate>>>,
-    /// struct view instance templates, keyed by type index
-    pub struct_templates: RefCell<HashMap<u32, v8::Global<v8::ObjectTemplate>>>,
+    pub pointers: RefCell<Option<crate::handles::Factory>>,
+    /// struct views, keyed by type index
+    pub struct_views: RefCell<HashMap<u32, Rc<crate::handles::Factory>>>,
     pub main_context: crate::event_loop::MainContext,
     pub modules: RefCell<crate::modules::ModuleMap>,
     pub next_request: Cell<u32>,
@@ -54,8 +54,8 @@ impl State {
             functions: Default::default(),
             struct_arena: Default::default(),
             closures: Default::default(),
-            pointer_template: Default::default(),
-            struct_templates: Default::default(),
+            pointers: Default::default(),
+            struct_views: Default::default(),
             main_context: crate::event_loop::MainContext::for_current_thread(),
             modules: Default::default(),
             next_request: Cell::new(0),

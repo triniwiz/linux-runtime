@@ -100,8 +100,8 @@ pub fn to_i64<'s>(
     v: v8::Local<'s, v8::Value>,
     ty: &Type,
 ) -> Result<i64, String> {
-    if v.is_number() {
-        let n = v.number_value(scope).unwrap_or(0.0);
+    if let Ok(n) = v8::Local::<v8::Number>::try_from(v) {
+        let n = n.value();
         return Ok(if n.is_finite() { n as i64 } else { 0 });
     }
     if let Ok(b) = v8::Local::<v8::BigInt>::try_from(v) {
@@ -127,7 +127,10 @@ fn to_f64<'s>(
     if let Ok(b) = v8::Local::<v8::BigInt>::try_from(v) {
         return Ok(b.i64_value().0 as f64);
     }
-    if v.is_number() || v.is_boolean() || v.is_null_or_undefined() {
+    if let Ok(n) = v8::Local::<v8::Number>::try_from(v) {
+        return Ok(n.value());
+    }
+    if v.is_boolean() || v.is_null_or_undefined() {
         return Ok(v.number_value(scope).unwrap_or(0.0));
     }
     Err(type_error("a number", ty))

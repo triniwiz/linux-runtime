@@ -141,7 +141,7 @@ impl CFunction {
                 ni += 1;
             }
         }
-        let ret = unsafe { self.desc.call_fast(fast.float_ret, ints, floats) };
+        let ret = unsafe { self.desc.call_fast(fast, ints, floats) };
         let result = unsafe {
             marshal::read(
                 st,
@@ -315,7 +315,8 @@ unsafe extern "C" fn closure_trampoline(
 ) {
     let data = &*(userdata as *const ClosureData);
     let st = &*data.state;
-    if std::thread::current().id() != st.thread {
+    thread_local!(static THREAD: std::thread::ThreadId = std::thread::current().id());
+    if THREAD.with(|t| *t) != st.thread {
         // called by C on another thread: run on the JS thread and wait
         let (ret, args, data_ptr) = (ret as usize, args as usize, userdata as usize);
         let done = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
@@ -354,10 +355,18 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     );
     let mut scope = null_mut();
     napi_open_handle_scope(js.0, &mut scope);
-    let mut argv = Vec::with_capacity(data.signature.len() - 1);
+    let argc = data.signature.len() - 1;
+    let mut inline = [null_mut(); 8];
+    let mut heap = Vec::new();
+    let argv = if argc <= inline.len() {
+        &mut inline[..argc]
+    } else {
+        heap.resize(argc, null_mut());
+        &mut heap[..]
+    };
     for (i, ty) in data.signature[1..].iter().enumerate() {
         match marshal::read(st, ty, *args.add(i) as *const u8, Mem::Temp) {
-            Ok(v) => argv.push(v),
+            Ok(v) => argv[i] = v,
             Err(e) => {
                 eprintln!("[nativescript] callback argument {}: {e}", i + 1);
                 napi_close_handle_scope(js.0, scope);
@@ -365,7 +374,7 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
             }
         }
     }
-    let result = js.call(js.deref(data.function), js.undefined(), &argv);
+    let result = js.call(js.deref(data.function), js.undefined(), argv);
     match result {
         Err(_) => crate::event_loop::report_pending(st),
         Ok(result) if !ret_ty.is_void() => {

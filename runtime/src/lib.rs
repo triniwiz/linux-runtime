@@ -3,6 +3,7 @@
 
 mod app_bundle;
 mod event_loop;
+mod fast;
 mod ffi;
 mod globals;
 mod handles;

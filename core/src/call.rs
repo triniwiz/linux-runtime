@@ -28,6 +28,8 @@ pub struct FastCall {
     /// per argument: true = float register
     pub float_args: Vec<bool>,
     pub float_ret: bool,
+    /// integer-only record of up to 16 bytes, returned in two registers
+    pub pair_ret: bool,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -56,6 +58,24 @@ type IntFn = unsafe extern "C" fn(
     f64,
     f64,
 ) -> i64;
+type PairFn = unsafe extern "C" fn(
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) -> u128;
 type FloatFn = unsafe extern "C" fn(
     i64,
     i64,
@@ -75,8 +95,30 @@ type FloatFn = unsafe extern "C" fn(
     f64,
 ) -> f64;
 
+/// Records C returns in integer registers (rax:rdx, x0:x1): up to 16 bytes, no floats.
+fn int_record(native: &Native, ty: &Type) -> bool {
+    fn leaves(native: &Native, ty: &Type) -> bool {
+        match ty {
+            Type::Float | Type::Double | Type::LongDouble | Type::ExtVector(..) => false,
+            Type::ConstantArray(_, inner) => leaves(native, inner),
+            Type::Struct(_)
+            | Type::Union(_)
+            | Type::AnonymousStruct(..)
+            | Type::AnonymousUnion(..) => native
+                .record(ty)
+                .is_ok_and(|r| r.fields.iter().all(|f| leaves(native, &f.ty))),
+            _ => true,
+        }
+    }
+    matches!(ty, Type::Struct(_) | Type::AnonymousStruct(..))
+        && native
+            .record(ty)
+            .is_ok_and(|r| r.size > 0 && r.size <= 16 && r.natural)
+        && leaves(native, ty)
+}
+
 impl FastCall {
-    fn new(signature: &[Type]) -> Option<Self> {
+    fn new(native: &Native, signature: &[Type]) -> Option<Self> {
         let class = |t: &Type| -> Option<bool> {
             match t {
                 Type::Float | Type::Double => Some(true),
@@ -93,7 +135,8 @@ impl FastCall {
                 _ => None,
             }
         };
-        let float_ret = if signature[0].is_void() {
+        let pair_ret = int_record(native, &signature[0]);
+        let float_ret = if signature[0].is_void() || pair_ret {
             false
         } else {
             class(&signature[0])?
@@ -107,6 +150,7 @@ impl FastCall {
             .then_some(FastCall {
                 float_args,
                 float_ret,
+                pair_ret,
             })
     }
 }
@@ -136,7 +180,7 @@ impl CallDesc {
         let fast = if variadic {
             None
         } else {
-            FastCall::new(&signature)
+            FastCall::new(native, &signature)
         };
         let slots = signature[1..]
             .iter()
@@ -189,17 +233,20 @@ impl CallDesc {
         );
     }
 
-    /// Register call (see [`FastCall`]); returns the raw return register.
+    /// Register call (see [`FastCall`]); returns the raw return register(s).
     ///
     /// # Safety
     /// Only for descriptors with `fast` set, args placed per `float_args`.
     #[inline]
-    pub unsafe fn call_fast(&self, float_ret: bool, ints: [i64; 8], floats: [f64; 8]) -> u128 {
+    pub unsafe fn call_fast(&self, fast: &FastCall, ints: [i64; 8], floats: [f64; 8]) -> u128 {
         let [a, b, c, d, e, f, g, h] = ints;
         let [p, q, r, s, t, u, v, w] = floats;
-        if float_ret {
+        if fast.float_ret {
             let fun: FloatFn = std::mem::transmute(self.address);
             fun(a, b, c, d, e, f, g, h, p, q, r, s, t, u, v, w).to_bits() as u128
+        } else if fast.pair_ret {
+            let fun: PairFn = std::mem::transmute(self.address);
+            fun(a, b, c, d, e, f, g, h, p, q, r, s, t, u, v, w)
         } else {
             let fun: IntFn = std::mem::transmute(self.address);
             fun(a, b, c, d, e, f, g, h, p, q, r, s, t, u, v, w) as u64 as u128

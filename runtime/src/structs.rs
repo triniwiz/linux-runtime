@@ -104,14 +104,14 @@ fn type_name(ty: &Type) -> &str {
 }
 
 /// Class for views of `ty`: field accessors on the prototype, cached per type.
-fn template<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+fn factory(
+    scope: &mut v8::PinScope<'_, '_>,
     st: &State,
     ty: &Type,
     index: u32,
-) -> Result<v8::Local<'s, v8::ObjectTemplate>, String> {
-    if let Some(t) = st.struct_templates.borrow().get(&index) {
-        return Ok(v8::Local::new(scope, t));
+) -> Result<std::rc::Rc<handles::Factory>, String> {
+    if let Some(f) = st.struct_views.borrow().get(&index) {
+        return Ok(f.clone());
     }
     let record = st.record(ty)?;
     let tmpl = v8::FunctionTemplate::new(
@@ -153,10 +153,14 @@ fn template<'s>(
     // instantiates the class so instances get its prototype
     tmpl.get_function(scope)
         .ok_or("failed to create struct class")?;
-    st.struct_templates
-        .borrow_mut()
-        .insert(index, v8::Global::new(scope, instances));
-    Ok(instances)
+    let factory = std::rc::Rc::new(handles::Factory::new(
+        scope,
+        instances,
+        Kind::Struct,
+        Some(index),
+    ));
+    st.struct_views.borrow_mut().insert(index, factory.clone());
+    Ok(factory)
 }
 
 /// Live view of the record `ty` at `addr`.
@@ -168,12 +172,43 @@ pub fn view<'s>(
     owner: Option<v8::Local<'s, v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, String> {
     let index = st.register_type(ty);
-    let tmpl = template(scope, st, ty, index)?;
-    let object = tmpl
-        .new_instance(scope)
+    let object = factory(scope, st, ty, index)?
+        .make(scope, addr, owner)
         .ok_or("failed to create struct view")?;
-    handles::init(scope, object, Kind::Struct, addr, Some(index), owner);
     Ok(object.into())
+}
+
+/// A record type's size and view class, resolved once (no lookups by name per value).
+pub struct RecordClass {
+    size: usize,
+    factory: std::rc::Rc<handles::Factory>,
+}
+
+impl RecordClass {
+    pub fn new(scope: &mut v8::PinScope<'_, '_>, st: &State, ty: &Type) -> Result<Self, String> {
+        let size = st.layout(ty)?.size;
+        let index = st.register_type(ty);
+        Ok(RecordClass {
+            size,
+            factory: factory(scope, st, ty, index)?,
+        })
+    }
+
+    /// View over a GC managed copy of the record at `src`.
+    pub fn copy<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        src: *const u8,
+    ) -> Result<v8::Local<'s, v8::Value>, String> {
+        let (buffer, addr) = st.struct_memory(scope, self.size);
+        unsafe { std::ptr::copy_nonoverlapping(src, addr as *mut u8, self.size) };
+        let object = self
+            .factory
+            .make(scope, addr, Some(buffer.into()))
+            .ok_or("failed to create struct view")?;
+        Ok(object.into())
+    }
 }
 
 /// View over a GC managed copy of the record at `src` (or zeroed memory).

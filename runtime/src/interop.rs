@@ -1,5 +1,4 @@
 //! The `interop` global: Pointer, Reference, types, alloc/free, sizeof...
-//! Mirrors the API of the NativeScript iOS runtime.
 
 use crate::ffi;
 use crate::handles::{self, Kind};
@@ -93,14 +92,12 @@ pub fn new_pointer<'s>(
     address: usize,
     owner: Option<v8::Local<'s, v8::Value>>,
 ) -> v8::Local<'s, v8::Object> {
-    let template = st
-        .pointer_template
+    st.pointers
         .borrow()
-        .clone()
-        .expect("interop not installed");
-    let object = v8::Local::new(scope, template).new_instance(scope).unwrap();
-    handles::init(scope, object, Kind::Pointer, address, None, owner);
-    object
+        .as_ref()
+        .expect("interop not installed")
+        .make(scope, address, owner)
+        .unwrap()
 }
 
 #[inline]
@@ -263,30 +260,12 @@ fn this_pointer<'s>(
     addr
 }
 
-fn this_owner<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: &v8::FunctionCallbackArguments<'s>,
-) -> Option<v8::Local<'s, v8::Value>> {
-    handles::owner(scope, args.this())
-}
-
 fn address_from_value<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     v: v8::Local<'s, v8::Value>,
 ) -> Result<usize, String> {
-    if v.is_null_or_undefined() {
-        return Ok(0);
-    }
-    if let Some(addr) = pointer_address(scope, v) {
-        return Ok(addr);
-    }
-    if let Ok(b) = v8::Local::<v8::BigInt>::try_from(v) {
-        return Ok(b.u64_value().0 as usize);
-    }
-    if v.is_number() {
-        return Ok(v.number_value(scope).unwrap_or(0.0) as usize);
-    }
-    Err("expected a number, bigint or Pointer".into())
+    let _ = scope;
+    crate::fast::address_of(v).ok_or_else(|| "expected a number, bigint or Pointer".into())
 }
 
 fn set_method<'s>(
@@ -296,6 +275,19 @@ fn set_method<'s>(
     callback: impl v8::MapFnTo<v8::FunctionCallback>,
 ) {
     let f = v8::FunctionTemplate::new(scope, callback);
+    let key = v8::String::new(scope, name).unwrap();
+    target.set(key.into(), f.into());
+}
+
+/// Method whose result V8 can box itself: optimized code calls `fast` directly.
+fn set_fast_method<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    target: v8::Local<'s, v8::Template>,
+    name: &str,
+    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    fast: v8::fast_api::CFunction,
+) {
+    let f = v8::FunctionTemplate::builder(callback).build_fast(scope, &[fast]);
     let key = v8::String::new(scope, name).unwrap();
     target.set(key.into(), f.into());
 }
@@ -329,22 +321,29 @@ fn pointer_ctor<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv
 }
 
 fn offset_pointer<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>, sign: i64) {
-    let Some(addr) = this_pointer(scope, &args) else {
-        return;
+    let Some(this) = handles::is(args.this().into(), Kind::Pointer) else {
+        return throw_error(scope, "not an interop.Pointer");
     };
     let delta = match marshal::to_i64(scope, args.get(0), &Type::Long) {
         Ok(d) => d,
         Err(e) => return throw_error(scope, &e),
     };
-    let owner = this_owner(scope, &args);
-    let st = state(scope);
-    let p = new_pointer(
-        scope,
-        &st,
-        (addr as i64).wrapping_add(sign * delta) as usize,
-        owner,
-    );
-    rv.set(p.into());
+    let address = (handles::address(this) as i64).wrapping_add(sign * delta) as usize;
+    let owner = handles::owner(scope, this);
+    let p = state_of(&args)
+        .pointers
+        .borrow()
+        .as_ref()
+        .and_then(|f| f.make(scope, address, owner));
+    if let Some(p) = p {
+        rv.set(p.into());
+    }
+}
+
+/// Runtime state passed as the method's data (no isolate slot lookup).
+fn state_of<'a>(args: &Args) -> &'a State {
+    let ext = v8::Local::<v8::External>::try_from(args.data()).expect("method data");
+    unsafe { &*(ext.value() as *const State) }
 }
 
 fn pointer_add<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, rv: Rv<'s>) {
@@ -395,20 +394,45 @@ fn pointer_equals<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: 
     rv.set(v8::Boolean::new(scope, other == Some(addr)).into());
 }
 
-fn pointer_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
+fn pointer_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+) -> v8::Local<'s, v8::FunctionTemplate> {
     let tmpl = v8::FunctionTemplate::new(scope, pointer_ctor);
     tmpl.instance_template(scope)
         .set_internal_field_count(handles::FIELDS);
     let name = v8::String::new(scope, "Pointer").unwrap();
     tmpl.set_class_name(name);
     let proto: v8::Local<v8::Template> = tmpl.prototype_template(scope).into();
-    set_method(scope, proto, "add", pointer_add);
-    set_method(scope, proto, "subtract", pointer_subtract);
-    set_method(scope, proto, "toNumber", pointer_to_number);
-    set_method(scope, proto, "toBigInt", pointer_to_bigint);
+    let data = v8::External::new(scope, st as *const State as *mut std::ffi::c_void);
+    let add = v8::FunctionTemplate::builder(pointer_add)
+        .data(data.into())
+        .build(scope);
+    let subtract = v8::FunctionTemplate::builder(pointer_subtract)
+        .data(data.into())
+        .build(scope);
+    for (name, f) in [("add", add), ("subtract", subtract)] {
+        let key = v8::String::new(scope, name).unwrap();
+        proto.set(key.into(), f.into());
+    }
+    let fast = |name| crate::fast::pointer_method(name).unwrap();
+    set_fast_method(
+        scope,
+        proto,
+        "toNumber",
+        pointer_to_number,
+        fast("toNumber"),
+    );
+    set_fast_method(
+        scope,
+        proto,
+        "toBigInt",
+        pointer_to_bigint,
+        fast("toBigInt"),
+    );
+    set_fast_method(scope, proto, "equals", pointer_equals, fast("equals"));
     set_method(scope, proto, "toHexString", pointer_to_hex);
     set_method(scope, proto, "toString", pointer_to_string);
-    set_method(scope, proto, "equals", pointer_equals);
     tmpl
 }
 
@@ -745,10 +769,10 @@ pub fn install<'s>(
 ) {
     let interop = v8::Object::new(scope);
 
-    let pointer_tmpl = pointer_template(scope);
+    let pointer_tmpl = pointer_template(scope, st);
     let pointer = pointer_tmpl.get_function(scope).unwrap();
     let instances = pointer_tmpl.instance_template(scope);
-    *st.pointer_template.borrow_mut() = Some(v8::Global::new(scope, instances));
+    *st.pointers.borrow_mut() = Some(handles::Factory::new(scope, instances, Kind::Pointer, None));
     let key = v8::String::new(scope, "Pointer").unwrap();
     interop.set(scope, key.into(), pointer.into());
 

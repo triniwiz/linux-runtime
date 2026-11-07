@@ -18,3 +18,6 @@ bench('memchr(ptr, int, size)', () => memchr(view, 0, 64));
 bench('div(int, int) -> struct', (i) => div(i, 7));
 bench('g_str_hash(string)', () => g_str_hash('nativescript'));
 bench('getpid()', () => getpid());
+const items = new Uint8Array(16);
+const cmp = (a, b) => 0;
+bench('qsort(16, js comparator)', () => qsort(items, 16, 1, cmp));

@@ -89,3 +89,78 @@ pub fn owner<'s>(
 pub fn set_owner<'s>(o: v8::Local<'s, v8::Object>, owner: v8::Local<'s, v8::Value>) {
     o.set_internal_field(3, owner.into());
 }
+
+extern "C" {
+    // v8::Object::Clone(v8::Isolate*); Local<T> is trivial_abi, returned in a register
+    #[link_name = "_ZN2v86Object5CloneEPNS_7IsolateE"]
+    fn v8_object_clone(
+        this: *const v8::Object,
+        isolate: v8::UnsafeRawIsolatePtr,
+    ) -> *const v8::Object;
+}
+
+/// Shallow copy, internal fields included.
+#[inline]
+fn clone<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    o: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    unsafe {
+        let p = v8_object_clone(&*o, scope.as_raw_isolate_ptr());
+        std::mem::transmute::<*const v8::Object, Option<v8::Local<'s, v8::Object>>>(p)
+    }
+}
+
+/// Instances of one interop template, copied from a prototype instance: several times
+/// cheaper than `ObjectTemplate::NewInstance`.
+pub struct Factory {
+    template: v8::Global<v8::ObjectTemplate>,
+    prototype: Option<v8::Global<v8::Object>>,
+    kind: Kind,
+    type_index: Option<u32>,
+}
+
+impl Factory {
+    pub fn new<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        template: v8::Local<'s, v8::ObjectTemplate>,
+        kind: Kind,
+        type_index: Option<u32>,
+    ) -> Self {
+        let prototype = template.new_instance(scope).and_then(|o| {
+            init(scope, o, kind, 0, type_index, None);
+            // a copy must not share field storage with its source (e.g. a V8 sandbox build)
+            let copy = clone(scope, o)?;
+            set_address(copy, 1);
+            (address(o) == 0 && address(copy) == 1 && of(copy.into()).map(|c| c.1) == Some(kind))
+                .then(|| v8::Global::new(scope, o))
+        });
+        Factory {
+            template: v8::Global::new(scope, template),
+            prototype,
+            kind,
+            type_index,
+        }
+    }
+
+    #[inline]
+    pub fn make<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        address: usize,
+        owner: Option<v8::Local<'s, v8::Value>>,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        if let Some(p) = &self.prototype {
+            let p = v8::Local::new(scope, p);
+            let o = clone(scope, p)?;
+            set_address(o, address);
+            if let Some(owner) = owner {
+                set_owner(o, owner);
+            }
+            return Some(o);
+        }
+        let o = v8::Local::new(scope, &self.template).new_instance(scope)?;
+        init(scope, o, self.kind, address, self.type_index, owner);
+        Some(o)
+    }
+}

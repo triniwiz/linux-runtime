@@ -3,6 +3,7 @@
 use crate::interop::keys;
 use crate::marshal::{self, CallCx, Mem};
 use crate::state::{state, State};
+use crate::structs;
 use crate::{report_exception, throw_error};
 use libffi::raw;
 use nativescript_core::call::{CallDesc, FastCall};
@@ -15,7 +16,9 @@ use std::rc::Rc;
 pub struct CFunction {
     desc: CallDesc,
     /// owning runtime, avoids the isolate slot lookup per call
-    state: *const State,
+    pub(crate) state: *const State,
+    /// view class of a record return
+    ret_record: std::cell::OnceCell<structs::RecordClass>,
 }
 
 impl std::ops::Deref for CFunction {
@@ -36,6 +39,7 @@ impl CFunction {
         Ok(CFunction {
             desc: CallDesc::new(st, name, address, signature, variadic)?,
             state: st,
+            ret_record: Default::default(),
         })
     }
 
@@ -90,7 +94,7 @@ impl CFunction {
         }
 
         if let Some(fast) = &self.fast {
-            return self.call_fast(scope, st, args, fast);
+            return self.call_registers(scope, st, args, fast);
         }
 
         let variadic_sig;
@@ -136,20 +140,60 @@ impl CFunction {
 
         unsafe { self.desc.call(cif, argv, ret) };
 
-        let result = unsafe { marshal::read(scope, st, ret_ty, ret, Mem::Temp)? };
+        let result = unsafe { self.read_ret(scope, st, ret_ty, ret)? };
         cx.finish(scope, st)?;
         Ok(result)
+    }
+
+    /// Return value at `ret`: records through the cached view class.
+    unsafe fn read_ret<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        ty: &Type,
+        ret: *const u8,
+    ) -> Result<v8::Local<'s, v8::Value>, String> {
+        if !matches!(ty, Type::Struct(_) | Type::Union(_)) {
+            return marshal::read(scope, st, ty, ret, Mem::Temp);
+        }
+        let class = match self.ret_record.get() {
+            Some(c) => c,
+            None => {
+                let c = structs::RecordClass::new(scope, st, ty)?;
+                self.ret_record.get_or_init(|| c)
+            }
+        };
+        class.copy(scope, st, ret)
     }
 }
 
 impl CFunction {
-    fn call_fast<'s>(
+    fn call_registers<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         st: &State,
         args: &v8::FunctionCallbackArguments<'s>,
         fast: &FastCall,
     ) -> Result<v8::Local<'s, v8::Value>, String> {
+        let ret = self.call_fast_raw(scope, st, fast, |i| args.get(i as i32))?;
+        unsafe {
+            self.read_ret(
+                scope,
+                st,
+                &self.signature[0],
+                &ret as *const u128 as *const u8,
+            )
+        }
+    }
+
+    /// Register call with full marshalling; returns the raw return register.
+    pub(crate) fn call_fast_raw<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        fast: &FastCall,
+        arg: impl Fn(usize) -> v8::Local<'s, v8::Value>,
+    ) -> Result<u128, String> {
         let mut cx = CallCx::default();
         let mut ints = [0i64; 8];
         let mut floats = [0f64; 8];
@@ -161,7 +205,7 @@ impl CFunction {
                     scope,
                     st,
                     ty,
-                    args.get(i as i32),
+                    arg(i),
                     &mut slot as *mut u128 as *mut u8,
                     &mut cx,
                 )
@@ -176,18 +220,9 @@ impl CFunction {
                 ni += 1;
             }
         }
-        let ret = unsafe { self.desc.call_fast(fast.float_ret, ints, floats) };
-        let result = unsafe {
-            marshal::read(
-                scope,
-                st,
-                &self.signature[0],
-                &ret as *const u128 as *const u8,
-                Mem::Temp,
-            )?
-        };
+        let ret = unsafe { self.desc.call_fast(fast, ints, floats) };
         cx.finish(scope, st)?;
-        Ok(result)
+        Ok(ret)
     }
 }
 
@@ -362,7 +397,8 @@ unsafe extern "C" fn closure_trampoline(
 ) {
     let data = &*(userdata as *const ClosureData);
     let st = &*data.state;
-    if std::thread::current().id() != st.thread {
+    thread_local!(static THREAD: std::thread::ThreadId = std::thread::current().id());
+    if THREAD.with(|t| *t) != st.thread {
         // called by C on another thread: run on the JS thread and wait
         let (ret, args) = (ret as usize, args as usize);
         crate::event_loop::run_on_js_thread(
@@ -387,20 +423,32 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
         0,
         ret_size.max(std::mem::size_of::<usize>()),
     );
-    let isolate = st.isolate.get();
-    let Some(context) = st.context.borrow().clone() else {
+    let isolate = &mut *st.isolate.get();
+    v8::scope!(let scope, isolate);
+    let Some(context) = st
+        .context
+        .borrow()
+        .as_ref()
+        .map(|c| v8::Local::new(scope, c))
+    else {
         return;
     };
-    let isolate = &mut *isolate;
-    v8::scope!(let scope, isolate);
-    let context = v8::Local::new(scope, &context);
     let scope = &mut v8::ContextScope::new(scope, context);
     v8::tc_scope!(let tc, scope);
 
-    let mut argv = Vec::with_capacity(data.signature.len() - 1);
+    let undefined: v8::Local<v8::Value> = v8::undefined(tc).into();
+    let argc = data.signature.len() - 1;
+    let mut inline = [undefined; 8];
+    let mut heap = Vec::new();
+    let argv = if argc <= inline.len() {
+        &mut inline[..argc]
+    } else {
+        heap.resize(argc, undefined);
+        &mut heap[..]
+    };
     for (i, ty) in data.signature[1..].iter().enumerate() {
         match marshal::read(tc, st, ty, *args.add(i) as *const u8, Mem::Temp) {
-            Ok(v) => argv.push(v),
+            Ok(v) => argv[i] = v,
             Err(e) => {
                 eprintln!("[nativescript] callback argument {}: {e}", i + 1);
                 return;
@@ -408,8 +456,7 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
         }
     }
     let function = v8::Local::new(tc, &data.function);
-    let recv = v8::undefined(tc).into();
-    let result = function.call(tc, recv, &argv);
+    let result = function.call(tc, undefined, argv);
     if let Some(exception) = tc.exception() {
         let message = tc.message();
         report_exception(tc, exception, message);
