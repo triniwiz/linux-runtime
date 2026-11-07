@@ -1,9 +1,20 @@
 use std::path::PathBuf;
 
+/// `cc::Build` with stack protection and `_FORTIFY_SOURCE` (clang enables neither by default).
+fn cc_build() -> cc::Build {
+    let mut build = cc::Build::new();
+    build
+        .flag_if_supported("-fstack-protector-strong")
+        .flag_if_supported("-fstack-clash-protection")
+        .flag("-U_FORTIFY_SOURCE")
+        .flag("-D_FORTIFY_SOURCE=2");
+    build
+}
+
 fn main() {
     let qjs = PathBuf::from("vendor/quickjs");
     let napi = PathBuf::from("vendor/napi");
-    cc::Build::new()
+    cc_build()
         .include(&qjs)
         .files(
             [
@@ -24,7 +35,7 @@ fn main() {
         .compile("quickjs");
     // napi_* must stay in the binary for addons: link the shim whole.
     // clang: the shim uses compound literals in static initializers (gcc rejects them)
-    cc::Build::new()
+    cc_build()
         .compiler("clang")
         .include(&qjs)
         .include(napi.join("common"))
@@ -37,7 +48,7 @@ fn main() {
         .warnings(false)
         .link_lib_modifier("+whole-archive")
         .compile("quickjs_napi");
-    cc::Build::new()
+    cc_build()
         .cpp(true)
         .include(&qjs)
         .include(napi.join("common"))
