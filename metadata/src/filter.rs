@@ -10,6 +10,15 @@ use crate::types::TypeTag;
 use crate::{flags, hash::string_hash, Meta, MetaFile, MetaKind, Offset, Type};
 use std::collections::{HashMap, HashSet};
 
+/// C APIs the runtime's own JS (core/js/prelude.js) calls, never filtered out.
+pub const RUNTIME_SYMBOLS: &[&str] = &[
+    "g_signal_connect_data",
+    "g_signal_lookup",
+    "g_signal_query",
+    "g_type_fundamental",
+    "_GSignalQuery",
+];
+
 #[derive(Debug, Clone)]
 struct Rule {
     module: String,
@@ -101,7 +110,9 @@ pub fn filter(file: &MetaFile, filter: &Filter) -> (Vec<u8>, FilterStats) {
     let mut keep: Vec<Meta> = Vec::new();
     let mut seen: HashSet<Offset> = HashSet::new();
     for meta in &all {
-        if filter.allows(meta.module().name(), meta.name()) && seen.insert(meta.offset) {
+        let needed = RUNTIME_SYMBOLS.contains(&meta.js_name())
+            || filter.allows(meta.module().name(), meta.name());
+        if needed && seen.insert(meta.offset) {
             keep.push(*meta);
         }
     }

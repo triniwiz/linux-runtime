@@ -200,6 +200,7 @@ fn filter_keeps_referenced_records() {
     );
     assert!(small.find("gtk_widget_show").is_none());
     assert!(small.find("gtk_button_new").is_none());
+    assert!(small.find("g_signal_connect_data").is_some());
     assert_eq!(
         small.find("G_PRIORITY_DEFAULT").and_then(|m| m.js_code()),
         Some("0")
