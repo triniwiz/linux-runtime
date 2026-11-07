@@ -185,7 +185,7 @@ impl Js {
         let mut buf = vec![0u8; len + 1];
         self.write_utf8(v, buf.as_mut_ptr(), len + 1)?;
         buf.truncate(len);
-        Ok(String::from_utf8(buf).unwrap_or_default())
+        Ok(String::from_utf8(buf).unwrap_or_else(|e| wtf8_lossy(e.into_bytes())))
     }
     /// String value, coercing non strings.
     pub fn to_string(self, v: napi_value) -> String {
@@ -405,4 +405,18 @@ impl Js {
         let mut n = 0;
         (unsafe { napi_get_value_int32(self.0, v, &mut n) } == 0).then_some(n)
     }
+}
+
+/// Engines hand lone surrogates out as WTF-8 (`ED A0..BF xx`): one U+FFFD each.
+fn wtf8_lossy(mut bytes: Vec<u8>) -> String {
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == 0xED && (0xA0..=0xBF).contains(&bytes[i + 1]) {
+            bytes[i..i + 3].copy_from_slice(&[0xEF, 0xBF, 0xBD]);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }

@@ -935,8 +935,27 @@ napi_status napi_create_string_latin1(napi_env env,
     CHECK_ARG(result)
     CHECK_ARG(str)
 
-    JSValue value = JS_NewStringLen(env->context, str,
-                                    (length == NAPI_AUTO_LENGTH) ? strlen(str) : length);
+    // JS_NewStringLen takes UTF-8; it stores the result as an 8-bit string again
+    size_t len = (length == NAPI_AUTO_LENGTH) ? strlen(str) : length;
+    size_t extra = 0;
+    for (size_t i = 0; i < len; i++) extra += ((uint8_t) str[i]) >> 7;
+    if (extra == 0) {
+        return CreateScopedResult(env, JS_NewStringLen(env->context, str, len), result);
+    }
+    char *utf8 = js_malloc(env->context, len + extra);
+    if (!utf8) return napi_set_last_error(env, napi_generic_failure, NULL, 0, NULL);
+    char *q = utf8;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = (uint8_t) str[i];
+        if (c < 0x80) {
+            *q++ = (char) c;
+        } else {
+            *q++ = (char) (0xc0 | (c >> 6));
+            *q++ = (char) (0x80 | (c & 0x3f));
+        }
+    }
+    JSValue value = JS_NewStringLen(env->context, utf8, len + extra);
+    js_free(env->context, utf8);
     return CreateScopedResult(env, value, result);
 }
 
@@ -2045,24 +2064,27 @@ napi_status napi_get_value_string_latin1(napi_env env, napi_value value, char *s
     }
 
     size_t cstr_len = 0;
-    const char *cstr = JS_ToCStringLen(env->context, &cstr_len, *((JSValue *) value));
+    const uint8_t *cstr = (const uint8_t *) JS_ToCStringLen(env->context, &cstr_len, *((JSValue *) value));
+    if (cstr == NULL) return napi_set_last_error(env, napi_string_expected, NULL, 0, NULL);
 
-    if (str == NULL) {
-        CHECK_ARG(result)
-        *result = cstr_len;
-    } else if (length != 0) {
-        // [windows port] bound the copy to the buffer and, crucially, report bytes written in
-        // *result — napi-rs uses this length as the string size (the original left it unset →
-        // every string read by napi-rs came back empty).
-        size_t to_copy = cstr_len < length - 1 ? cstr_len : length - 1;
-        memcpy(str, cstr, to_copy);
-        str[to_copy] = '\0';
-        if (result != NULL) *result = to_copy;
-    } else if (result != NULL) {
-        *result = 0;
+    // one Latin-1 byte per code point (low 8 bits, like V8)
+    size_t count = 0, capacity = (str != NULL && length != 0) ? length - 1 : 0;
+    for (size_t i = 0; i < cstr_len;) {
+        uint8_t c = cstr[i];
+        uint32_t cp;
+        size_t n = c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+        if (i + n > cstr_len) n = cstr_len - i;
+        cp = n == 1 ? c : n == 2 ? ((c & 0x1f) << 6) | (cstr[i + 1] & 0x3f)
+                       : n == 3 ? ((c & 0x0f) << 12) | ((cstr[i + 1] & 0x3f) << 6) | (cstr[i + 2] & 0x3f)
+                                : ((c & 0x07) << 18) | ((cstr[i + 1] & 0x3f) << 12) | ((cstr[i + 2] & 0x3f) << 6) | (cstr[i + 3] & 0x3f);
+        i += n;
+        if (str != NULL && count < capacity) str[count] = (char) (cp & 0xff);
+        if (str == NULL || count < capacity) count++;
     }
+    if (str != NULL && length != 0) str[count] = '\0';
+    if (result != NULL) *result = count;
 
-    JS_FreeCString(env->context, cstr);
+    JS_FreeCString(env->context, (const char *) cstr);
     return napi_clear_last_error(env);
 }
 
