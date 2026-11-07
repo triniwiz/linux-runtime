@@ -1,7 +1,7 @@
 # Node-API engines
 
 The `napi/` runtime (engine independent, the same metadata interop, event loop and modules as the
-V8 runtime) on other JavaScript engines, mirroring the Windows runtime's `packages/windows-<engine>`.
+V8 runtime) on other JavaScript engines.
 Each engine crate provides `napi_*` (an engine shim) plus napi-android's `js_*` host functions
 (`js_create_runtime`, `js_execute_script`, `js_execute_pending_jobs`, ...) and a `ns-linux-<engine>`
 binary with the same command line as `ns-linux`.
@@ -24,6 +24,6 @@ cargo test --release -p nativescript-<engine> --test conformance
 scripts/pack-npm.sh                              # dist/npm/nativescript-linux-<engine>-<version>.tgz
 ```
 
-ES modules run through `napi/src/esm.rs` (oxc's module runner transform, as Windows does for its
-Node-API engines): none of the shims expose a module loader. HTTP modules, `ns:module` and
-`import()` from CommonJS aren't supported there yet.
+ES modules run through `napi/src/esm.rs` (oxc's module runner transform): none of the shims
+expose a module loader. HTTP modules, `ns:module` and `import()` from CommonJS go through the
+same runner.

@@ -24,9 +24,31 @@ fn build_addon(repo: &Path) -> Option<()> {
     status.success().then_some(())
 }
 
+/// Serves tests/conformance/http-fixtures for HTTP module imports; returns its origin.
+fn http_fixtures(dir: PathBuf) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut line = String::new();
+            let _ = BufReader::new(&stream).read_line(&mut line);
+            let path = line.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').to_owned();
+            let body = (!path.contains("..")).then(|| std::fs::read(dir.join(&path)).ok()).flatten();
+            let _ = match body {
+                Some(b) => write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len())
+                    .and_then(|_| stream.write_all(&b)),
+                None => write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            };
+        }
+    });
+    origin
+}
+
 /// (exit success, stderr), killed after 30s.
-fn run_script(bin: &str, meta: &Path, script: &Path) -> (bool, String) {
+fn run_script(bin: &str, meta: &Path, script: &Path, http: &str) -> (bool, String) {
     let mut child = Command::new(bin)
+        .env("NS_TEST_HTTP", http)
         .arg("--metadata")
         .arg(meta)
         .arg(script)
@@ -62,6 +84,7 @@ pub fn run_suite(bin: &str) {
         return;
     }
     let dir = repo.join("tests/conformance");
+    let http = http_fixtures(dir.join("http-fixtures"));
     let has_addon = build_addon(&repo).is_some();
     let mut scripts: Vec<(PathBuf, Option<String>)> = Vec::new();
     for (sub, failing) in [("", false), ("fail", true)] {
@@ -83,10 +106,10 @@ pub fn run_suite(bin: &str) {
         let handles: Vec<_> = scripts
             .iter()
             .map(|(script, expect)| {
-                let (meta, dir) = (&meta, &dir);
+                let (meta, dir, http) = (&meta, &dir, &http);
                 s.spawn(move || {
                     let name = script.strip_prefix(dir).unwrap().display().to_string();
-                    let (ok, stderr) = run_script(bin, meta, script);
+                    let (ok, stderr) = run_script(bin, meta, script, http);
                     match expect {
                         None if !ok => Some(format!("{name}: failed\n{stderr}")),
                         Some(e) if ok => Some(format!("{name}: expected a failure ({e})")),

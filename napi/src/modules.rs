@@ -11,6 +11,10 @@ use std::ptr::null_mut;
 /// `Err(None)`: a JS exception is pending.
 pub type Load<T> = Result<T, Option<String>>;
 
+/// `import()` in CommonJS, renamed by `esm::rewrite_dynamic_imports`; same length as `import`
+/// so columns (stack traces, source maps) don't move.
+pub const CJS_IMPORT: &str = "__ns$i";
+
 pub type AddonInit = unsafe extern "C" fn(napi_env, napi_value) -> napi_value;
 
 thread_local! {
@@ -43,15 +47,23 @@ pub fn require_cjs(st: &State, path: &Path) -> Load<napi_value> {
 
     let outcome = (|| -> Load<()> {
         let source = read_source(path)?;
-        let wrapped =
-            format!("(function (exports, require, module, __filename, __dirname) {{{source}\n}})");
+        #[cfg(feature = "module_runner")]
+        let (source, import) = match crate::esm::rewrite_dynamic_imports(&source) {
+            Some(s) => (s, crate::esm::importer(st, path)?),
+            None => (source, js.undefined()),
+        };
+        #[cfg(not(feature = "module_runner"))]
+        let import = js.undefined();
+        let wrapped = format!(
+            "(function (exports, require, module, __filename, __dirname, {CJS_IMPORT}) {{{source}\n}})"
+        );
         let function =
             crate::run_script(js, &wrapped, &path.to_string_lossy()).map_err(|_| None)?;
         let require = require_function(js, &dir_of(path));
         js.call(
             function,
             exports,
-            &[exports, require, module, filename, dirname],
+            &[exports, require, module, filename, dirname, import],
         )
         .map_err(|_| None)?;
         Ok(())

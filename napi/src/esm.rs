@@ -6,15 +6,17 @@
 //! imports, so live bindings hold through cycles; top-level await works since
 //! every body is async.
 //!
-//! Resolution is the shared Node style resolver. Not supported: HTTP modules,
-//! `ns:` builtins, `import()` from CommonJS.
+//! Resolution is the shared Node style resolver; HTTP modules are fetched (release builds:
+//! see `resolve::check_remote`), `ns:module` is the dev host API, and `import()` in CommonJS
+//! is rewritten to go through the runner.
 
 use crate::js::*;
-use crate::modules::{load_addon, require_cjs, Load};
+use crate::modules::{load_addon, require_cjs, Load, CJS_IMPORT};
 use crate::state::{state, State};
 use crate::sys::*;
 use nativescript_core::resolve::{
-    dir_of, format_of, path_to_file_url, read_source, resolve, Format, Kind,
+    check_remote, configure_loader, dir_of, file_url_to_path, format_of, is_url, is_volatile,
+    path_to_file_url, read_source, resolve, Format, Kind,
 };
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -108,7 +110,11 @@ fn load(st: &State, key: &str) -> Load<napi_value> {
     let out = js.object();
     let kind = match format_of(path) {
         Format::Esm => {
-            let source = read_source(path)?;
+            let source = if is_url(path) {
+                fetch(key)?
+            } else {
+                read_source(path)?
+            };
             let t = match transform(&source, key) {
                 Ok(t) => t,
                 Err(e) => {
@@ -141,6 +147,23 @@ fn load(st: &State, key: &str) -> Load<napi_value> {
     };
     js.set(out, "kind", js.string(kind));
     Ok(out)
+}
+
+/// Body of an HTTP module (dev servers, or remote modules a release app allows).
+fn fetch(url: &str) -> Result<String, String> {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    let agent = AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(30))
+            .timeout_read(Duration::from_secs(120))
+            .build()
+    });
+    let response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
+    // an https module may redirect to http
+    check_remote(response.get_url())?;
+    response.into_string().map_err(|e| format!("{url}: {e}"))
 }
 
 /// Resolves `spec` from the module `referrer` (a key), or the working directory.
@@ -179,7 +202,75 @@ unsafe extern "C" fn native_resolve(env: napi_env, info: napi_callback_info) -> 
 unsafe extern "C" fn native_file_url(env: napi_env, info: napi_callback_info) -> napi_value {
     let js = Js(env);
     let (a, ..) = cb_args::<1>(env, info);
-    js.string(&path_to_file_url(Path::new(&js.to_string(a[0]))))
+    let key = js.to_string(a[0]);
+    if is_url(Path::new(&key)) {
+        return js.string(&key);
+    }
+    js.string(&path_to_file_url(Path::new(&key)))
+}
+
+/// Registry key of a module URL (`file:` URLs are paths).
+unsafe extern "C" fn native_key_of(env: napi_env, info: napi_callback_info) -> napi_value {
+    let js = Js(env);
+    let (a, ..) = cb_args::<1>(env, info);
+    let url = js.to_string(a[0]);
+    match url.starts_with("file:") {
+        true => js.string(&file_url_to_path(&url).to_string_lossy()),
+        false => js.string(&url),
+    }
+}
+
+unsafe extern "C" fn native_is_volatile(env: napi_env, info: napi_callback_info) -> napi_value {
+    let js = Js(env);
+    let (a, ..) = cb_args::<1>(env, info);
+    js.boolean(is_volatile(Path::new(&js.to_string(a[0]))))
+}
+
+/// `configureLoader(json)`: import map, volatile patterns, URL canonicalization.
+unsafe extern "C" fn native_configure(env: napi_env, info: napi_callback_info) -> napi_value {
+    let js = Js(env);
+    let (a, ..) = cb_args::<1>(env, info);
+    match serde_json::from_str(&js.to_string(a[0])) {
+        Ok(config) => configure_loader(&config),
+        Err(e) => js.throw(&format!("configureLoader: {e}")),
+    }
+    null_mut()
+}
+
+/// Drops a CommonJS module from the require cache.
+unsafe extern "C" fn native_forget(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let (a, ..) = cb_args::<1>(env, info);
+    let key = PathBuf::from(st.js().to_string(a[0]));
+    if let Some(r) = st.modules.borrow_mut().remove(&key) {
+        st.js().delete_ref(r);
+    }
+    null_mut()
+}
+
+/// Keys of the loaded CommonJS modules.
+unsafe extern "C" fn native_cjs_keys(env: napi_env, _info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let keys: Vec<napi_value> = st
+        .modules
+        .borrow()
+        .keys()
+        .map(|k| js.string(&k.to_string_lossy()))
+        .collect();
+    js.array(&keys)
+}
+
+/// `createRequire(fileOrUrl)`: `require` relative to that module.
+unsafe extern "C" fn native_create_require(env: napi_env, info: napi_callback_info) -> napi_value {
+    let js = Js(env);
+    let (a, ..) = cb_args::<1>(env, info);
+    let file = js.to_string(a[0]);
+    let file = match file.starts_with("file:") {
+        true => file_url_to_path(&file),
+        false => PathBuf::from(file),
+    };
+    crate::modules::require_function(js, &dir_of(&file))
 }
 
 /// Reports an error from a module graph as uncaught.
@@ -205,6 +296,12 @@ fn runner(st: &State) -> Load<napi_value> {
         ("resolve", native_resolve),
         ("fileUrl", native_file_url),
         ("report", native_report),
+        ("keyOf", native_key_of),
+        ("isVolatile", native_is_volatile),
+        ("configure", native_configure),
+        ("forget", native_forget),
+        ("cjsKeys", native_cjs_keys),
+        ("createRequire", native_create_require),
     ] {
         js.set(natives, name, js.function(name, Some(cb), null_mut()));
     }
@@ -250,11 +347,72 @@ pub fn require(st: &State, path: &Path) -> Load<napi_value> {
     }
 }
 
+/// `import(spec)` for code in the CommonJS module `path`.
+pub fn importer(st: &State, path: &Path) -> Load<napi_value> {
+    let js = st.js();
+    let runner = runner(st)?;
+    let importer = js.get(runner, "importer").map_err(|_| None)?;
+    js.call(importer, runner, &[js.string(&path.to_string_lossy())])
+        .map_err(|_| None)
+}
+
+/// CommonJS source with its `import()` calls renamed to [`CJS_IMPORT`], if it has any.
+pub fn rewrite_dynamic_imports(source: &str) -> Option<String> {
+    use oxc::allocator::Allocator;
+    use oxc::ast::ast::ImportExpression;
+    use oxc::ast_visit::{walk, Visit};
+    use oxc::parser::Parser;
+    use oxc::span::SourceType;
+
+    // cheap check first: `import` followed by `(`
+    let mut maybe = false;
+    let mut rest = source;
+    while let Some(i) = rest.find("import") {
+        rest = &rest[i + 6..];
+        if rest.trim_start().starts_with('(') {
+            maybe = true;
+            break;
+        }
+    }
+    if !maybe {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
+    // a syntax error is the engine's to report
+    if !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    struct Calls(Vec<usize>);
+    impl<'a> Visit<'a> for Calls {
+        fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
+            self.0.push(it.span.start as usize);
+            walk::walk_import_expression(self, it);
+        }
+    }
+    let mut calls = Calls(Vec::new());
+    calls.visit_program(&parsed.program);
+    if calls.0.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut at = 0;
+    for start in calls.0 {
+        out.push_str(&source[at..start]);
+        out.push_str(CJS_IMPORT);
+        at = start + "import".len();
+    }
+    out.push_str(&source[at..]);
+    Some(out)
+}
+
 /// The module runner, evaluated as a classic script on every engine (ES5-ish
 /// syntax, nothing the transform would have to lower).
 const RUNNER_JS: &str = r#"(function (natives) {
   'use strict';
   var load = natives.load, resolve = natives.resolve, fileUrl = natives.fileUrl, report = natives.report;
+  // `ns:` builtin modules
+  var builtins = new Map();
   // key -> { key, exports, promise, state, error, stack }; `stack` is the static
   // import chain a module was first reached through, which is how a cycle shows
   var registry = new Map();
@@ -303,7 +461,13 @@ const RUNNER_JS: &str = r#"(function (natives) {
 
   // Loads and starts evaluating `key`. A load failure throws and registers nothing.
   function instantiate(key, parentStack) {
-    var loaded = load(key);
+    var loaded;
+    if (key.slice(0, 3) === 'ns:') {
+      if (!builtins.has(key)) throw new Error("Cannot find module '" + key + "'");
+      loaded = { kind: 'cjs', value: builtins.get(key) };
+    } else {
+      loaded = load(key);
+    }
     var record = { key: key, exports: namespace(), promise: null, state: 'pending', error: undefined,
       stack: parentStack.concat([key]) };
     var exports = record.exports;
@@ -360,13 +524,34 @@ const RUNNER_JS: &str = r#"(function (natives) {
   function dynamicImport(spec, referrer) {
     try {
       var key = resolve(String(spec), referrer);
-      return (registry.get(key) || instantiate(key, [])).promise;
+      var record = natives.isVolatile(key) ? null : registry.get(key);
+      return (record || instantiate(key, [])).promise;
     } catch (e) {
       return Promise.reject(e);
     }
   }
 
+  // dev host API for @nativescript/vite (policy stays in JS there)
+  builtins.set('ns:module', Object.freeze({
+    configureLoader: function (config) { natives.configure(JSON.stringify(config == null ? {} : config)); },
+    invalidateModules: function (urls) {
+      Array.from(urls || [], String).forEach(function (url) {
+        var key = natives.keyOf(url);
+        registry.delete(key);
+        natives.forget(key);
+      });
+    },
+    getLoadedModuleUrls: function () {
+      var keys = [];
+      registry.forEach(function (_, key) { if (key.slice(0, 3) !== 'ns:') keys.push(key); });
+      natives.cjsKeys().forEach(function (key) { if (!registry.has(key)) keys.push(key); });
+      return keys.map(fileUrl);
+    },
+    createRequire: function (file) { return natives.createRequire(String(file && file.href || file)); }
+  }));
+
   return {
+    importer: function (key) { return function (spec) { return dynamicImport(spec, key); }; },
     runEntry: function (key) {
       var promise;
       try {
@@ -385,7 +570,20 @@ const RUNNER_JS: &str = r#"(function (natives) {
 
 #[cfg(test)]
 mod tests {
-    use super::transform;
+    use super::{rewrite_dynamic_imports, transform};
+
+    #[test]
+    fn commonjs_import_calls_are_renamed_in_place() {
+        let src = "const a = import('./a.mjs');\n// import('no')\nconst s = \"import('no')\";\nimport (`./${x}.mjs`);";
+        let out = rewrite_dynamic_imports(src).unwrap();
+        assert_eq!(
+            out,
+            "const a = __ns$i('./a.mjs');\n// import('no')\nconst s = \"import('no')\";\n__ns$i (`./${x}.mjs`);"
+        );
+        assert_eq!(out.len(), src.len(), "columns stay put");
+        assert!(rewrite_dynamic_imports("const important = 1; importScripts();").is_none());
+        assert!(rewrite_dynamic_imports("const s = 'import(x)';").is_none());
+    }
 
     #[test]
     fn exports_are_getters_hoisted_above_imports() {

@@ -866,6 +866,8 @@ dependencies = [
  "nativescript-metadata",
  "oxc",
  "oxc_transformer_plugins",
+ "serde_json",
+ "ureq",
  "url",
 ]
 
@@ -979,6 +981,7 @@ checksum = "bddea1749d73e0fef24031e76455bfd2969c654a4c088911fcf305579d9bd515"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
+ "oxc_ast_visit",
  "oxc_codegen",
  "oxc_diagnostics",
  "oxc_parser",
