@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# its own workspace: the addon builds nativescript-napi without the engine feature
+exclude = ["linux-napi"]
 members = [
     "metadata",
     "core",

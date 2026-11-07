@@ -10,13 +10,15 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 
-// engine -> npm package; every package carries both x64 and arm64
+// engine -> npm package; every package carries both x64 and arm64.
+// napi is the linux-napi addon (pack-npm.sh treats it as an engine).
 const PACKAGES = {
   classic: "@nativescript/linux",
   quickjs: "@nativescript/linux-quickjs",
   v8: "@nativescript/linux-v8",
   jsc: "@nativescript/linux-jsc",
   hermes: "@nativescript/linux-hermes",
+  napi: "@nativescript/linux-napi",
 };
 const ENGINES = Object.keys(PACKAGES);
 

@@ -24,6 +24,7 @@ qsort(nums, nums.length, 4, (a, b) => int(a) - int(b)); // JS function as a C ca
 | [`runtime/`](runtime) | The V8 runtime (rusty_v8): C interop, ES modules and CommonJS, fetch and WebSocket, workers, DevTools |
 | [`cli/`](cli) | `ns-linux`, the runtime executable |
 | [`napi/`](napi), [`engines/`](engines) | The same runtime over Node-API, on QuickJS, V8, JavaScriptCore and Hermes ([engines/README.md](engines/README.md)) |
+| [`linux-napi/`](linux-napi) | `@nativescript/linux-napi`: the C interop as a Node.js addon ([linux-napi/README.md](linux-napi/README.md)) |
 | [`npm/`](npm) | Package template and typings for the npm packages |
 | [`tests/conformance/`](tests/conformance) | Scripts every runtime has to pass |
 | [`examples/`](examples) | Small scripts, a GTK demo and benchmarks |
@@ -79,7 +80,15 @@ cargo test --release -p nativescript-quickjs
 cargo test --release -p nativescript-v8
 ```
 
-The tests use the metadata in `metadata-generator/tests/TestOutput`. `tests/conformance` runs on every
+The tests use the metadata in `metadata-generator/tests/TestOutput`. The addon builds in its own
+workspace:
+
+```sh
+cd linux-napi && npm run build
+NS_METADATA=../metadata-generator/tests/TestOutput/metadata-$(uname -m).bin npm test
+```
+
+ `tests/conformance` runs on every
 runtime through each crate's `conformance` test. C call overhead is measured by
 `./target/release/ns-linux examples/bench/ffi.js`.
 
@@ -110,9 +119,9 @@ packs an app folder into a read-only `app.nsbundle`, optionally encrypted, and s
 scripts/pack-npm.sh 0.1.0
 ```
 
-This builds `@nativescript/linux` (V8) and the Node-API engine packages into `dist/npm/`, for the host
-architecture. `ENGINES="quickjs v8"` limits the engines, and `STRICT=1` fails instead of skipping an
-engine that can't be built.
+This builds `@nativescript/linux` (V8), the Node-API engine packages and `@nativescript/linux-napi`
+into `dist/npm/`, for the host architecture. `ENGINES="quickjs v8 napi"` limits the packages, and
+`STRICT=1` fails instead of skipping one that can't be built.
 
 `.github/workflows/ci.yml` runs the tests on x64 and arm64. `.github/workflows/npm_release.yml` builds
 both architectures on a `v*` tag, merges them into one package per engine and publishes to npm.

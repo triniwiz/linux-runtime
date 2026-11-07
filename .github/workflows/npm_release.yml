@@ -1,7 +1,8 @@
 name: npm release
 
-# Publishes @nativescript/linux (V8) and the Node-API engine packages
-# @nativescript/linux-{quickjs,v8,jsc,hermes} via npm OIDC trusted publishing. The trusted
+# Publishes @nativescript/linux (V8), the Node-API engine packages
+# @nativescript/linux-{quickjs,v8,jsc,hermes} and the @nativescript/linux-napi addon via npm OIDC
+# trusted publishing. The trusted
 # publisher matches repository + workflow FILENAME + environment, so renaming this file or the
 # `npm-publish` environment breaks publishing; each package needs its own entry on npmjs.com.
 #
@@ -18,7 +19,7 @@ on:
         type: choice
         required: true
         default: all
-        options: [all, classic, quickjs, v8, jsc, hermes]
+        options: [all, classic, quickjs, v8, jsc, hermes, napi]
       version:
         description: "Version to cut, e.g. 0.1.0-alpha.2 (dist-tag = prerelease id, plain version = latest). Empty: rolling 'next'."
         required: false
@@ -138,17 +139,21 @@ jobs:
         with:
           pattern: npm-*
           merge-multiple: true
-      # both arches share the template and typings; runtime/<arch> and tools/<arch> merge side by side
+      # arch specific files have arch specific paths (runtime/<arch>, tools/<arch>,
+      # linux.<arch>.node, metadata-<arch>.bin); everything else is the same in both
       - name: Merge x64 and arm64
         run: |
           mkdir -p x64 arm64 out
           tar -xzf npm-x64.tar.gz -C x64
           tar -xzf npm-arm64.tar.gz -C arm64
           cp -a "x64/$DIR" out/
-          cp -a "arm64/$DIR/framework/runtime/." "out/$DIR/framework/runtime/"
-          cp -a "arm64/$DIR/framework/tools/." "out/$DIR/framework/tools/"
+          cp -an "arm64/$DIR/." "out/$DIR/"
           for arch in x64 arm64; do
-            test -x "out/$DIR/framework/runtime/$arch/ns-linux" || { echo "::error::$DIR has no $arch runtime"; exit 1; }
+            if [ "$DIR" = linux-napi ]; then
+              test -f "out/$DIR/linux.$arch.node"
+            else
+              test -x "out/$DIR/framework/runtime/$arch/ns-linux"
+            fi || { echo "::error::$DIR has no $arch build"; exit 1; }
           done
       - name: npm pack
         run: |

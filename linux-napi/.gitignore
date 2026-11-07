@@ -1,0 +1,4 @@
+/target
+/linux.*.node
+/metadata-*.bin
+/typings

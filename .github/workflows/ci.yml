@@ -51,3 +51,12 @@ jobs:
         run: cargo test --release -p nativescript-jsc
       - name: Node-API runtime unit tests
         run: cargo test --release -p nativescript-napi
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: linux-napi addon
+        working-directory: linux-napi
+        run: |
+          npm run build
+          NS_METADATA="$GITHUB_WORKSPACE/metadata-generator/tests/TestOutput/metadata-$(uname -m).bin" npm test

@@ -5,8 +5,9 @@
 #   METADATA=<metadata.bin dir>  default: metadata-generator/tests/TestOutput
 #   TYPINGS=<typings dir>        default: $METADATA/typings
 #   MDG=<generator bin dir>      metadata-generator + lib/clang, for app/plugin native code
-#   ENGINES="quickjs v8 jsc hermes"  Node-API engine packages besides @nativescript/linux (V8);
-#                                jsc needs libjavascriptcoregtk, hermes engines/hermes/build-hermes.sh
+#   ENGINES="quickjs v8 jsc hermes napi"  packages besides @nativescript/linux (V8): the
+#                                Node-API engines (jsc needs libjavascriptcoregtk, hermes
+#                                engines/hermes/build-hermes.sh) and napi, the linux-napi addon
 #   STRICT=1                     fail instead of skipping an engine that can't be built (CI)
 #
 # Layout (see nativescript-cli lib/services/linux-project-service.ts):
@@ -17,6 +18,7 @@
 #   framework/tools/<x64|arm64>/ns-metadata-filter   native-api-usage.json filtering
 #   framework/tools/<x64|arm64>/ns-bundle            app.nsbundle packing, runtime fuses
 #   framework/tools/<x64|arm64>/hermesc              Hermes bytecode compiler (linux-hermes)
+# linux-napi: linux.<x64|arm64>.node, metadata-<x86_64|aarch64>.bin, typings/
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,7 +34,7 @@ case "$RUST_ARCH" in
 esac
 [ -f "$METADATA/metadata-$RUST_ARCH.bin" ] || { echo "missing $METADATA/metadata-$RUST_ARCH.bin" >&2; exit 1; }
 
-ENGINES="${ENGINES-quickjs v8 jsc hermes}"
+ENGINES="${ENGINES-quickjs v8 jsc hermes napi}"
 BUILT=()
 skip() {
     echo "warning: skipping linux-$1, $2" >&2
@@ -42,6 +44,10 @@ for e in $ENGINES; do
     case $e in
         hermes) [ -f "${NS_HERMES_DIR:-engines/hermes/vendor/$RUST_ARCH}/libhermes.a" ] ||
             { skip hermes "run engines/hermes/build-hermes.sh"; continue; } ;;
+        napi)
+            # its own workspace (nativescript-napi without the engine feature)
+            if (cd linux-napi && cargo build --release); then BUILT+=(napi); else skip napi "its build failed"; fi
+            continue ;;
     esac
     if cargo build --release -p "nativescript-$e"; then
         BUILT+=("$e")
@@ -99,6 +105,31 @@ JSON
     (cd "$out" && npm pack --silent --pack-destination ..)
 }
 
+pack_addon() {
+    local out="dist/npm/linux-napi"
+    rm -rf "$out"
+    mkdir -p "$out/typings"
+    cp linux-napi/index.js linux-napi/index.d.ts "$out/"
+    [ -f linux-napi/README.md ] && cp linux-napi/README.md "$out/"
+    install -m 755 linux-napi/target/release/liblinux_napi.so "$out/linux.$ARCH.node"
+    strip "$out/linux.$ARCH.node"
+    cp "$METADATA/metadata-$RUST_ARCH.bin" "$out/"
+    cp "$TYPINGS"/*.d.ts npm/typings/linux-runtime.d.ts "$out/typings/" 2>/dev/null || true
+    for m in GLib Gtk pango cairo gdk_pixbuf graphene harfbuzz fontconfig; do
+        [ -f "$out/typings/c!$m.d.ts" ] && echo "/// <reference path=\"./c!$m.d.ts\" />"
+    done > "$out/typings/index.d.ts"
+    echo '/// <reference path="./linux-runtime.d.ts" />' >> "$out/typings/index.d.ts"
+    node -e '
+      const fs = require("fs");
+      const [src, dst, version] = process.argv.slice(1);
+      const pkg = JSON.parse(fs.readFileSync(src, "utf8"));
+      pkg.version = version;
+      delete pkg.scripts;
+      fs.writeFileSync(dst, JSON.stringify(pkg, null, 2) + "\n");
+    ' linux-napi/package.json "$out/package.json" "$VERSION"
+    (cd "$out" && npm pack --silent --pack-destination ..)
+}
+
 pack linux ns-linux "V8" v8
 for e in "${BUILT[@]}"; do
     case $e in
@@ -106,6 +137,7 @@ for e in "${BUILT[@]}"; do
         v8) pack linux-v8 ns-linux-v8 "V8 over Node-API" v8 ;;
         jsc) pack linux-jsc ns-linux-jsc "JavaScriptCore, Node-API; needs WebKitGTK's libjavascriptcoregtk" jsc ;;
         hermes) pack linux-hermes ns-linux-hermes "Hermes, Node-API" hermes ;;
+        napi) pack_addon ;;
     esac
 done
 ls -la dist/npm/*.tgz
