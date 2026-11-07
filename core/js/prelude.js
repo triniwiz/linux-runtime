@@ -185,6 +185,148 @@
     g_signal_connect_data(instance, signal, interop.callback(handler, signature(instance, signal)), data, null, 1 /* G_CONNECT_AFTER */));
 })();
 
+// GVariant to JS values, and D-Bus objects whose properties read as JS properties.
+(function () {
+  'use strict';
+  const g = globalThis;
+  if (typeof g.g_variant_get_type_string !== 'function') return;
+  const define = (name, value) =>
+    Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false });
+  const text = (p) => interop.stringFromCString(p);
+  // 64-bit integers stay BigInts only when a Number would lose precision
+  const int64 = (x) => (typeof x === 'bigint' && x >= BigInt(Number.MIN_SAFE_INTEGER) && x <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(x) : x);
+
+  function children(v, each) {
+    const n = Number(g_variant_n_children(v));
+    for (let i = 0; i < n; i++) {
+      const child = g_variant_get_child_value(v, i);
+      try {
+        each(child, i);
+      } finally {
+        g_variant_unref(child);
+      }
+    }
+  }
+
+  function unpack(v) {
+    if (!v) return null;
+    const type = text(g_variant_get_type_string(v));
+    switch (type[0]) {
+      case 'b': return !!g_variant_get_boolean(v);
+      case 'y': return g_variant_get_byte(v);
+      case 'n': return g_variant_get_int16(v);
+      case 'q': return g_variant_get_uint16(v);
+      case 'i': return g_variant_get_int32(v);
+      case 'h': return g_variant_get_handle(v);
+      case 'u': return g_variant_get_uint32(v);
+      case 'x': return int64(g_variant_get_int64(v));
+      case 't': return int64(g_variant_get_uint64(v));
+      case 'd': return g_variant_get_double(v);
+      case 's': case 'o': case 'g': return text(g_variant_get_string(v, null));
+      case 'v': {
+        const inner = g_variant_get_variant(v);
+        try {
+          return unpack(inner);
+        } finally {
+          g_variant_unref(inner);
+        }
+      }
+      case 'm': {
+        const inner = g_variant_get_maybe(v);
+        if (!inner) return null;
+        try {
+          return unpack(inner);
+        } finally {
+          g_variant_unref(inner);
+        }
+      }
+      case 'a': {
+        if (type === 'ay') return new Uint8Array(collect(v));
+        if (type[1] === '{') {
+          const out = {};
+          children(v, (entry) => {
+            const key = g_variant_get_child_value(entry, 0);
+            const value = g_variant_get_child_value(entry, 1);
+            out[String(unpack(key))] = unpack(value);
+            g_variant_unref(key);
+            g_variant_unref(value);
+          });
+          return out;
+        }
+        return collect(v);
+      }
+      default: // tuples
+        return collect(v);
+    }
+  }
+
+  function collect(v) {
+    const out = [];
+    children(v, (child) => out.push(unpack(child)));
+    return out;
+  }
+
+  define('g_variant_unpack', unpack);
+
+  if (typeof g.g_dbus_proxy_new_for_bus_sync !== 'function') return;
+  const t = interop.types;
+
+  // GError** out parameter: the message, and the error freed
+  function failure(ref, what) {
+    const error = ref.value;
+    if (!error) return new Error(what);
+    const message = text(new interop.Reference(t.pointer, error.add(8)).value); // GError.message
+    g_error_free(error);
+    return new Error(`${what}: ${message}`);
+  }
+
+  function dbus(bus, name, path, iface = name) {
+    const error = new interop.Reference(t.pointer, null);
+    const proxy = g_dbus_proxy_new_for_bus_sync(bus, 0, null, name, path, iface, null, error);
+    if (!proxy) throw failure(error, `D-Bus ${name} ${path}`);
+    const read = (prop) => {
+      const v = g_dbus_proxy_get_cached_property(proxy, prop);
+      if (!v) return undefined;
+      try {
+        return unpack(v);
+      } finally {
+        g_variant_unref(v);
+      }
+    };
+    const api = {
+      proxy,
+      /** Calls a D-Bus method; `parameters` is a GVariant tuple (or null). */
+      call(method, parameters = null) {
+        const err = new interop.Reference(t.pointer, null);
+        const result = g_dbus_proxy_call_sync(proxy, method, parameters, 0, -1, null, err);
+        if (!result) throw failure(err, `D-Bus ${method}`);
+        try {
+          return unpack(result);
+        } finally {
+          g_variant_unref(result);
+        }
+      },
+      /** Runs `listener` whenever the service changes a property. */
+      onChanged(listener) {
+        return g_signal_connect(proxy, 'g-properties-changed', () => listener());
+      },
+    };
+    // D-Bus properties are PascalCase; camelCase reads them too
+    return new Proxy(api, {
+      get(target, key) {
+        if (typeof key !== 'string' || key in target) return target[key];
+        const value = read(key);
+        return value !== undefined ? value : read(key[0].toUpperCase() + key.slice(1));
+      },
+    });
+  }
+
+  define('DBus', {
+    system: (name, path, iface) => dbus(1 /* G_BUS_TYPE_SYSTEM */, name, path, iface),
+    session: (name, path, iface) => dbus(2 /* G_BUS_TYPE_SESSION */, name, path, iface),
+  });
+})();
+
   // DevTools domains implemented in JS (core's inspector_modules: Network, DOM, CSS).
   // Instances exist only while an inspector runs; other engines just keep the API.
   (() => {
