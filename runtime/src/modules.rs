@@ -258,6 +258,8 @@ pub fn dynamic_import<'s>(
             let namespace = module.get_module_namespace();
             match v8::Local::<v8::Promise>::try_from(result) {
                 Ok(p) if p.state() == v8::PromiseState::Rejected => {
+                    // the import() promise carries the rejection
+                    p.mark_as_handled();
                     let e = p.result(tc);
                     resolver.reject(tc, e);
                 }

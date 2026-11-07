@@ -68,7 +68,7 @@ pub fn run_suite(bin: &str) {
         for entry in std::fs::read_dir(dir.join(sub)).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if !name.ends_with(".js") || name == "harness.js" || (name == "napi-addon.js" && !has_addon) {
+            if !(name.ends_with(".js") || name.ends_with(".mjs")) || name == "harness.js" || (name == "napi-addon.js" && !has_addon) {
                 continue;
             }
             let expect = failing.then(|| {
