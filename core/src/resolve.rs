@@ -1,5 +1,6 @@
 //! Module resolution (Node style) shared by the engines.
 
+use crate::nsbundle as vfs;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15,8 +16,6 @@ pub enum Format {
     Json,
     Addon,
 }
-
-// ---------- resolution ----------
 
 pub fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -39,20 +38,20 @@ fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
 }
 
 pub fn read_json(path: &Path) -> Option<serde_json::Value> {
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    serde_json::from_slice(&vfs::read(path).ok()?).ok()
 }
 
 pub fn resolve_path(p: &Path) -> Option<PathBuf> {
-    if p.is_file() {
+    if vfs::is_file(p) {
         return Some(normalize(p));
     }
     for ext in [".js", ".mjs", ".cjs", ".json", ".node"] {
         let c = with_suffix(p, ext);
-        if c.is_file() {
+        if vfs::is_file(&c) {
             return Some(normalize(&c));
         }
     }
-    if p.is_dir() {
+    if vfs::is_dir(p) {
         if let Some(main) =
             read_json(&p.join("package.json")).and_then(|j| j["main"].as_str().map(str::to_owned))
         {
@@ -68,7 +67,7 @@ pub fn resolve_path(p: &Path) -> Option<PathBuf> {
             "index.node",
         ] {
             let c = p.join(index);
-            if c.is_file() {
+            if vfs::is_file(&c) {
                 return Some(normalize(&c));
             }
         }
@@ -132,7 +131,7 @@ fn resolve_package(spec: &str, base: &Path, kind: Kind) -> Option<PathBuf> {
     };
     for dir in base.ancestors() {
         let pkg_dir = dir.join("node_modules").join(&name);
-        if !pkg_dir.is_dir() {
+        if !vfs::is_dir(&pkg_dir) {
             continue;
         }
         let pkg = read_json(&pkg_dir.join("package.json"));
@@ -307,6 +306,11 @@ pub fn is_builtin(path: &Path) -> bool {
     path.to_string_lossy().starts_with("ns:")
 }
 
+/// The app folder, once the entry runs.
+pub fn app_root() -> Option<PathBuf> {
+    APP_ROOT.read().unwrap().clone()
+}
+
 /// Root for `~/` specifiers (the app folder), set when the entry runs.
 pub fn set_app_root(path: &Path) {
     *APP_ROOT.write().unwrap() = Some(path.to_path_buf());
@@ -327,6 +331,7 @@ fn resolve_uncanonical(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, S
             .parent()
             .map(|d| d.join("lib").join(rest))
             .unwrap_or_else(|| PathBuf::from(rest));
+        // lib/ sits next to the executable, never in the app bundle
         return if path.is_file() {
             Ok(path)
         } else {
@@ -453,8 +458,8 @@ pub fn format_of(path: &Path) -> Format {
                     }
                 }
             }
-            match std::fs::read_to_string(path) {
-                Ok(src) if looks_like_esm(&src) => Format::Esm,
+            match vfs::read(path) {
+                Ok(src) if std::str::from_utf8(&src).is_ok_and(looks_like_esm) => Format::Esm,
                 _ => Format::CommonJs,
             }
         }
@@ -463,8 +468,17 @@ pub fn format_of(path: &Path) -> Format {
 
 /// Source of a local module (shebang commented out).
 pub fn read_source(path: &Path) -> Result<String, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(strip_shebang(src))
+    vfs::read_to_string(path).map(strip_shebang)
+}
+
+/// Text of a local file (JSON modules, dev tooling reads).
+pub fn read_text(path: &Path) -> Result<String, String> {
+    vfs::read_to_string(path)
+}
+
+/// Module bytes; zero-copy for stored bundle entries.
+pub fn read_bytes(path: &Path) -> Result<vfs::Bytes<'static>, String> {
+    vfs::read(path)
 }
 
 pub fn strip_shebang(src: String) -> String {
@@ -477,8 +491,12 @@ pub fn strip_shebang(src: String) -> String {
 
 /// Entry script for `path`: a file, or a directory resolved like `require(dir)` (package.json "main", index.js).
 pub fn entry_point(path: &Path) -> Result<PathBuf, String> {
-    let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if path.is_dir() {
+    let path = if vfs::in_bundle(path) {
+        normalize(path)
+    } else {
+        std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?
+    };
+    if vfs::is_dir(&path) {
         set_app_root(&path);
         return resolve_path(&path)
             .ok_or_else(|| format!("{}: no package.json \"main\" or index.js", path.display()));

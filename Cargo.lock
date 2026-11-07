@@ -616,8 +616,10 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "libffi",
+ "memmap2",
  "nativescript-metadata",
  "pkg-config",
+ "ring",
  "serde_json",
  "url",
 ]
