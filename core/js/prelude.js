@@ -357,4 +357,33 @@
     // CDP MonotonicTime: seconds
     define('__inspectorTimestamp', () => performance.now() / 1000);
   })();
+  // Read-only app files: the mounted app.nsbundle, else the app folder on disk.
+  if (natives.bundleInfo) {
+    const info = () => natives.bundleInfo();
+    let decoder;
+    define(
+      '__nsBundle',
+      Object.freeze({
+        get mounted() { return info()[0]; },
+        get root() { return info()[1]; },
+        get sealed() { return info()[2]; },
+        get unpackedRoot() { return info()[3]; },
+        /** Inside the mounted bundle's root, where writes must fail. */
+        contains(path) {
+          const [mounted, root] = info();
+          path = String(path);
+          return mounted && (path === root || path.startsWith(root + '/') || path.startsWith('~/'));
+        },
+        read: (path) => natives.bundleRead(String(path)),
+        readText: (path) => (decoder ??= new TextDecoder()).decode(natives.bundleRead(String(path))),
+        exists: (path) => natives.bundleStat(String(path)) !== undefined,
+        stat(path) {
+          const s = natives.bundleStat(String(path));
+          return s && { isFile: !s[0], isDirectory: s[0], size: s[1], bundled: s[2], unpacked: s[3] };
+        },
+        list: (path) => natives.bundleList(String(path)),
+        realpath: (path) => natives.bundleRealpath(String(path)) ?? null,
+      }),
+    );
+  }
 });

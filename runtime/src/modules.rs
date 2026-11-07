@@ -5,11 +5,12 @@ use crate::throw_error;
 use nativescript_core::resolve::*;
 use std::collections::HashMap;
 
-fn read_source(path: &Path) -> Result<String, String> {
+fn source<'s>(scope: &mut v8::PinScope<'s, '_>, path: &Path) -> Load<v8::Local<'s, v8::String>> {
     if is_url(path) {
-        return crate::net::fetch_text(&path.to_string_lossy()).map(strip_shebang);
+        let text = crate::net::fetch_text(&path.to_string_lossy()).map(strip_shebang)?;
+        return v8::String::new(scope, &text).ok_or(Some("module too large".to_string()));
     }
-    nativescript_core::resolve::read_source(path)
+    crate::app_bundle::source_string(scope, path).map_err(Some)
 }
 use std::path::{Path, PathBuf};
 
@@ -77,16 +78,13 @@ pub fn load<'s>(
     } else {
         match format_of(path) {
             Format::Esm => {
-                let source = read_source(path)?;
-                let source =
-                    v8::String::new(scope, &source).ok_or(Some("module too large".to_string()))?;
+                let source = source(scope, path)?;
                 let origin = origin(scope, path, true);
                 let mut source = v8::script_compiler::Source::new(source, Some(&origin));
                 v8::script_compiler::compile_module(scope, &mut source).ok_or(None)?
             }
             Format::Json => {
-                let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-                let text = str(scope, &text);
+                let text = source(scope, path)?;
                 let value = v8::json::parse(scope, text).ok_or(None)?;
                 synthetic(scope, st, path, vec![("default".into(), value)])
             }
@@ -377,8 +375,7 @@ pub fn require_cjs<'s>(
         .insert(path.to_path_buf(), v8::Global::new(scope, module));
 
     let outcome = (|| -> Load<()> {
-        let source = read_source(path)?;
-        let source = v8::String::new(scope, &source).ok_or(Some("module too large".to_string()))?;
+        let source = source(scope, path)?;
         let origin = origin(scope, path, false);
         let mut source = v8::script_compiler::Source::new(source, Some(&origin));
         let params =
@@ -442,8 +439,7 @@ fn require_any<'s>(
     match format_of(path) {
         Format::CommonJs => require_cjs(scope, st, path),
         Format::Json => {
-            let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-            let text = str(scope, &text);
+            let text = source(scope, path)?;
             v8::json::parse(scope, text).ok_or(None)
         }
         // require(esm) works for modules without top-level await
@@ -606,9 +602,9 @@ fn hmr_load<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>
 
 fn read_text<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let path = args.get(0).to_rust_string_lossy(scope);
-    match std::fs::read_to_string(&path) {
+    match nativescript_core::resolve::read_text(Path::new(&path)) {
         Ok(text) => rv.set(str(scope, &text).into()),
-        Err(e) => throw_error(scope, &format!("{path}: {e}")),
+        Err(e) => throw_error(scope, &e),
     }
 }
 
@@ -620,7 +616,9 @@ fn copy_file<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) 
         .parent()
         .map(std::fs::create_dir_all)
         .unwrap_or(Ok(()))
-        .and_then(|_| std::fs::copy(&src, &dst).map(|_| ()));
+        .map_err(|e| e.to_string())
+        .and_then(|_| read_bytes(Path::new(&src)))
+        .and_then(|bytes| std::fs::write(&dst, &*bytes).map_err(|e| e.to_string()));
     if let Err(e) = result {
         throw_error(scope, &format!("copy {src} -> {}: {e}", dst.display()));
     }

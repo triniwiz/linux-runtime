@@ -1,20 +1,25 @@
 //! Command line shared by the Node-API engine binaries.
 
 use crate::Runtime;
+use nativescript_core::nsbundle::{self, fuses, Fuse};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 /// `--metadata`, then `$NS_METADATA`, then `metadata-<arch>.bin` next to the
-/// executable or in the working directory.
-fn find_metadata(explicit: Option<PathBuf>) -> Option<PathBuf> {
+/// executable or in the working directory (release builds: only next to the executable).
+fn find_metadata(explicit: Option<PathBuf>, overrides: bool) -> Option<PathBuf> {
     let file = format!("metadata-{}.bin", std::env::consts::ARCH);
+    let next_to_exe = || {
+        let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        Some(exe_dir.join(&file)).filter(|p| p.exists())
+    };
+    if !overrides {
+        return next_to_exe();
+    }
     explicit
         .or_else(|| std::env::var_os("NS_METADATA").map(PathBuf::from))
-        .or_else(|| {
-            let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-            Some(exe_dir.join(&file)).filter(|p| p.exists())
-        })
+        .or_else(next_to_exe)
         .or_else(|| Some(PathBuf::from(&file)).filter(|p| p.exists()))
 }
 
@@ -26,28 +31,38 @@ pub fn main(engine: &str) -> ExitCode {
         eprintln!("usage: {bin} [--metadata <metadata.bin>] <script.js> | -e <code>");
         ExitCode::from(2)
     };
+    // release builds (envOverrides fuse off): every argument belongs to the app
+    let overrides = fuses::get().is_on(Fuse::EnvOverrides);
     let mut args = std::env::args().skip(1);
     let (mut metadata, mut script, mut eval, mut rest) = (None, None, None, Vec::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            _ if script.is_some() || eval.is_some() => rest.push(arg),
+            _ if !overrides || script.is_some() || eval.is_some() => rest.push(arg),
             "--metadata" => metadata = args.next().map(PathBuf::from),
             "-e" | "--eval" => eval = args.next(),
             "-h" | "--help" => return usage(),
             _ => script = Some(PathBuf::from(arg)),
         }
     }
-    // packaged apps: `<exe dir>/app`
-    if script.is_none() && eval.is_none() {
-        script = std::env::current_exe()
-            .ok()
-            .and_then(|e| Some(e.parent()?.join("app")))
-            .filter(|a| a.is_dir());
+    // packaged apps: `<exe dir>/app.nsbundle` or `<exe dir>/app`
+    let packaged = if script.is_none() && eval.is_none() {
+        nsbundle::packaged_app().map(|app| script = app)
+    } else if let Some(b) = script
+        .clone()
+        .filter(|s| s.extension().is_some_and(|e| e == "nsbundle"))
+    {
+        nsbundle::mount_file(&b).map(|root| script = Some(root))
+    } else {
+        Ok(())
+    };
+    if let Err(e) = packaged {
+        eprintln!("{bin}: {e}");
+        return ExitCode::from(2);
     }
     if script.is_none() && eval.is_none() {
         return usage();
     }
-    let Some(metadata) = find_metadata(metadata) else {
+    let Some(metadata) = find_metadata(metadata, overrides) else {
         eprintln!("{bin}: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);
     };
@@ -70,12 +85,13 @@ pub fn main(engine: &str) -> ExitCode {
         .unwrap_or_default();
     let mut argv = vec![exe];
     if let Some(script) = &script {
-        argv.push(
-            std::fs::canonicalize(script)
-                .unwrap_or(script.clone())
-                .to_string_lossy()
-                .into_owned(),
-        );
+        // bundle paths are virtual (and `app` may link to the unpacked folder)
+        let script = if nsbundle::in_bundle(script) {
+            script.clone()
+        } else {
+            std::fs::canonicalize(script).unwrap_or(script.clone())
+        };
+        argv.push(script.to_string_lossy().into_owned());
     }
     argv.extend(rest);
     runtime.set_argv(&argv);

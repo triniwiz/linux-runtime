@@ -261,8 +261,10 @@ pub fn load_addon<'s>(
     if let Some(exports) = st.napi_addons.borrow().get(path) {
         return Ok(v8::Local::new(scope, exports));
     }
+    // addons in the app bundle are loaded from app.nsbundle.unpacked/
+    let disk = nativescript_core::nsbundle::native_path(path)?;
     let cpath =
-        CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
+        CString::new(disk.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
     PENDING_MODULE.with(|m| m.borrow_mut().take());
     let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
     if handle.is_null() {

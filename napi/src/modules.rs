@@ -78,8 +78,10 @@ pub fn load_addon(st: &State, path: &Path) -> Load<napi_value> {
     if let Some(r) = st.modules.borrow().get(path) {
         return Ok(js.deref(*r));
     }
+    // addons in the app bundle are loaded from app.nsbundle.unpacked/
+    let disk = nativescript_core::nsbundle::native_path(path)?;
     let cpath =
-        CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
+        CString::new(disk.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
     PENDING_MODULE.with(|m| m.take());
     let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
     if handle.is_null() {
@@ -115,8 +117,7 @@ fn require_any(st: &State, path: &Path) -> Load<napi_value> {
     match format_of(path) {
         Format::CommonJs => require_cjs(st, path),
         Format::Json => {
-            let text =
-                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let text = nativescript_core::resolve::read_text(path)?;
             parse_json(st.js(), &text)
         }
         Format::Addon => load_addon(st, path),

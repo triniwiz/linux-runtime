@@ -1,6 +1,7 @@
 //! NativeScript Linux runtime written against Node-API, for any engine that
 //! provides napi_* plus the jsr host functions (js_create_runtime, ...).
 
+mod app_bundle;
 pub mod cli;
 #[cfg(feature = "compat")]
 pub mod compat;

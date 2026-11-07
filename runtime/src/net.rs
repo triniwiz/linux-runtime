@@ -70,8 +70,10 @@ fn http(
     body: Option<&[u8]>,
     follow: bool,
 ) -> Result<HttpResponse, String> {
-    if let Some(path) = url.strip_prefix("file://") {
-        let body = std::fs::read(path).map_err(|e| e.to_string())?;
+    if url.starts_with("file://") {
+        // app files come from the bundle when one is mounted
+        let path = nativescript_core::resolve::file_url_to_path(url);
+        let body = nativescript_core::nsbundle::read(&path)?.to_vec();
         return Ok(HttpResponse {
             status: 200,
             status_text: "OK".into(),

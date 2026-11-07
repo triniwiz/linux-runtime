@@ -1,6 +1,7 @@
 //! NativeScript runtime for Linux: V8 (rusty_v8) with C APIs exposed lazily
 //! from the metadata generator's output.
 
+mod app_bundle;
 mod event_loop;
 mod ffi;
 mod globals;
@@ -174,6 +175,10 @@ impl Runtime {
     /// Starts the DevTools inspector on `port`. With `wait`, blocks until a
     /// frontend attaches and pauses on the first statement.
     pub fn start_inspector(&mut self, port: u16, wait: bool, title: &str) -> Result<(), String> {
+        use nativescript_core::nsbundle::{fuses, Fuse};
+        if !fuses::get().is_on(Fuse::Inspector) {
+            return Err("the inspector is disabled in this build".into());
+        }
         inspector::start(&self.state, port, title)?;
         if wait {
             inspector::wait_for_debugger(&self.state);

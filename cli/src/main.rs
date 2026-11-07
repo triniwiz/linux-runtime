@@ -1,5 +1,6 @@
 mod watch;
 
+use nativescript_core::nsbundle::{self, fuses, Fuse};
 use nativescript_runtime::Runtime;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,19 +11,27 @@ fn usage() -> ExitCode {
 }
 
 /// `--metadata`, then `$NS_METADATA`, then `metadata-<arch>.bin` next to the
-/// executable or in the working directory.
-fn find_metadata(explicit: Option<PathBuf>) -> Option<PathBuf> {
+/// executable or in the working directory. Release builds (envOverrides fuse off)
+/// only use the one next to the executable.
+fn find_metadata(explicit: Option<PathBuf>, overrides: bool) -> Option<PathBuf> {
     let file = format!("metadata-{}.bin", std::env::consts::ARCH);
+    let next_to_exe = || {
+        let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        Some(exe_dir.join(&file)).filter(|p| p.exists())
+    };
+    if !overrides {
+        return next_to_exe();
+    }
     explicit
         .or_else(|| std::env::var_os("NS_METADATA").map(PathBuf::from))
-        .or_else(|| {
-            let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-            Some(exe_dir.join(&file)).filter(|p| p.exists())
-        })
+        .or_else(next_to_exe)
         .or_else(|| Some(PathBuf::from(&file)).filter(|p| p.exists()))
 }
 
 fn main() -> ExitCode {
+    let fuses = fuses::get();
+    // release builds: every argument belongs to the app
+    let overrides = fuses.is_on(Fuse::EnvOverrides);
     let mut args = std::env::args().skip(1);
     let mut metadata = None;
     let mut script = None;
@@ -32,7 +41,7 @@ fn main() -> ExitCode {
     let mut watch = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            _ if script.is_some() || eval.is_some() => rest.push(arg),
+            _ if !overrides || script.is_some() || eval.is_some() => rest.push(arg),
             "--metadata" => metadata = args.next().map(PathBuf::from),
             a if a.starts_with("--inspect") => {
                 let port = a
@@ -47,15 +56,41 @@ fn main() -> ExitCode {
             _ => script = Some(PathBuf::from(arg)),
         }
     }
-    // packaged apps: `<exe dir>/app`
-    if script.is_none() && eval.is_none() {
-        script = std::env::current_exe()
-            .ok()
-            .and_then(|e| Some(e.parent()?.join("app")))
-            .filter(|a| a.is_dir());
-    }
+    // packaged apps: `<exe dir>/app.nsbundle` or `<exe dir>/app`
+    let mounted = if script.is_none() && eval.is_none() {
+        match nsbundle::packaged_app() {
+            Ok(app) => script = app,
+            Err(e) => {
+                eprintln!("ns-linux: {e}");
+                return ExitCode::from(2);
+            }
+        }
+        nsbundle::mounted().is_some()
+    } else if let Some(bundle) = script
+        .as_ref()
+        .filter(|s| s.extension().is_some_and(|e| e == "nsbundle"))
+    {
+        match nsbundle::mount_file(bundle) {
+            Ok(root) => script = Some(root),
+            Err(e) => {
+                eprintln!("ns-linux: {e}");
+                return ExitCode::from(2);
+            }
+        }
+        true
+    } else {
+        false
+    };
     if script.is_none() && eval.is_none() {
         return usage();
+    }
+    if inspect.is_some() && !fuses.is_on(Fuse::Inspector) {
+        eprintln!("ns-linux: the inspector is disabled in this build");
+        inspect = None;
+    }
+    if watch && mounted {
+        eprintln!("ns-linux: --watch needs an app folder, not a bundle");
+        return ExitCode::from(2);
     }
     if watch {
         let Some(script) = &script else {
@@ -68,7 +103,7 @@ fn main() -> ExitCode {
         return watch::run(script, args);
     }
 
-    let Some(metadata) = find_metadata(metadata) else {
+    let Some(metadata) = find_metadata(metadata, overrides) else {
         eprintln!("ns-linux: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);
     };
@@ -92,12 +127,13 @@ fn main() -> ExitCode {
         .unwrap_or_default();
     let mut argv = vec![exe];
     if let Some(script) = &script {
-        argv.push(
-            std::fs::canonicalize(script)
-                .unwrap_or(script.clone())
-                .to_string_lossy()
-                .into_owned(),
-        );
+        // bundle paths are virtual (and `app` may link to the unpacked folder)
+        let script = if mounted {
+            script.clone()
+        } else {
+            std::fs::canonicalize(script).unwrap_or(script.clone())
+        };
+        argv.push(script.to_string_lossy().into_owned());
     }
     argv.extend(rest);
     runtime.set_argv(&argv);

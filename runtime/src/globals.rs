@@ -171,6 +171,7 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State) -> Result<(), S
     crate::net::install(scope, natives);
     crate::workers::install(scope, st, natives);
     crate::modules::install_hmr(scope, natives);
+    crate::app_bundle::install(scope, natives);
     for (name, code) in PRELUDES {
         let source = v8::String::new(scope, code).unwrap();
         let name = v8::String::new(scope, name).unwrap();

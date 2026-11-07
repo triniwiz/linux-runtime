@@ -49,3 +49,42 @@ declare const DBus: {
   system(name: string, path: string, iface?: string): DBusObject;
   session(name: string, path: string, iface?: string): DBusObject;
 };
+
+/** An app file or folder. */
+interface NSBundleStat {
+  readonly isFile: boolean;
+  readonly isDirectory: boolean;
+  readonly size: number;
+  /** Served from app.nsbundle rather than a plain file. */
+  readonly bundled: boolean;
+  /** Extracted to app.nsbundle.unpacked (native code opens it by path). */
+  readonly unpacked: boolean;
+}
+
+/**
+ * Read-only app files. Release builds can ship the app folder as one archive (app.nsbundle,
+ * optionally encrypted); paths under `root` read from it. Paths are absolute, `~/` or
+ * relative to the app root. Without a bundle, reads go to the app folder on disk.
+ */
+declare const __nsBundle: {
+  /** An app.nsbundle is mounted. */
+  readonly mounted: boolean;
+  /** The app folder path (virtual when mounted). */
+  readonly root: string | undefined;
+  /** The bundle is encrypted. */
+  readonly sealed: boolean;
+  /** Where unpacked files live on disk. */
+  readonly unpackedRoot: string | undefined;
+  /** `path` is inside the mounted bundle, so it can't be written. */
+  contains(path: string): boolean;
+  /** File contents. Unencrypted bundles map the archive without copying: writes to the buffer
+   * are private to this process but seen by later reads of the same file. */
+  read(path: string): ArrayBuffer;
+  readText(path: string): string;
+  exists(path: string): boolean;
+  stat(path: string): NSBundleStat | undefined;
+  /** Entry names of a folder, folders with a trailing `/`. */
+  list(path: string): string[];
+  /** A path native code can open (unpacked files), or null for files only in the archive. */
+  realpath(path: string): string | null;
+};
