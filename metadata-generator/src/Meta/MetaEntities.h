@@ -293,6 +293,8 @@ public:
     }
 
     std::string value;
+    /// TypeScript type of `value` (macros can be strings or BigInts)
+    std::string tsType = "number";
 
     bool isScoped = false;
 

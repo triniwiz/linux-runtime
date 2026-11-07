@@ -926,7 +926,7 @@ void DefinitionWriter::visit(EnumConstantMeta* meta) {
   }
 
   _buffer << std::endl;
-  _buffer << "declare const " << meta->jsName << ": number;";
+  _buffer << "declare const " << meta->jsName << ": " << meta->tsType << ";";
   _buffer << std::endl;
 }
 

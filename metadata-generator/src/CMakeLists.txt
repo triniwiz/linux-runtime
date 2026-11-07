@@ -53,6 +53,7 @@ set(GENERATOR_SOURCES
     Meta/Filters/MergeCategoriesFilter.cpp
     Meta/Filters/RemoveDuplicateMembersFilter.cpp
     Meta/Filters/ResolveGlobalNamesCollisionsFilter.cpp
+    Meta/MacroConstants.cpp
     Meta/MetaEntities.cpp
     Meta/MetaFactory.cpp
     Meta/NameRetrieverVisitor.cpp
