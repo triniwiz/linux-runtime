@@ -1,0 +1,44 @@
+{
+  "name": "@nativescript/linux-napi",
+  "version": "0.1.0",
+  "description": "Node-API addon with the NativeScript Linux C interop.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "gtk3.js",
+    "gtk3.d.ts",
+    "load.js",
+    "linux.*.node",
+    "metadata-*.bin",
+    "typings",
+    "typings-gtk3"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">= 18"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "build:debug": "node build.js --debug",
+    "test": "node --test 'test/**/*.test.js'"
+  },
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./gtk3": {
+      "types": "./gtk3.d.ts",
+      "default": "./gtk3.js"
+    }
+  }
+}

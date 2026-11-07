@@ -1,0 +1,5 @@
+/target
+/linux.*.node
+/metadata-*.bin
+/typings
+/typings-gtk3

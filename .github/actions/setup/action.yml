@@ -22,7 +22,7 @@ runs:
         JSC: ${{ inputs.jsc }}
       run: |
         pkgs=(build-essential cmake ninja-build lld pkg-config python3
-              libglib2.0-dev libgtk-4-dev libgles-dev libegl-dev libxml2-dev libicu-dev uuid-dev
+              libglib2.0-dev libgtk-4-dev libgtk-3-dev libgles-dev libegl-dev libxml2-dev libicu-dev uuid-dev
               zlib1g-dev libfontconfig-dev libpango1.0-dev)
         if [ "$JSC" = "true" ]; then pkgs+=(libjavascriptcoregtk-6.0-dev); fi
         sudo apt-get update -q
@@ -47,6 +47,14 @@ runs:
     - name: Generate the SDK metadata
       shell: bash
       run: metadata-generator/tests/test-mdg-executable.sh "metadata-generator/dist/$(uname -m)/bin/metadata-generator"
+
+    # linux-napi's gtk3 entry (GTK 3 is what Electron loads)
+    - name: Generate the GTK 3 metadata
+      shell: bash
+      run: |
+        NS_SDK_CONFIG="$PWD/metadata-generator/linux/sdk-gtk3.json" \
+          metadata-generator/tests/test-mdg-executable.sh \
+          "metadata-generator/dist/$(uname -m)/bin/metadata-generator" "$PWD/metadata-generator/tests/TestOutput-gtk3"
 
     - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:

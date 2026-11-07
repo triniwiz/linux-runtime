@@ -19,8 +19,8 @@ mkdir -p "$OUTDIR"
 
 # module map, umbrella header and include paths for the libraries in linux/sdk.json
 # (set NS_SYSROOT to a sysroot made with linux/fetch-sysroot.sh for headers
-# that aren't installed, e.g. GTK)
-python3 "$TESTSDIR/../linux/gen-sdk.py" --out "$OUTDIR/sdk" ${NS_SYSROOT:+--sysroot "$NS_SYSROOT"} ${NS_SDK_MODULES:+--only "$NS_SDK_MODULES"}
+# that aren't installed, e.g. GTK; NS_SDK_CONFIG for another config, e.g. linux/sdk-gtk3.json)
+python3 "$TESTSDIR/../linux/gen-sdk.py" --out "$OUTDIR/sdk" ${NS_SDK_CONFIG:+--config "$NS_SDK_CONFIG"} ${NS_SYSROOT:+--sysroot "$NS_SYSROOT"} ${NS_SDK_MODULES:+--only "$NS_SDK_MODULES"}
 mapfile -t CLANG_ARGS < "$OUTDIR/sdk/clang-args.txt"
 
 # clang looks for its builtin headers relative to the executable (./lib/clang)

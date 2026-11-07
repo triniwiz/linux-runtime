@@ -1,0 +1,17 @@
+[package]
+name = "linux-napi"
+description = "Node-API addon with the NativeScript Linux C interop"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# the addon build: no engine of its own, no module runner
+nativescript-napi = { path = "../napi", default-features = false }
+libc = "0.2"

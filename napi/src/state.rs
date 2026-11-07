@@ -40,6 +40,8 @@ pub struct State {
     pub cleanup_hooks: RefCell<Vec<(unsafe extern "C" fn(*mut c_void), usize)>>,
     /// file URL of the addon being loaded
     pub module_file: RefCell<std::ffi::CString>,
+    /// where resolved metadata globals are memoized (null: the global object)
+    pub globals_target: Cell<napi_ref>,
 }
 
 impl std::ops::Deref for State {
@@ -71,6 +73,7 @@ impl State {
             handles: Default::default(),
             cleanup_hooks: Default::default(),
             module_file: Default::default(),
+            globals_target: Cell::new(std::ptr::null_mut()),
         }
     }
 

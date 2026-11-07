@@ -146,6 +146,12 @@ def main():
         dirs = [d if os.path.exists(d) or not sysroot else sysroot + d for d in m.get("umbrella", [])]
         for pkg in m.get("pkg-config", []):
             dirs += own_dirs(pkg)
+        # nothing of its own: the directory of a header it lists, shared with a requirement
+        # (gtk+-3.0 and gdk-3.0 both have /usr/include/gtk-3.0)
+        if not dirs and not m.get("auto"):
+            for pkg in m.get("pkg-config", []):
+                for h in m.get("headers", []):
+                    dirs += [d for d in pc.include_dirs(pkg)[:1] if os.path.exists(os.path.join(d, h))]
         m["dirs"] = []
         for d in dirs:
             if d not in owner and os.path.isdir(d):

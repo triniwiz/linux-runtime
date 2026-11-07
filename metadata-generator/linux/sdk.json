@@ -263,12 +263,34 @@
       ]
     },
     {
+      "name": "X11",
+      "pkg-config": [
+        "x11"
+      ],
+      "files": [
+        "/usr/include/X11/Xlib.h",
+        "/usr/include/X11/X.h",
+        "/usr/include/X11/Xfuncproto.h",
+        "/usr/include/X11/Xosdefs.h",
+        "/usr/include/X11/Xutil.h",
+        "/usr/include/X11/keysym.h",
+        "/usr/include/X11/keysymdef.h",
+        "/usr/include/X11/Xatom.h"
+      ],
+      "headers": [
+        "X11/Xlib.h",
+        "X11/Xutil.h",
+        "X11/Xatom.h"
+      ]
+    },
+    {
       "name": "Gtk",
       "pkg-config": [
         "gtk4"
       ],
       "headers": [
-        "gtk/gtk.h"
+        "gtk/gtk.h",
+        "gdk/x11/gdkx.h"
       ]
     },
     {

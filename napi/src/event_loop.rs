@@ -30,14 +30,22 @@ impl Drop for Timer {
 pub fn report_pending(st: &State) {
     let js = st.js();
     if let Some(e) = js.take_exception() {
-        // @nativescript/core's hook
-        if let Ok(hook) = js.get(js.global(), "__onUncaughtError") {
-            if js.type_of(hook) == FUNCTION {
-                let _ = js.call(hook, js.undefined(), &[e]);
-                js.clear_exception();
-            }
+        // a Node-API host reports it (process 'uncaughtException')
+        #[cfg(not(feature = "engine"))]
+        unsafe {
+            napi_fatal_exception(js.0, e);
         }
-        eprintln!("Uncaught {}", js.describe(e));
+        #[cfg(feature = "engine")]
+        {
+            // @nativescript/core's hook
+            if let Ok(hook) = js.get(js.global(), "__onUncaughtError") {
+                if js.type_of(hook) == FUNCTION {
+                    let _ = js.call(hook, js.undefined(), &[e]);
+                    js.clear_exception();
+                }
+            }
+            eprintln!("Uncaught {}", js.describe(e));
+        }
         st.uncaught.set(st.uncaught.get() + 1);
     }
 }
@@ -57,7 +65,11 @@ pub fn with_js(st: &State, f: impl FnOnce(Js)) {
 pub fn checkpoint(st: &State) {
     let js = st.js();
     st.jobs_scheduled.set(false);
+    // a Node-API host drains its own microtasks
+    #[cfg(not(feature = "engine"))]
+    let _ = js;
     // a job that throws stops the queue: report and continue
+    #[cfg(feature = "engine")]
     while unsafe { js_execute_pending_jobs(js.0) } != 0 {
         if !js.is_exception_pending() {
             break;
