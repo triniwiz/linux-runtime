@@ -29,6 +29,7 @@ bld/
 [Oo]bj/
 cmake-build/
 tests/TestOutput/
+tests/TestOutput-gtk3/
 tests/*.out
 cmake-build-debug
 dist

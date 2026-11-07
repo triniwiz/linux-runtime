@@ -23,7 +23,7 @@ declare -A MAP=([libjpeg]=libjpeg-turbo8-dev [libtiff-4]=libtiff-dev [xcb]=libxc
     [xproto]=x11proto-dev [kbproto]=x11proto-dev [renderproto]=x11proto-dev [xextproto]=x11proto-dev
     [icu-uc]=libicu-dev [wayland-protocols]=wayland-protocols [xi]=libxi-dev [zlib]=zlib1g-dev
     [libffi]=libffi-dev [pixman-1]=libpixman-1-dev [freetype2]=libfreetype-dev [fontconfig]=libfontconfig-dev
-    [harfbuzz]=libharfbuzz-dev [pango]=libpango1.0-dev [cairo]=libcairo2-dev [gdk-pixbuf-2.0]=libgdk-pixbuf-2.0-dev
+    [harfbuzz]=libharfbuzz-dev [libpng]=libpng-dev [libpng16]=libpng-dev [epoxy]=libepoxy-dev [atk]=libatk1.0-dev [atk-bridge-2.0]=libatk-bridge2.0-dev [atspi-2]=libatspi2.0-dev [xi]=libxi-dev [xfixes]=libxfixes-dev [xrandr]=libxrandr-dev [xcursor]=libxcursor-dev [xcomposite]=libxcomposite-dev [xdamage]=libxdamage-dev [xinerama]=libxinerama-dev [xkbcommon]=libxkbcommon-dev [wayland-client]=libwayland-dev [wayland-cursor]=libwayland-dev [wayland-egl]=libwayland-dev [dbus-1]=libdbus-1-dev [datrie-0.2]=libdatrie-dev [xtst]=libxtst-dev [libjpeg]=libjpeg-turbo8-dev [pango]=libpango1.0-dev [cairo]=libcairo2-dev [gdk-pixbuf-2.0]=libgdk-pixbuf-2.0-dev
     [graphene-gobject-1.0]=libgraphene-1.0-dev [xcb-shm]=libxcb-shm0-dev [xcb-render]=libxcb-render0-dev
     [libsysprof-capture-4]=libsysprof-4-dev [mount]=libmount-dev [blkid]=libblkid-dev [libselinux]=libselinux1-dev
     [libsepol]=libsepol-dev [expat]=libexpat1-dev [libbrotlidec]=libbrotli-dev [xrender]=libxrender-dev [xext]=libxext-dev)
@@ -39,7 +39,8 @@ for _ in $(seq 1 60); do
         echo "sysroot ready: $SYSROOT"
         exit 0
     fi
-    deb=${MAP[$miss]:-lib$miss-dev}
+    case $miss in lib*) guess=$miss-dev ;; *) guess=lib$miss-dev ;; esac
+    deb=${MAP[$miss]:-$guess}
     echo "resolving $miss -> $deb"
     apt-get download "$deb"
 done
