@@ -1,9 +1,13 @@
 #include "jsr.h"
 #include <cstring> // [linux port] strlen
+#include <csignal>
+#include <cstdlib>
 #include <dlfcn.h>
 
 // Collects now; JSGarbageCollect only hints that a collection would help.
 extern "C" JS_EXPORT void JSSynchronousGarbageCollectForDebugging(JSContextRef ctx);
+// [linux port] JSBasePrivate.h: before JSC initializes; its default, SIGUSR1, is the livesync signal
+extern "C" JS_EXPORT bool JSConfigureSignalForGC(int signal);
 // [linux port] JSContextRefPrivate.h: called with (promise, reason) once microtasks drain
 extern "C" JS_EXPORT void JSGlobalContextSetUnhandledRejectionCallback(JSGlobalContextRef ctx, JSObjectRef function, JSValueRef* exception);
 
@@ -11,6 +15,8 @@ napi_status js_create_runtime(napi_runtime *runtime) {
     if (!runtime) return napi_invalid_arg;
     // [linux port] a classed global gets an ordinary object as its prototype, whose
     // [[Prototype]] can change (the global's own is immutable)
+    static bool gc_signal = getenv("JSC_SIGNAL_FOR_GC") || JSConfigureSignalForGC(SIGPWR);
+    (void) gc_signal;
     static JSClassRef global_class = JSClassCreate(&kJSClassDefinitionEmpty);
     *runtime = (napi_runtime) JSGlobalContextCreateInGroup(nullptr, global_class);
     return napi_ok;
