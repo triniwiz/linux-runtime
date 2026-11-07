@@ -143,7 +143,7 @@ pub unsafe extern "C" fn napi_get_buffer_info(
     status
 }
 
-struct Symbols(&'static [*const ()]);
+struct Symbols(#[allow(dead_code)] &'static [*const ()]);
 unsafe impl Sync for Symbols {}
 
 #[used]

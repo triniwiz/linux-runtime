@@ -5,6 +5,8 @@
 #   METADATA=<metadata.bin dir>  default: metadata-generator/tests/TestOutput
 #   TYPINGS=<typings dir>        default: $METADATA/typings
 #   MDG=<generator bin dir>      metadata-generator + lib/clang, for app/plugin native code
+#   ENGINES="quickjs v8 jsc hermes"  Node-API engine packages besides @nativescript/linux (V8);
+#                                jsc needs libjavascriptcoregtk, hermes engines/hermes/build-hermes.sh
 #
 # Layout (see nativescript-cli lib/services/linux-project-service.ts):
 #   framework/__PROJECT_NAME__/app
@@ -12,6 +14,7 @@
 #   framework/typings/*.d.ts
 #   framework/tools/<x64|arm64>/metadata-generator, lib/clang/<version>/include
 #   framework/tools/<x64|arm64>/ns-metadata-filter   native-api-usage.json filtering
+#   framework/tools/<x64|arm64>/hermesc              Hermes bytecode compiler (linux-hermes)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,10 +30,23 @@ case "$RUST_ARCH" in
 esac
 [ -f "$METADATA/metadata-$RUST_ARCH.bin" ] || { echo "missing $METADATA/metadata-$RUST_ARCH.bin" >&2; exit 1; }
 
-cargo build --release -p nativescript-cli -p nativescript-quickjs -p nativescript-metadata
+ENGINES="${ENGINES:-quickjs v8 jsc hermes}"
+BUILT=()
+for e in $ENGINES; do
+    case $e in
+        hermes) [ -f "${NS_HERMES_DIR:-engines/hermes/vendor/$RUST_ARCH}/libhermes.a" ] ||
+            { echo "warning: skipping linux-hermes, run engines/hermes/build-hermes.sh" >&2; continue; } ;;
+    esac
+    if cargo build --release -p "nativescript-$e"; then
+        BUILT+=("$e")
+    else
+        echo "warning: skipping linux-$e, its build failed" >&2
+    fi
+done
+cargo build --release -p nativescript-cli -p nativescript-metadata
 
 pack() {
-    local name=$1 binary=$2 engine=$3
+    local name=$1 binary=$2 engine=$3 id=$4
     local out="dist/npm/$name"
     rm -rf "$out"
     mkdir -p "$out/framework/runtime/$ARCH" "$out/framework/typings"
@@ -55,6 +71,9 @@ pack() {
     else
         echo "warning: no metadata generator in $MDG, app/plugin native code won't build" >&2
     fi
+    if [ "$id" = hermes ]; then
+        install -m 755 target/release/hermesc "$out/framework/tools/$ARCH/"
+    fi
     cat > "$out/package.json" <<JSON
 {
   "name": "@nativescript/$name",
@@ -64,12 +83,20 @@ pack() {
   "repository": "github:NativeScript/linux",
   "keywords": ["NativeScript", "Linux", "GTK"],
   "os": ["linux"],
-  "files": ["framework"]
+  "files": ["framework"],
+  "nativescript": { "runtime": "linux", "engine": "$id" }
 }
 JSON
     (cd "$out" && npm pack --silent --pack-destination ..)
 }
 
-pack linux ns-linux "V8"
-pack linux-quickjs ns-linux-quickjs "QuickJS, Node-API"
+pack linux ns-linux "V8" v8
+for e in "${BUILT[@]}"; do
+    case $e in
+        quickjs) pack linux-quickjs ns-linux-quickjs "QuickJS, Node-API" quickjs ;;
+        v8) pack linux-v8 ns-linux-v8 "V8 over Node-API" v8 ;;
+        jsc) pack linux-jsc ns-linux-jsc "JavaScriptCore, Node-API; needs WebKitGTK's libjavascriptcoregtk" jsc ;;
+        hermes) pack linux-hermes ns-linux-hermes "Hermes, Node-API" hermes ;;
+    esac
+done
 ls -la dist/npm/*.tgz
