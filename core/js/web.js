@@ -137,13 +137,7 @@
     get encoding() { return 'utf-8'; }
     encode(input = '') { return natives.textEncode(String(input)); }
     encodeInto(input, dest) {
-      const bytes = natives.textEncode(String(input));
-      const n = Math.min(bytes.length, dest.length);
-      let written = n;
-      // don't cut a multi-byte sequence
-      while (written > 0 && written < bytes.length && (bytes[written] & 0xc0) === 0x80) written--;
-      dest.set(bytes.subarray(0, written));
-      const read = new TextDecoder().decode(bytes.subarray(0, written)).length;
+      const [read, written] = natives.textEncodeInto(String(input), dest);
       return { read, written };
     }
   }
@@ -162,38 +156,21 @@
     get ignoreBOM() { return this.#ignoreBOM; }
     decode(input) {
       if (input === undefined) return '';
-      return natives.textDecode(input, this.#fatal);
+      return natives.textDecode(input, this.#fatal, this.#ignoreBOM);
     }
   }
   define('TextEncoder', TextEncoder);
   define('TextDecoder', TextDecoder);
 
-  const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   define('btoa', (input) => {
-    const s = String(input);
-    let out = '';
-    for (let i = 0; i < s.length; i += 3) {
-      const a = s.charCodeAt(i), b = s.charCodeAt(i + 1), c = s.charCodeAt(i + 2);
-      if (a > 255 || b > 255 || c > 255) throw new DOMException('Invalid character', 'InvalidCharacterError');
-      const n = (a << 16) | ((b || 0) << 8) | (c || 0);
-      out += B64[n >> 18] + B64[(n >> 12) & 63] + (i + 1 < s.length ? B64[(n >> 6) & 63] : '=') + (i + 2 < s.length ? B64[n & 63] : '=');
-    }
+    const out = natives.btoa(String(input));
+    if (out === undefined) throw new DOMException('Invalid character', 'InvalidCharacterError');
     return out;
   });
   define('atob', (input) => {
-    const s = String(input).replace(/[\t\n\f\r ]/g, '');
-    if (s.length % 4 === 1 || /[^A-Za-z0-9+/=]/.test(s) || /=[^=]/.test(s)) {
+    const out = natives.atob(String(input));
+    if (out === undefined) {
       throw new DOMException('The string to be decoded is not correctly encoded.', 'InvalidCharacterError');
-    }
-    let out = '';
-    let bits = 0, buf = 0;
-    for (const ch of s.replace(/=+$/, '')) {
-      buf = (buf << 6) | B64.indexOf(ch);
-      bits += 6;
-      if (bits >= 8) {
-        bits -= 8;
-        out += String.fromCharCode((buf >> bits) & 255);
-      }
     }
     return out;
   });

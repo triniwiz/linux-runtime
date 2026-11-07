@@ -1,5 +1,6 @@
 //! Engine independent core shared by the V8 and Node-API runtimes.
 
+pub mod base64;
 pub mod bundle;
 pub mod call;
 pub mod closure;

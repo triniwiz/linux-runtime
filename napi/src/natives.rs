@@ -148,9 +148,13 @@ unsafe extern "C" fn text_encode(env: napi_env, info: napi_callback_info) -> nap
 
 unsafe extern "C" fn text_decode(env: napi_env, info: napi_callback_info) -> napi_value {
     let js = Js(env);
-    let (a, ..) = cb_args::<2>(env, info);
+    let (a, ..) = cb_args::<3>(env, info);
     let bytes = bytes_of(js, a[0]);
-    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let bytes = if js.bool_of(a[2]) {
+        bytes
+    } else {
+        bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
+    };
     if js.bool_of(a[1]) {
         match std::str::from_utf8(bytes) {
             Ok(s) => js.string(s),
@@ -161,6 +165,60 @@ unsafe extern "C" fn text_decode(env: napi_env, info: napi_callback_info) -> nap
         }
     } else {
         js.string(&String::from_utf8_lossy(bytes))
+    }
+}
+
+/// textEncodeInto(string, view) -> [read UTF-16 units, written bytes]
+unsafe extern "C" fn text_encode_into(env: napi_env, info: napi_callback_info) -> napi_value {
+    let js = Js(env);
+    let (a, ..) = cb_args::<2>(env, info);
+    let text = js.to_string(a[0]);
+    let Some((p, len)) = js.buffer_of(a[1]).filter(|(p, _)| !p.is_null()) else {
+        return js.array(&[js.number(0.0), js.number(0.0)]);
+    };
+    let mut written = text.len().min(len);
+    while !text.is_char_boundary(written) {
+        written -= 1;
+    }
+    std::ptr::copy_nonoverlapping(text.as_ptr(), p as *mut u8, written);
+    let read = text[..written].encode_utf16().count();
+    js.array(&[js.number(read as f64), js.number(written as f64)])
+}
+
+/// Latin-1 bytes of a string, None if it has characters above U+00FF.
+unsafe fn latin1_of(env: napi_env, v: napi_value) -> Option<Vec<u8>> {
+    let mut len = 0;
+    if napi_get_value_string_utf16(env, v, std::ptr::null_mut(), 0, &mut len) != 0 {
+        return None;
+    }
+    let mut units = vec![0u16; len + 1];
+    if napi_get_value_string_utf16(env, v, units.as_mut_ptr(), units.len(), &mut len) != 0 {
+        return None;
+    }
+    units[..len].iter().map(|u| u8::try_from(*u).ok()).collect()
+}
+
+unsafe fn latin1_string(env: napi_env, bytes: &[u8]) -> napi_value {
+    let mut out = std::ptr::null_mut();
+    napi_create_string_latin1(env, bytes.as_ptr() as *const _, bytes.len(), &mut out);
+    out
+}
+
+/// btoa(string) -> base64, undefined for characters above U+00FF
+unsafe extern "C" fn btoa(env: napi_env, info: napi_callback_info) -> napi_value {
+    let (a, ..) = cb_args::<1>(env, info);
+    match latin1_of(env, a[0]) {
+        Some(bytes) => latin1_string(env, &nativescript_core::base64::encode(&bytes)),
+        None => Js(env).undefined(),
+    }
+}
+
+/// atob(string) -> binary string, undefined for invalid input
+unsafe extern "C" fn atob(env: napi_env, info: napi_callback_info) -> napi_value {
+    let (a, ..) = cb_args::<1>(env, info);
+    match latin1_of(env, a[0]).and_then(|b| nativescript_core::base64::decode(&b)) {
+        Some(bytes) => latin1_string(env, &bytes),
+        None => Js(env).undefined(),
     }
 }
 
@@ -264,6 +322,9 @@ pub fn create(js: Js, argv: &[String], engine: &str) -> napi_value {
         ("urlSet", url_set),
         ("textEncode", text_encode),
         ("textDecode", text_decode),
+        ("textEncodeInto", text_encode_into),
+        ("btoa", btoa),
+        ("atob", atob),
         ("randomFill", random_fill),
         ("now", now),
         ("hrtime", hrtime),

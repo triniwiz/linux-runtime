@@ -129,6 +129,7 @@ fn url_set<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
     }
 }
 
+/// UTF-8 in one pass, moved into the buffer (lone surrogates become U+FFFD)
 fn text_encode<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let s = if args.get(0).is_undefined() {
         String::new()
@@ -141,38 +142,110 @@ fn text_encode<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<
     rv.set(v8::Uint8Array::new(scope, buffer, 0, len).unwrap().into());
 }
 
-/// textDecode(bufferOrView, fatal)
-fn text_decode<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
-    let v = args.get(0);
-    let bytes: &[u8] = if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(v) {
-        unsafe { std::slice::from_raw_parts(view.data() as *const u8, view.byte_length()) }
-    } else if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(v) {
-        match buf.data() {
-            Some(p) => unsafe {
+/// textEncodeInto(string, view) -> [read UTF-16 units, written bytes]; never splits a character
+fn text_encode_into<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let Some(text) = args.get(0).to_string(scope) else {
+        return;
+    };
+    let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(args.get(1)) else {
+        return throw_error(scope, "expected a Uint8Array");
+    };
+    let out = unsafe { std::slice::from_raw_parts_mut(view.data() as *mut u8, view.byte_length()) };
+    let mut read = 0;
+    let written = text.write_utf8_v2(
+        scope,
+        out,
+        v8::WriteFlags::kReplaceInvalidUtf8,
+        Some(&mut read),
+    );
+    let pair = [
+        v8::Number::new(scope, read as f64).into(),
+        v8::Number::new(scope, written as f64).into(),
+    ];
+    rv.set(v8::Array::new_with_elements(scope, &pair).into());
+}
+
+fn bytes_of<'a>(v: v8::Local<'a, v8::Value>) -> &'a [u8] {
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(v) {
+        if view.byte_length() == 0 {
+            return &[];
+        }
+        return unsafe { std::slice::from_raw_parts(view.data() as *const u8, view.byte_length()) };
+    }
+    if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(v) {
+        if let Some(p) = buf.data() {
+            return unsafe {
                 std::slice::from_raw_parts(p.as_ptr() as *const u8, buf.byte_length())
-            },
-            None => &[],
+            };
         }
+    }
+    &[]
+}
+
+/// textDecode(bufferOrView, fatal, ignoreBOM)
+fn text_decode<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let bytes = bytes_of(args.get(0));
+    let bytes = if args.get(2).boolean_value(scope) {
+        bytes
     } else {
-        &[]
+        bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
     };
-    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    let text = if args.get(1).boolean_value(scope) {
-        match std::str::from_utf8(bytes) {
-            Ok(s) => std::borrow::Cow::Borrowed(s),
-            Err(_) => {
-                let msg = str(scope, "The encoded data was not valid for encoding utf-8");
-                let e = v8::Exception::type_error(scope, msg);
-                scope.throw_exception(e);
-                return;
-            }
-        }
-    } else {
-        String::from_utf8_lossy(bytes)
-    };
-    match v8::String::new(scope, &text) {
+    if args.get(1).boolean_value(scope) && std::str::from_utf8(bytes).is_err() {
+        let msg = str(scope, "The encoded data was not valid for encoding utf-8");
+        let e = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(e);
+        return;
+    }
+    // V8 decodes (and replaces invalid sequences) in one pass
+    match v8::String::new_from_utf8(scope, bytes, v8::NewStringType::Normal) {
         Some(s) => rv.set(s.into()),
         None => throw_error(scope, "string too long"),
+    }
+}
+
+fn one_byte_string<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    bytes: &[u8],
+) -> Option<v8::Local<'s, v8::String>> {
+    v8::String::new_from_one_byte(scope, bytes, v8::NewStringType::Normal)
+}
+
+/// Runs `f` on the string's Latin-1 bytes (borrowed when V8 stores it as one-byte),
+/// `None` if it has characters above U+00FF.
+fn with_latin1<'s, R>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    f: impl FnOnce(&[u8]) -> R,
+) -> Option<R> {
+    let text = value.to_string(scope)?;
+    let view = v8::ValueView::new(scope, text);
+    match view.data() {
+        v8::ValueViewData::OneByte(bytes) => Some(f(bytes)),
+        v8::ValueViewData::TwoByte(units) => {
+            let bytes: Option<Vec<u8>> = units.iter().map(|u| u8::try_from(*u).ok()).collect();
+            bytes.map(|b| f(&b))
+        }
+    }
+}
+
+/// btoa(string) -> base64, undefined for characters above U+00FF
+fn btoa<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let Some(encoded) = with_latin1(scope, args.get(0), nativescript_core::base64::encode) else {
+        return;
+    };
+    if let Some(s) = one_byte_string(scope, &encoded) {
+        rv.set(s.into());
+    }
+}
+
+/// atob(string) -> binary string, undefined for invalid input
+fn atob<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let Some(Some(decoded)) = with_latin1(scope, args.get(0), nativescript_core::base64::decode)
+    else {
+        return;
+    };
+    if let Some(s) = one_byte_string(scope, &decoded) {
+        rv.set(s.into());
     }
 }
 
@@ -304,6 +377,9 @@ pub fn create<'s>(scope: &mut v8::PinScope<'s, '_>, argv: &[String]) -> v8::Loca
     set!("urlSet", url_set);
     set!("textEncode", text_encode);
     set!("textDecode", text_decode);
+    set!("textEncodeInto", text_encode_into);
+    set!("btoa", btoa);
+    set!("atob", atob);
     set!("randomFill", random_fill);
     set!("now", now);
     set!("hrtime", hrtime);
