@@ -4,6 +4,7 @@ pub mod base64;
 pub mod bundle;
 pub mod call;
 pub mod closure;
+pub mod config;
 pub mod glib;
 pub mod longdouble;
 pub mod native;

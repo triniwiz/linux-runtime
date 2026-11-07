@@ -42,6 +42,17 @@ pub(crate) fn pump_platform(isolate: &v8::Isolate) -> bool {
     ran
 }
 
+/// V8 flags (e.g. `linux.v8Flags`); only before the first runtime starts V8.
+pub fn set_v8_flags(flags: &str) -> Result<(), String> {
+    if V8_INIT.is_completed() {
+        return Err("V8 flags must be set before the first runtime starts".into());
+    }
+    if !flags.is_empty() {
+        v8::V8::set_flags_from_string(flags);
+    }
+    Ok(())
+}
+
 pub struct Runtime {
     // field order matters: handles must be dropped before the isolate
     context: v8::Global<v8::Context>,

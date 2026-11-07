@@ -103,6 +103,10 @@ fn main() -> ExitCode {
         return watch::run(script, args);
     }
 
+    let flags = nativescript_core::config::v8_flags(script.as_deref());
+    if let Err(e) = nativescript_runtime::set_v8_flags(&flags) {
+        eprintln!("ns-linux: {e}");
+    }
     let Some(metadata) = find_metadata(metadata, overrides) else {
         eprintln!("ns-linux: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);

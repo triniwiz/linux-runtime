@@ -6,11 +6,11 @@ use std::sync::OnceLock;
 
 static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
 
-/// Initializes V8 once; call before the runtime is created.
-pub fn init() {
+/// Initializes V8 once with `flags`; call before the runtime is created.
+pub fn init(flags: &str) {
     PLATFORM.get_or_init(|| {
-        if let Ok(flags) = std::env::var("NS_V8_FLAGS") {
-            v8::V8::set_flags_from_string(&flags);
+        if !flags.is_empty() {
+            v8::V8::set_flags_from_string(flags);
         }
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform.clone());

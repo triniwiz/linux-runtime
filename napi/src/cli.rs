@@ -24,6 +24,11 @@ fn find_metadata(explicit: Option<PathBuf>, overrides: bool) -> Option<PathBuf> 
 }
 
 pub fn main(engine: &str) -> ExitCode {
+    main_with_flags(engine, |_| {})
+}
+
+/// [`main`] for engines taking V8 flags (`linux.v8Flags`), applied before the runtime starts.
+pub fn main_with_flags(engine: &str, set_flags: fn(&str)) -> ExitCode {
     #[cfg(feature = "compat")]
     crate::compat::keep();
     let bin = format!("ns-linux-{engine}");
@@ -62,6 +67,7 @@ pub fn main(engine: &str) -> ExitCode {
     if script.is_none() && eval.is_none() {
         return usage();
     }
+    set_flags(&nativescript_core::config::v8_flags(script.as_deref()));
     let Some(metadata) = find_metadata(metadata, overrides) else {
         eprintln!("{bin}: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);
