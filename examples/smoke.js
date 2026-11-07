@@ -4,7 +4,7 @@ printf("printf: %s is %d years old, pi=%.3f\n", "linux", 33, 3.14159);
 console.log("strlen('nativescript') =", strlen("nativescript"));
 console.log("abs(-42) =", abs(-42), " sqrt(2) =", sqrt(2), " pow(2, 10) =", pow(2, 10));
 
-// char* returns are Pointers, like iOS
+// char* returns are Pointers
 const home = getenv("HOME");
 console.log("getenv('HOME') =", home, "->", interop.stringFromCString(home));
 

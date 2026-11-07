@@ -31,8 +31,6 @@ fn str<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> v8::Local<'s, v8::Strin
     v8::String::new(scope, s).unwrap()
 }
 
-// ---------- ES modules ----------
-
 /// `Err(None)` means a JS exception is pending.
 type Load<T> = Result<T, Option<String>>;
 
@@ -348,8 +346,6 @@ fn meta_resolve<'s>(
     }
 }
 
-// ---------- CommonJS ----------
-
 /// `module.exports` of the CommonJS module at `path`, loading it once.
 pub fn require_cjs<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -527,8 +523,6 @@ pub fn run_entry<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) 
     }
 }
 
-// ---------- HMR / LiveSync primitives ----------
-
 /// Drops `path` from the module caches so the next import/require reloads it.
 pub fn invalidate(st: &State, path: &Path) {
     let mut map = st.modules.borrow_mut();
@@ -626,7 +620,7 @@ fn copy_file<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) 
     }
 }
 
-// ---------- ns:module (dev host API, see @nativescript/vite browser-runtime-contract.ts) ----------
+// ns:module: dev host API (see @nativescript/vite browser-runtime-contract.ts)
 
 /// Path or registry key of a module URL (`file:` URLs become paths).
 fn module_key(url: &str) -> PathBuf {

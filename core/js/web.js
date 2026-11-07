@@ -5,7 +5,6 @@
   const define = (name, value) =>
     Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false });
 
-  // ---------- DOMException ----------
   class DOMException extends Error {
     constructor(message = '', name = 'Error') {
       super(message);
@@ -17,7 +16,6 @@
   }
   define('DOMException', DOMException);
 
-  // ---------- URL ----------
   const URL_STATE = Symbol('url');
 
   class URLSearchParams {
@@ -132,7 +130,6 @@
   define('URL', URL);
   define('URLSearchParams', URLSearchParams);
 
-  // ---------- encoding ----------
   class TextEncoder {
     get encoding() { return 'utf-8'; }
     encode(input = '') { return natives.textEncode(String(input)); }
@@ -175,7 +172,6 @@
     return out;
   });
 
-  // ---------- events ----------
   const STOP = Symbol('stop');
   class Event {
     #type;
@@ -284,7 +280,6 @@
   define('AbortSignal', AbortSignal);
   define('AbortController', AbortController);
 
-  // ---------- performance ----------
   const marks = [];
   const performance = {
     timeOrigin: natives.timeOrigin,
@@ -324,7 +319,6 @@
   define('__time', natives.now);
   define('__collect', natives.gc || (() => {}));
 
-  // ---------- structuredClone ----------
   define('structuredClone', (value, options) => {
     const seen = new Map();
     const transfer = new Set(options?.transfer || []);
@@ -373,7 +367,6 @@
     return clone(value);
   });
 
-  // ---------- crypto ----------
   const crypto = {
     getRandomValues: (array) => natives.randomFill(array),
     randomUUID() {
@@ -390,7 +383,6 @@
   define('clearImmediate', (id) => clearTimeout(id));
   define('self', g);
 
-  // ---------- process ----------
   const env = new Proxy({}, {
     get: (_, k) => (typeof k === 'string' ? natives.getenv(k) : undefined),
     set: (_, k, v) => (natives.setenv(String(k), String(v)), true),

@@ -15,7 +15,7 @@ fn resolve(st: &State, meta: Meta) -> Result<Option<(napi_value, bool)>, String>
     Ok(Some(match meta.kind() {
         MetaKind::Function => match ffi::function_for(st, st.meta.id(&meta)) {
             Ok(function) => (ffi::js_function(st, meta.js_name(), &function), true),
-            // missing symbols resolve to undefined, like on iOS
+            // missing symbols resolve to undefined
             Err(_) => (js.undefined(), true),
         },
         // variables are read on every access, their value can change

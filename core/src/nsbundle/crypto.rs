@@ -1,4 +1,4 @@
-//! AES-256-GCM sealing, SHA-256 and the default pepper (same constants as the Windows runtime).
+//! AES-256-GCM sealing, SHA-256 and the default pepper.
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 

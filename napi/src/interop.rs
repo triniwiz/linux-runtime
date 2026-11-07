@@ -1,4 +1,4 @@
-//! The `interop` global (same API as the iOS runtime).
+//! The `interop` global.
 
 use crate::js::*;
 use crate::marshal::{self, CallCx, Mem};
@@ -75,8 +75,6 @@ fn address_from_value(st: &State, v: napi_value) -> Result<usize, String> {
             .ok_or_else(|| "expected a number, bigint or Pointer".into()),
     }
 }
-
-// ---------- Pointer ----------
 
 unsafe extern "C" fn pointer_ctor(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
@@ -186,8 +184,6 @@ fn define_class(js: Js, name: &str, ctor: Cb, props: &[napi_property_descriptor]
     };
     class
 }
-
-// ---------- Reference ----------
 
 pub fn reference_type(st: &State, h: &Handle) -> Option<Type> {
     st.type_at(h.type_index?)
@@ -311,8 +307,6 @@ unsafe extern "C" fn reference_set(env: napi_env, info: napi_callback_info) -> n
     }
     null_mut()
 }
-
-// ---------- functions ----------
 
 unsafe extern "C" fn struct_ctor(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);

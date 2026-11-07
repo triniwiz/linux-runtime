@@ -122,7 +122,7 @@ pub unsafe extern "C" fn napi_close_callback_scope(
     env!(env).status(OK)
 }
 
-// ---------- buffers (Uint8Array views, zero copy for external data) ----------
+// Buffers: Uint8Array views, zero copy for external data
 
 fn buffer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -284,8 +284,6 @@ pub unsafe extern "C" fn node_api_create_buffer_from_arraybuffer(
     env.status(OK)
 }
 
-// ---------- async work ----------
-
 type Job = Box<dyn FnOnce() + Send>;
 
 /// Fixed size worker pool shared by async work.
@@ -429,8 +427,6 @@ pub unsafe extern "C" fn napi_cancel_async_work(
     complete_on_js(env.main_context, work as usize, CANCELLED);
     env.status(OK)
 }
-
-// ---------- threadsafe functions ----------
 
 /// JS-thread-only data inside a cross thread object.
 struct JsOnly<T>(T);
@@ -677,8 +673,6 @@ pub unsafe extern "C" fn napi_ref_threadsafe_function(
     }
     env.status(OK)
 }
-
-// ---------- misc ----------
 
 #[repr(C)]
 pub struct napi_node_version {

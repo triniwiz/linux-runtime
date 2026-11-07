@@ -1,8 +1,7 @@
 # ns-linux-hermes
 
 NativeScript Linux on Hermes, through the Node-API implementation in
-[microsoft/hermes-windows](https://github.com/microsoft/hermes-windows) (the engine behind the
-Windows runtime's `@nativescript/windows-hermes`), built for Linux from source.
+[microsoft/hermes-windows](https://github.com/microsoft/hermes-windows), built for Linux from source.
 
 ```sh
 engines/hermes/build-hermes.sh          # -> engines/hermes/vendor/<arch>/{libhermes.a,hermesc}

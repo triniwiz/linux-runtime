@@ -7,7 +7,7 @@
 
   define('global', g);
 
-  // Used by the metadata for C enums, same as the iOS runtime
+  // Used by the metadata for C enums
   Object.defineProperty(g, '__tsEnum', {
     writable: false,
     enumerable: false,

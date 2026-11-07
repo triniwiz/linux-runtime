@@ -96,8 +96,6 @@ pub unsafe extern "C" fn napi_fatal_exception(env: napi_env, err: napi_value) ->
     OK
 }
 
-// ---------- async context (no async_hooks here) ----------
-
 #[no_mangle]
 pub unsafe extern "C" fn napi_async_init(
     env: napi_env,
@@ -149,8 +147,6 @@ pub unsafe extern "C" fn napi_close_callback_scope(
     arg!(env);
     OK
 }
-
-// ---------- async work ----------
 
 type Job = Box<dyn FnOnce() + Send>;
 
@@ -291,8 +287,6 @@ pub unsafe extern "C" fn napi_cancel_async_work(
     complete_on_js((*work).main_context, work as usize, CANCELLED);
     OK
 }
-
-// ---------- threadsafe functions ----------
 
 pub struct Tsfn {
     env: usize,
@@ -530,8 +524,6 @@ pub unsafe extern "C" fn napi_ref_threadsafe_function(
     }
     OK
 }
-
-// ---------- misc ----------
 
 #[repr(C)]
 pub struct napi_node_version {
