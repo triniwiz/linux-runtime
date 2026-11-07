@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: test
+          jsc: "true"
+      - name: Runtime, core and CLI
+        run: cargo test --release -p nativescript-metadata -p nativescript-core -p nativescript-runtime -p nativescript-cli
+      # the Node-API engines link different shims into the same crates, so each runs on its own
+      - name: QuickJS (Node-API)
+        run: cargo test --release -p nativescript-quickjs
+      - name: V8 (Node-API)
+        run: cargo test --release -p nativescript-v8
+      - name: JavaScriptCore (Node-API)
+        run: cargo test --release -p nativescript-jsc
+      - name: Node-API runtime unit tests
+        run: cargo test --release -p nativescript-napi

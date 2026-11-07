@@ -7,6 +7,7 @@
 #   MDG=<generator bin dir>      metadata-generator + lib/clang, for app/plugin native code
 #   ENGINES="quickjs v8 jsc hermes"  Node-API engine packages besides @nativescript/linux (V8);
 #                                jsc needs libjavascriptcoregtk, hermes engines/hermes/build-hermes.sh
+#   STRICT=1                     fail instead of skipping an engine that can't be built (CI)
 #
 # Layout (see nativescript-cli lib/services/linux-project-service.ts):
 #   framework/__PROJECT_NAME__/app
@@ -31,17 +32,21 @@ case "$RUST_ARCH" in
 esac
 [ -f "$METADATA/metadata-$RUST_ARCH.bin" ] || { echo "missing $METADATA/metadata-$RUST_ARCH.bin" >&2; exit 1; }
 
-ENGINES="${ENGINES:-quickjs v8 jsc hermes}"
+ENGINES="${ENGINES-quickjs v8 jsc hermes}"
 BUILT=()
+skip() {
+    echo "warning: skipping linux-$1, $2" >&2
+    [ -z "${STRICT:-}" ] || exit 1
+}
 for e in $ENGINES; do
     case $e in
         hermes) [ -f "${NS_HERMES_DIR:-engines/hermes/vendor/$RUST_ARCH}/libhermes.a" ] ||
-            { echo "warning: skipping linux-hermes, run engines/hermes/build-hermes.sh" >&2; continue; } ;;
+            { skip hermes "run engines/hermes/build-hermes.sh"; continue; } ;;
     esac
     if cargo build --release -p "nativescript-$e"; then
         BUILT+=("$e")
     else
-        echo "warning: skipping linux-$e, its build failed" >&2
+        skip "$e" "its build failed"
     fi
 done
 cargo build --release -p nativescript-cli -p nativescript-metadata -p nativescript-core
@@ -73,6 +78,7 @@ pack() {
         cp -r "$MDG/lib/clang" "$out/framework/tools/$ARCH/lib/"
     else
         echo "warning: no metadata generator in $MDG, app/plugin native code won't build" >&2
+        [ -z "${STRICT:-}" ] || exit 1
     fi
     if [ "$id" = hermes ]; then
         install -m 755 target/release/hermesc "$out/framework/tools/$ARCH/"
