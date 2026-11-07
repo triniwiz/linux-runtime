@@ -16,6 +16,13 @@ ns.runGLib();
 
 Requires Linux (x64 or arm64) and Node.js 18 or later.
 
+## GTK 3 and GTK 4
+
+The package carries metadata for both. GTK 3 and GTK 4 can't be loaded in the same process, so
+`@nativescript/linux-napi` uses GTK 3 when the process already has it (Electron loads GTK 3 before
+your main script runs) and GTK 4 otherwise. `@nativescript/linux-napi/gtk3` always uses GTK 3 and
+comes with GTK 3 typings. Asking for the other one in the same process throws.
+
 ## API
 
 - C functions, structs, unions, enums and constants are properties of the module, resolved on
@@ -35,6 +42,6 @@ other libraries.
 ## Development
 
 ```sh
-npm run build    # cargo build --release, then linux.<arch>.node
-NS_METADATA=../metadata-generator/tests/TestOutput/metadata-$(uname -m).bin npm test
+npm run build    # linux.<arch>.node, plus the metadata generated in ../metadata-generator/tests
+npm test
 ```

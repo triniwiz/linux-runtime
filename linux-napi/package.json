@@ -7,12 +7,21 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "gtk3.js",
+    "gtk3.d.ts",
+    "load.js",
     "linux.*.node",
     "metadata-*.bin",
-    "typings"
+    "typings",
+    "typings-gtk3"
   ],
-  "os": ["linux"],
-  "cpu": ["x64", "arm64"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "engines": {
     "node": ">= 18"
   },
@@ -21,5 +30,15 @@
     "build:debug": "node build.js --debug",
     "test": "node --test 'test/**/*.test.js'"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./gtk3": {
+      "types": "./gtk3.d.ts",
+      "default": "./gtk3.js"
+    }
+  }
 }

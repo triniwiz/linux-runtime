@@ -57,6 +57,4 @@ jobs:
           package-manager-cache: false
       - name: linux-napi addon
         working-directory: linux-napi
-        run: |
-          npm run build
-          NS_METADATA="$GITHUB_WORKSPACE/metadata-generator/tests/TestOutput/metadata-$(uname -m).bin" npm test
+        run: npm run build && npm test

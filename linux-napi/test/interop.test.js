@@ -1,4 +1,4 @@
-// Run with NS_METADATA pointing at the metadata to test against (see README).
+// `npm run build` puts the generated metadata next to the addon (see README).
 const test = require('node:test');
 const assert = require('node:assert');
 const ns = require('..');
@@ -69,4 +69,22 @@ test('promises resolved in GLib callbacks run right after them', async () => {
   });
   ns.stopGLib();
   assert.deepStrictEqual(order, ['callback', 'microtask']);
+});
+
+test('enums and constants', () => {
+  assert.strictEqual(ns.GtkAlign.END, ns.GTK_ALIGN_END);
+  assert.strictEqual(ns.XA_ATOM, 4);
+  assert.strictEqual(globalThis.__tsEnum, undefined);
+});
+
+test('GTK 3 and GTK 4 never share a process', () => {
+  assert.throws(() => require('../gtk3'), /GTK 3 and GTK 4 can't share a process/);
+});
+
+test('the gtk3 entry loads GTK 3', () => {
+  const { execFileSync } = require('node:child_process');
+  const major = execFileSync(process.execPath, ['-p', "require('./gtk3').gtk_get_major_version()"], {
+    cwd: require('node:path').join(__dirname, '..'),
+  });
+  assert.strictEqual(String(major).trim(), '3');
 });

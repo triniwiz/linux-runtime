@@ -84,8 +84,7 @@ The tests use the metadata in `metadata-generator/tests/TestOutput`. The addon b
 workspace:
 
 ```sh
-cd linux-napi && npm run build
-NS_METADATA=../metadata-generator/tests/TestOutput/metadata-$(uname -m).bin npm test
+cd linux-napi && npm run build && npm test
 ```
 
  `tests/conformance` runs on every

@@ -4,6 +4,8 @@
 # Usage: scripts/pack-npm.sh [version]
 #   METADATA=<metadata.bin dir>  default: metadata-generator/tests/TestOutput
 #   TYPINGS=<typings dir>        default: $METADATA/typings
+#   METADATA_GTK3=<dir>          GTK 3 metadata + typings for linux-napi's gtk3 entry
+#                                default: metadata-generator/tests/TestOutput-gtk3
 #   MDG=<generator bin dir>      metadata-generator + lib/clang, for app/plugin native code
 #   ENGINES="quickjs v8 jsc hermes napi"  packages besides @nativescript/linux (V8): the
 #                                Node-API engines (jsc needs libjavascriptcoregtk, hermes
@@ -18,13 +20,15 @@
 #   framework/tools/<x64|arm64>/ns-metadata-filter   native-api-usage.json filtering
 #   framework/tools/<x64|arm64>/ns-bundle            app.nsbundle packing, runtime fuses
 #   framework/tools/<x64|arm64>/hermesc              Hermes bytecode compiler (linux-hermes)
-# linux-napi: linux.<x64|arm64>.node, metadata-<x86_64|aarch64>.bin, typings/
+# linux-napi: linux.<x64|arm64>.node, metadata-<x86_64|aarch64>.bin, typings/,
+#   metadata-gtk3-<x86_64|aarch64>.bin, typings-gtk3/
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:-$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "nativescript-runtime"))')}"
 METADATA="${METADATA:-metadata-generator/tests/TestOutput}"
 TYPINGS="${TYPINGS:-$METADATA/typings}"
+METADATA_GTK3="${METADATA_GTK3:-metadata-generator/tests/TestOutput-gtk3}"
 MDG="${MDG:-metadata-generator/dist/$(uname -m)/bin}"
 RUST_ARCH="$(uname -m)"
 case "$RUST_ARCH" in
@@ -66,12 +70,7 @@ pack() {
     install -m 755 "target/release/$binary" "$out/framework/runtime/$ARCH/ns-linux"
     strip "$out/framework/runtime/$ARCH/ns-linux"
     cp "$METADATA/metadata-$RUST_ARCH.bin" "$out/framework/runtime/$ARCH/"
-    cp "$TYPINGS"/*.d.ts npm/typings/linux-runtime.d.ts "$out/framework/typings/" 2>/dev/null || true
-    # GUI stack only: libc / icu declarations clash with other platforms' typings
-    for m in GLib Gtk pango cairo gdk_pixbuf graphene harfbuzz fontconfig; do
-        [ -f "$out/framework/typings/c!$m.d.ts" ] && echo "/// <reference path=\"./c!$m.d.ts\" />"
-    done > "$out/framework/typings/index.d.ts"
-    echo '/// <reference path="./linux-runtime.d.ts" />' >> "$out/framework/typings/index.d.ts"
+    typings "$TYPINGS" "$out/framework/typings"
     mkdir -p "$out/framework/tools/$ARCH"
     for tool in ns-metadata-filter ns-bundle; do
         install -m 755 "target/release/$tool" "$out/framework/tools/$ARCH/"
@@ -105,20 +104,33 @@ JSON
     (cd "$out" && npm pack --silent --pack-destination ..)
 }
 
+# typings/ with an index.d.ts for the GUI stack (libc / icu clash with other platforms' typings)
+typings() {
+    local from=$1 dir=$2
+    mkdir -p "$dir"
+    cp "$from"/*.d.ts npm/typings/linux-runtime.d.ts "$dir/" 2>/dev/null || true
+    for m in GLib Gtk X11 pango cairo gdk_pixbuf graphene harfbuzz fontconfig; do
+        [ -f "$dir/c!$m.d.ts" ] && echo "/// <reference path=\"./c!$m.d.ts\" />"
+    done > "$dir/index.d.ts"
+    echo '/// <reference path="./linux-runtime.d.ts" />' >> "$dir/index.d.ts"
+}
+
 pack_addon() {
     local out="dist/npm/linux-napi"
     rm -rf "$out"
-    mkdir -p "$out/typings"
-    cp linux-napi/index.js linux-napi/index.d.ts "$out/"
-    [ -f linux-napi/README.md ] && cp linux-napi/README.md "$out/"
+    mkdir -p "$out"
+    cp linux-napi/{index,gtk3,load}.js linux-napi/{index,gtk3}.d.ts linux-napi/README.md "$out/"
     install -m 755 linux-napi/target/release/liblinux_napi.so "$out/linux.$ARCH.node"
     strip "$out/linux.$ARCH.node"
     cp "$METADATA/metadata-$RUST_ARCH.bin" "$out/"
-    cp "$TYPINGS"/*.d.ts npm/typings/linux-runtime.d.ts "$out/typings/" 2>/dev/null || true
-    for m in GLib Gtk pango cairo gdk_pixbuf graphene harfbuzz fontconfig; do
-        [ -f "$out/typings/c!$m.d.ts" ] && echo "/// <reference path=\"./c!$m.d.ts\" />"
-    done > "$out/typings/index.d.ts"
-    echo '/// <reference path="./linux-runtime.d.ts" />' >> "$out/typings/index.d.ts"
+    typings "$TYPINGS" "$out/typings"
+    if [ -f "$METADATA_GTK3/metadata-$RUST_ARCH.bin" ]; then
+        cp "$METADATA_GTK3/metadata-$RUST_ARCH.bin" "$out/metadata-gtk3-$RUST_ARCH.bin"
+        typings "$METADATA_GTK3/typings" "$out/typings-gtk3"
+    else
+        echo "warning: no GTK 3 metadata in $METADATA_GTK3, linux-napi/gtk3 won't load" >&2
+        [ -z "${STRICT:-}" ] || exit 1
+    fi
     node -e '
       const fs = require("fs");
       const [src, dst, version] = process.argv.slice(1);
