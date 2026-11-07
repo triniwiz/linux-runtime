@@ -4,9 +4,12 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 
 fn runtime() -> Option<Runtime> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../metadata-generator/tests/TestOutput/metadata-{}.bin", std::env::consts::ARCH));
-    path.exists().then(|| Runtime::new(MetaFile::open(path).unwrap()).unwrap())
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../metadata-generator/tests/TestOutput/metadata-{}.bin",
+        std::env::consts::ARCH
+    ));
+    path.exists()
+        .then(|| Runtime::new(MetaFile::open(path).unwrap()).unwrap())
 }
 
 const PRELUDE: &str = r#"
@@ -27,7 +30,10 @@ fn http_server() -> String {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
                 let mut parts = line.split_whitespace();
-                let (method, path) = (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned());
+                let (method, path) = (
+                    parts.next().unwrap_or("").to_owned(),
+                    parts.next().unwrap_or("").to_owned(),
+                );
                 let mut length = 0;
                 let mut headers = Vec::new();
                 loop {
@@ -46,15 +52,34 @@ fn http_server() -> String {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 let (status, content_type, extra, payload) = match path.as_str() {
-                    "/json" => ("200 OK", "application/json", "x-test: yes\r\n", br#"{"hello":"world"}"#.to_vec()),
+                    "/json" => (
+                        "200 OK",
+                        "application/json",
+                        "x-test: yes\r\n",
+                        br#"{"hello":"world"}"#.to_vec(),
+                    ),
                     "/echo" => {
-                        let header = headers.iter().find(|(k, _)| k == "x-echo").map(|(_, v)| v.clone()).unwrap_or_default();
+                        let header = headers
+                            .iter()
+                            .find(|(k, _)| k == "x-echo")
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_default();
                         let out = format!("{method} {header} {}", String::from_utf8_lossy(&body));
                         ("200 OK", "text/plain", "", out.into_bytes())
                     }
                     "/redirect" => ("302 Found", "text/plain", "location: /json\r\n", vec![]),
-                    "/mod/main.js" => ("200 OK", "text/javascript", "", b"import { dep } from './dep.js'; export const value = dep * 2;".to_vec()),
-                    "/mod/dep.js" => ("200 OK", "text/javascript", "", b"export const dep = 21;".to_vec()),
+                    "/mod/main.js" => (
+                        "200 OK",
+                        "text/javascript",
+                        "",
+                        b"import { dep } from './dep.js'; export const value = dep * 2;".to_vec(),
+                    ),
+                    "/mod/dep.js" => (
+                        "200 OK",
+                        "text/javascript",
+                        "",
+                        b"export const dep = 21;".to_vec(),
+                    ),
                     _ => ("404 Not Found", "text/plain", "", b"missing".to_vec()),
                 };
                 let mut stream = stream;
@@ -93,7 +118,8 @@ fn ws_echo_server() -> String {
 
 fn run(source: &str) {
     let Some(mut rt) = runtime() else { return };
-    rt.run_script(&format!("{PRELUDE}\n{source}"), "net.js").unwrap();
+    rt.run_script(&format!("{PRELUDE}\n{source}"), "net.js")
+        .unwrap();
     rt.run_event_loop().unwrap();
 }
 

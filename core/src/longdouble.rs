@@ -6,7 +6,11 @@ enum Parts {
     Inf(bool),
     Nan,
     /// value = mant / 2^63 * 2^exp, bit 63 of mant set
-    Finite { neg: bool, exp: i32, mant: u64 },
+    Finite {
+        neg: bool,
+        exp: i32,
+        mant: u64,
+    },
 }
 
 fn decompose(v: f64) -> Parts {
@@ -20,9 +24,17 @@ fn decompose(v: f64) -> Parts {
         (0, 0) => Parts::Zero(neg),
         (0, f) => {
             let lz = f.leading_zeros();
-            Parts::Finite { neg, exp: -1074 + (63 - lz as i32), mant: f << lz }
+            Parts::Finite {
+                neg,
+                exp: -1074 + (63 - lz as i32),
+                mant: f << lz,
+            }
         }
-        (e, f) => Parts::Finite { neg, exp: e - 1023, mant: (1 << 63) | (f << 11) },
+        (e, f) => Parts::Finite {
+            neg,
+            exp: e - 1023,
+            mant: (1 << 63) | (f << 11),
+        },
     }
 }
 
@@ -71,7 +83,11 @@ pub fn from_bytes(b: &[u8; 16]) -> f64 {
         let e = (se & 0x7fff) as i32;
         if e == 0x7fff {
             return if mant << 1 == 0 {
-                if neg { f64::NEG_INFINITY } else { f64::INFINITY }
+                if neg {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                }
             } else {
                 f64::NAN
             };
@@ -88,7 +104,11 @@ pub fn from_bytes(b: &[u8; 16]) -> f64 {
         let frac = bits & ((1u128 << 112) - 1);
         if e == 0x7fff {
             return if frac == 0 {
-                if neg { f64::NEG_INFINITY } else { f64::INFINITY }
+                if neg {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                }
             } else {
                 f64::NAN
             };
@@ -104,11 +124,29 @@ pub fn from_bytes(b: &[u8; 16]) -> f64 {
 mod tests {
     #[test]
     fn roundtrip() {
-        for v in [0.0, -0.0, 1.0, -2.5, 3.141592653589793, 1e300, -1e-300, 5e-324, f64::MAX, f64::MIN_POSITIVE] {
-            assert_eq!(super::from_bytes(&super::to_bytes(v)).to_bits(), v.to_bits(), "{v}");
+        for v in [
+            0.0,
+            -0.0,
+            1.0,
+            -2.5,
+            3.141592653589793,
+            1e300,
+            -1e-300,
+            5e-324,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ] {
+            assert_eq!(
+                super::from_bytes(&super::to_bytes(v)).to_bits(),
+                v.to_bits(),
+                "{v}"
+            );
         }
         assert!(super::from_bytes(&super::to_bytes(f64::NAN)).is_nan());
-        assert_eq!(super::from_bytes(&super::to_bytes(f64::INFINITY)), f64::INFINITY);
+        assert_eq!(
+            super::from_bytes(&super::to_bytes(f64::INFINITY)),
+            f64::INFINITY
+        );
     }
 
     #[cfg(target_arch = "x86_64")]

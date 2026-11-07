@@ -2,9 +2,9 @@
 
 use crate::interop;
 use crate::state::State;
-use nativescript_core::Field;
 use crate::{ffi, structs};
 use nativescript_core::longdouble;
+use nativescript_core::Field;
 use nativescript_metadata::Type;
 use std::ffi::CStr;
 
@@ -32,7 +32,12 @@ pub struct CallCx<'s> {
 
 impl Default for CallCx<'_> {
     fn default() -> Self {
-        CallCx { inline: [std::mem::MaybeUninit::uninit(); INLINE], used: 0, heap: Vec::new(), copy_back: Vec::new() }
+        CallCx {
+            inline: [std::mem::MaybeUninit::uninit(); INLINE],
+            used: 0,
+            heap: Vec::new(),
+            copy_back: Vec::new(),
+        }
     }
 }
 
@@ -57,7 +62,11 @@ impl<'s> CallCx<'s> {
 
     /// NUL terminated UTF-8 copy of a JS string.
     #[inline]
-    fn c_string(&mut self, scope: &mut v8::PinScope<'s, '_>, s: v8::Local<'s, v8::String>) -> *mut u8 {
+    fn c_string(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        s: v8::Local<'s, v8::String>,
+    ) -> *mut u8 {
         let len = s.utf8_length(scope);
         let p = self.scratch(len + 1);
         let out = unsafe { std::slice::from_raw_parts_mut(p, len) };
@@ -86,7 +95,11 @@ fn type_error(expected: &str, ty: &Type) -> String {
     format!("expected {expected} for {ty:?}")
 }
 
-pub fn to_i64<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>, ty: &Type) -> Result<i64, String> {
+pub fn to_i64<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    v: v8::Local<'s, v8::Value>,
+    ty: &Type,
+) -> Result<i64, String> {
     if v.is_number() {
         let n = v.number_value(scope).unwrap_or(0.0);
         return Ok(if n.is_finite() { n as i64 } else { 0 });
@@ -106,7 +119,11 @@ pub fn to_i64<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>,
     Err(type_error("a number or bigint", ty))
 }
 
-fn to_f64<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>, ty: &Type) -> Result<f64, String> {
+fn to_f64<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    v: v8::Local<'s, v8::Value>,
+    ty: &Type,
+) -> Result<f64, String> {
     if let Ok(b) = v8::Local::<v8::BigInt>::try_from(v) {
         return Ok(b.i64_value().0 as f64);
     }
@@ -128,14 +145,21 @@ pub fn buffer_address(v: v8::Local<v8::Value>) -> Option<usize> {
 }
 
 fn is_signed(ty: &Type) -> bool {
-    matches!(ty, Type::Char | Type::Short | Type::Int | Type::Long | Type::LongLong)
+    matches!(
+        ty,
+        Type::Char | Type::Short | Type::Int | Type::Long | Type::LongLong
+    )
 }
 
 fn bit_span(offset_bits: u32, width: u8) -> (usize, u32, usize, u128) {
     let byte = (offset_bits / 8) as usize;
     let shift = offset_bits % 8;
     let len = (shift as usize + width as usize).div_ceil(8);
-    let mask = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
+    let mask = if width >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << width) - 1
+    };
     (byte, shift, len, mask)
 }
 
@@ -253,8 +277,9 @@ pub unsafe fn write<'s>(
             let addr = if let Ok(s) = v8::Local::<v8::String>::try_from(value) {
                 cx.c_string(scope, s) as usize
             } else {
-                pointer_like(scope, st, &Type::Char, value)
-                    .ok_or_else(|| type_error("a string, Pointer, Reference, ArrayBuffer or null", ty))?
+                pointer_like(scope, st, &Type::Char, value).ok_or_else(|| {
+                    type_error("a string, Pointer, Reference, ArrayBuffer or null", ty)
+                })?
             };
             (dst as *mut usize).write_unaligned(addr);
         }
@@ -326,7 +351,8 @@ pub unsafe fn write<'s>(
         }
         Type::ExtVector(n, inner) => {
             let elem = st.layout(inner)?;
-            let array = v8::Local::<v8::Array>::try_from(value).map_err(|_| type_error("an array", ty))?;
+            let array =
+                v8::Local::<v8::Array>::try_from(value).map_err(|_| type_error("an array", ty))?;
             for i in 0..array.length().min(*n) {
                 let v = array.get_index(scope, i).unwrap();
                 write(scope, st, inner, v, dst.add(i as usize * elem.size), cx)?;
@@ -351,8 +377,12 @@ fn pointer_like<'s>(
         return Some(addr);
     }
     match crate::handles::of(value) {
-        Some((o, crate::handles::Kind::Pointer | crate::handles::Kind::Struct)) => Some(crate::handles::address(o)),
-        Some((_, crate::handles::Kind::Reference)) => interop::reference_ensure_storage(scope, st, value, pointee).ok(),
+        Some((o, crate::handles::Kind::Pointer | crate::handles::Kind::Struct)) => {
+            Some(crate::handles::address(o))
+        }
+        Some((_, crate::handles::Kind::Reference)) => {
+            interop::reference_ensure_storage(scope, st, value, pointee).ok()
+        }
         None => None,
     }
 }
@@ -382,7 +412,8 @@ unsafe fn pointer_arg<'s>(
             cx.copy_back.push((object, pointee.clone(), mem));
             return Ok(mem as usize);
         }
-        if let (Ok(array), Ok(elem)) = (v8::Local::<v8::Array>::try_from(value), st.layout(pointee)) {
+        if let (Ok(array), Ok(elem)) = (v8::Local::<v8::Array>::try_from(value), st.layout(pointee))
+        {
             let mem = cx.scratch(elem.size * array.length() as usize);
             for i in 0..array.length() {
                 let v = array.get_index(scope, i).unwrap();
@@ -404,7 +435,10 @@ pub fn number_or_bigint<'s>(scope: &mut v8::PinScope<'s, '_>, v: i64) -> v8::Loc
     }
 }
 
-fn unsigned_number_or_bigint<'s>(scope: &mut v8::PinScope<'s, '_>, v: u64) -> v8::Local<'s, v8::Value> {
+fn unsigned_number_or_bigint<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    v: u64,
+) -> v8::Local<'s, v8::Value> {
     if v <= (1u64 << 53) {
         v8::Number::new(scope, v as f64).into()
     } else {
@@ -439,11 +473,17 @@ pub unsafe fn read<'s>(
         Type::Short => int!(i16),
         Type::UShort | Type::Unichar => int!(u16),
         Type::Int => int!(i32),
-        Type::UInt => v8::Integer::new_from_unsigned(scope, (src as *const u32).read_unaligned()).into(),
+        Type::UInt => {
+            v8::Integer::new_from_unsigned(scope, (src as *const u32).read_unaligned()).into()
+        }
         Type::Float => num!(f32),
         Type::Double => num!(f64),
-        Type::Long | Type::LongLong => number_or_bigint(scope, (src as *const i64).read_unaligned()),
-        Type::ULong | Type::ULongLong => unsigned_number_or_bigint(scope, (src as *const u64).read_unaligned()),
+        Type::Long | Type::LongLong => {
+            number_or_bigint(scope, (src as *const i64).read_unaligned())
+        }
+        Type::ULong | Type::ULongLong => {
+            unsigned_number_or_bigint(scope, (src as *const u64).read_unaligned())
+        }
         Type::LongDouble => {
             let mut bytes = [0u8; 16];
             std::ptr::copy_nonoverlapping(src, bytes.as_mut_ptr(), 16);
@@ -469,10 +509,12 @@ pub unsafe fn read<'s>(
                 interop::new_pointer(scope, st, addr, None).into()
             }
         }
-        Type::Struct(_) | Type::Union(_) | Type::AnonymousStruct(..) | Type::AnonymousUnion(..) => match mem {
-            Mem::Temp => structs::copy(scope, st, ty, src)?,
-            Mem::Live(owner) => structs::view(scope, st, ty, src as usize, owner)?,
-        },
+        Type::Struct(_) | Type::Union(_) | Type::AnonymousStruct(..) | Type::AnonymousUnion(..) => {
+            match mem {
+                Mem::Temp => structs::copy(scope, st, ty, src)?,
+                Mem::Live(owner) => structs::view(scope, st, ty, src as usize, owner)?,
+            }
+        }
         Type::ConstantArray(n, inner) | Type::ExtVector(n, inner) => {
             let elem = st.layout(inner)?;
             let mut items = Vec::with_capacity(*n as usize);

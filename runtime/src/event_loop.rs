@@ -95,8 +95,13 @@ pub extern "C" fn promise_reject_callback(message: v8::PromiseRejectMessage) {
     let promise = message.get_promise();
     match message.get_event() {
         v8::PromiseRejectEvent::PromiseRejectWithNoHandler => {
-            let value = message.get_value().unwrap_or_else(|| v8::undefined(scope).into());
-            let entry = (v8::Global::new(scope, promise), v8::Global::new(scope, value));
+            let value = message
+                .get_value()
+                .unwrap_or_else(|| v8::undefined(scope).into());
+            let entry = (
+                v8::Global::new(scope, promise),
+                v8::Global::new(scope, value),
+            );
             st.rejections.borrow_mut().push(entry);
         }
         v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject => {
@@ -123,8 +128,16 @@ pub fn schedule_microtasks(st: &State) {
         // attach to the context dispatching this callback (a nested
         // g_main_loop_run may iterate another context than ours)
         let current = g_main_current_source();
-        let context = if current.is_null() { std::ptr::null_mut() } else { g_source_get_context(current) };
-        let context = if context.is_null() { st.main_context.context as gpointer } else { context };
+        let context = if current.is_null() {
+            std::ptr::null_mut()
+        } else {
+            g_source_get_context(current)
+        };
+        let context = if context.is_null() {
+            st.main_context.context as gpointer
+        } else {
+            context
+        };
         let source = g_idle_source_new();
         g_source_set_priority(source, G_PRIORITY_DEFAULT);
         g_source_set_callback(source, run, std::ptr::null_mut(), None);
@@ -152,7 +165,9 @@ unsafe extern "C" fn timer_fired(data: gpointer) -> gboolean {
     let Some(st) = current() else { return 0 };
     let (function, args, repeat) = {
         let timers = st.timers.borrow();
-        let Some(timer) = timers.get(&id) else { return 0 };
+        let Some(timer) = timers.get(&id) else {
+            return 0;
+        };
         (timer.function.clone(), timer.args.clone(), timer.repeat)
     };
     if !repeat {
@@ -161,7 +176,8 @@ unsafe extern "C" fn timer_fired(data: gpointer) -> gboolean {
     }
     with_js(&st, |scope| {
         let function = v8::Local::new(scope, &function);
-        let args: Vec<v8::Local<v8::Value>> = args.iter().map(|a| v8::Local::new(scope, a)).collect();
+        let args: Vec<v8::Local<v8::Value>> =
+            args.iter().map(|a| v8::Local::new(scope, a)).collect();
         let recv = v8::undefined(scope).into();
         function.call(scope, recv, &args);
     });
@@ -169,18 +185,36 @@ unsafe extern "C" fn timer_fired(data: gpointer) -> gboolean {
     (repeat && st.timers.borrow().contains_key(&id)) as gboolean
 }
 
-fn add_timer<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, mut rv: v8::ReturnValue<'s, v8::Value>, repeat: bool) {
+fn add_timer<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+    repeat: bool,
+) {
     let st = state(scope);
     let Ok(function) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
         return throw_error(scope, "the callback must be a function");
     };
-    let delay = args.get(1).number_value(scope).filter(|d| d.is_finite()).unwrap_or(0.0).max(0.0);
+    let delay = args
+        .get(1)
+        .number_value(scope)
+        .filter(|d| d.is_finite())
+        .unwrap_or(0.0)
+        .max(0.0);
     let id = st.next_timer.get().wrapping_add(1).max(1);
     st.next_timer.set(id);
-    let extra = (2..args.length()).map(|i| v8::Global::new(scope, args.get(i))).collect();
+    let extra = (2..args.length())
+        .map(|i| v8::Global::new(scope, args.get(i)))
+        .collect();
     let interval = (delay as u32).max(if repeat { 1 } else { 0 });
     let source = unsafe { g_timeout_source_new(interval) };
-    attach(source, G_PRIORITY_DEFAULT, timer_fired, id as usize as gpointer, &st);
+    attach(
+        source,
+        G_PRIORITY_DEFAULT,
+        timer_fired,
+        id as usize as gpointer,
+        &st,
+    );
     st.timers.borrow_mut().insert(
         id,
         Timer {
@@ -193,24 +227,42 @@ fn add_timer<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArg
     rv.set(v8::Integer::new_from_unsigned(scope, id).into());
 }
 
-fn set_timeout<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, rv: v8::ReturnValue<'s, v8::Value>) {
+fn set_timeout<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
     add_timer(scope, args, rv, false)
 }
 
-fn set_interval<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, rv: v8::ReturnValue<'s, v8::Value>) {
+fn set_interval<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
     add_timer(scope, args, rv, true)
 }
 
-fn clear_timer<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, _rv: v8::ReturnValue<'s, v8::Value>) {
+fn clear_timer<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s, v8::Value>,
+) {
     let st = state(scope);
-    let Some(id) = args.get(0).uint32_value(scope) else { return };
+    let Some(id) = args.get(0).uint32_value(scope) else {
+        return;
+    };
     let timer = st.timers.borrow_mut().remove(&id);
     if let Some(timer) = timer {
         unsafe { g_source_destroy(timer.source as gpointer) };
     }
 }
 
-fn queue_microtask<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, _rv: v8::ReturnValue<'s, v8::Value>) {
+fn queue_microtask<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s, v8::Value>,
+) {
     let Ok(function) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
         return throw_error(scope, "queueMicrotask expects a function");
     };
@@ -219,18 +271,31 @@ fn queue_microtask<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallb
 
 /// `nativescript.ref()` / `unref()`: keep the loop alive (e.g. while waiting
 /// for callbacks from other threads).
-fn loop_ref<'s>(scope: &mut v8::PinScope<'s, '_>, _args: v8::FunctionCallbackArguments<'s>, _rv: v8::ReturnValue<'s, v8::Value>) {
+fn loop_ref<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    _args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s, v8::Value>,
+) {
     let st = state(scope);
     st.loop_refs.set(st.loop_refs.get() + 1);
 }
 
-fn loop_unref<'s>(scope: &mut v8::PinScope<'s, '_>, _args: v8::FunctionCallbackArguments<'s>, _rv: v8::ReturnValue<'s, v8::Value>) {
+fn loop_unref<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    _args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s, v8::Value>,
+) {
     let st = state(scope);
     st.loop_refs.set((st.loop_refs.get() - 1).max(0));
 }
 
 pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<'s, v8::Object>) {
-    fn set<'s>(scope: &mut v8::PinScope<'s, '_>, target: v8::Local<'s, v8::Object>, name: &str, f: impl v8::MapFnTo<v8::FunctionCallback>) {
+    fn set<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        target: v8::Local<'s, v8::Object>,
+        name: &str,
+        f: impl v8::MapFnTo<v8::FunctionCallback>,
+    ) {
         let f = v8::Function::new(scope, f).unwrap();
         let key = v8::String::new(scope, name).unwrap();
         f.set_name(key);
@@ -322,7 +387,6 @@ pub fn post(context: usize, release: bool, f: Completion) {
     queue(context, dispatch, data);
 }
 
-
 /// Runs `f` on the thread owning `context` without entering JS.
 pub fn post_state(context: usize, f: Box<dyn FnOnce(&State) + Send>) {
     unsafe extern "C" fn dispatch(data: gpointer) -> gboolean {
@@ -343,7 +407,10 @@ pub fn install_livesync_signal() {
             with_js(st, |scope| {
                 let global = scope.get_current_context().global(scope);
                 let key = v8::String::new(scope, "__onLiveSync").unwrap();
-                if let Some(f) = global.get(scope, key.into()).and_then(|f| v8::Local::<v8::Function>::try_from(f).ok()) {
+                if let Some(f) = global
+                    .get(scope, key.into())
+                    .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+                {
                     let recv = v8::undefined(scope).into();
                     f.call(scope, recv, &[]);
                 }

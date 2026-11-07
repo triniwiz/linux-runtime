@@ -13,7 +13,7 @@ use std::ptr::null_mut;
 fn resolve(st: &State, meta: Meta) -> Result<Option<(napi_value, bool)>, String> {
     let js = st.js();
     Ok(Some(match meta.kind() {
-        MetaKind::Function => match ffi::function_for(st, meta.offset()) {
+        MetaKind::Function => match ffi::function_for(st, st.meta.id(&meta)) {
             Ok(function) => (ffi::js_function(st, meta.js_name(), &function), true),
             // missing symbols resolve to undefined, like on iOS
             Err(_) => (js.undefined(), true),
@@ -22,35 +22,60 @@ fn resolve(st: &State, meta: Meta) -> Result<Option<(napi_value, bool)>, String>
         MetaKind::Var => {
             let ty = meta.var_type().ok_or("variable without type")?;
             let address = st.symbol(&meta)?;
-            (unsafe { marshal::read(st, &ty, address as *const u8, Mem::Live(js.null()))? }, false)
+            (
+                unsafe { marshal::read(st, &ty, address as *const u8, Mem::Live(js.null()))? },
+                false,
+            )
         }
         MetaKind::JsCode => {
             let code = meta.js_code().unwrap_or("undefined");
-            (crate::run_script(js, code, meta.js_name()).map_err(|_| "failed to evaluate constant")?, true)
+            (
+                crate::run_script(js, code, meta.js_name())
+                    .map_err(|_| "failed to evaluate constant")?,
+                true,
+            )
         }
-        MetaKind::Struct => (interop::struct_constructor(st, meta.js_name(), Type::Struct(meta.js_name().to_owned())), true),
-        MetaKind::Union => (interop::struct_constructor(st, meta.js_name(), Type::Union(meta.js_name().to_owned())), true),
+        MetaKind::Struct => (
+            interop::struct_constructor(
+                st,
+                meta.js_name(),
+                Type::Struct(meta.js_name().to_owned()),
+            ),
+            true,
+        ),
+        MetaKind::Union => (
+            interop::struct_constructor(st, meta.js_name(), Type::Union(meta.js_name().to_owned())),
+            true,
+        ),
         MetaKind::Interface | MetaKind::Protocol | MetaKind::Undefined => return Ok(None),
     }))
 }
 
 fn is_global(kind: MetaKind) -> bool {
-    !matches!(kind, MetaKind::Interface | MetaKind::Protocol | MetaKind::Undefined)
+    !matches!(
+        kind,
+        MetaKind::Interface | MetaKind::Protocol | MetaKind::Undefined
+    )
 }
 
 unsafe extern "C" fn lookup_has(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let (a, ..) = cb_args::<1>(env, info);
     let name = st.js().rust_string(a[0]).unwrap_or_default();
-    st.js().boolean(st.meta.find(&name).is_some_and(|m| is_global(m.kind())))
+    st.js()
+        .boolean(st.meta.find(&name).is_some_and(|m| is_global(m.kind())))
 }
 
 unsafe extern "C" fn lookup_get(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
     let (a, ..) = cb_args::<1>(env, info);
-    let Ok(name) = js.rust_string(a[0]) else { return js.undefined() };
-    let Some(meta) = st.meta.find(&name) else { return js.undefined() };
+    let Ok(name) = js.rust_string(a[0]) else {
+        return js.undefined();
+    };
+    let Some(meta) = st.meta.find(&name) else {
+        return js.undefined();
+    };
     match resolve(st, meta) {
         Ok(Some((value, memoize))) => {
             if memoize {

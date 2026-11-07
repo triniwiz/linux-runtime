@@ -2,7 +2,7 @@
 
 use crate::event_loop::{begin_pending, post, post_state};
 use crate::state::{state, State};
-use crate::{throw_error, MetaFile, Runtime};
+use crate::{throw_error, MetaSet, Runtime};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,11 @@ pub struct Parent {
 
 struct Serializer;
 impl v8::ValueSerializerImpl for Serializer {
-    fn throw_data_clone_error<'s>(&self, scope: &mut v8::PinScope<'s, '_>, message: v8::Local<'s, v8::String>) {
+    fn throw_data_clone_error<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        message: v8::Local<'s, v8::String>,
+    ) {
         let error = v8::Exception::error(scope, message);
         scope.throw_exception(error);
     }
@@ -38,7 +42,10 @@ impl v8::ValueSerializerImpl for Serializer {
 struct Deserializer;
 impl v8::ValueDeserializerImpl for Deserializer {}
 
-fn serialize<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>) -> Option<Vec<u8>> {
+fn serialize<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<Vec<u8>> {
     let serializer = v8::ValueSerializer::new(scope, Box::new(Serializer));
     serializer.write_header();
     let context = scope.get_current_context();
@@ -46,15 +53,26 @@ fn serialize<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Valu
     Some(serializer.release())
 }
 
-fn deserialize<'s>(scope: &mut v8::PinScope<'s, '_>, data: &[u8]) -> Option<v8::Local<'s, v8::Value>> {
+fn deserialize<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    data: &[u8],
+) -> Option<v8::Local<'s, v8::Value>> {
     let deserializer = v8::ValueDeserializer::new(scope, Box::new(Deserializer), data);
     let context = scope.get_current_context();
     deserializer.read_header(context)?;
     deserializer.read_value(context)
 }
 
-fn dispatch<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, id: u32, kind: &str, value: v8::Local<'s, v8::Value>) {
-    let Some(f) = st.worker_dispatch.borrow().clone() else { return };
+fn dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    id: u32,
+    kind: &str,
+    value: v8::Local<'s, v8::Value>,
+) {
+    let Some(f) = st.worker_dispatch.borrow().clone() else {
+        return;
+    };
     let f = v8::Local::new(scope, f);
     let id = v8::Integer::new_from_unsigned(scope, id).into();
     let kind = v8::String::new(scope, kind).unwrap().into();
@@ -77,7 +95,12 @@ fn deliver(context: usize, id: u32, data: Vec<u8>) {
     );
 }
 
-fn run_worker(meta: Arc<MetaFile>, path: PathBuf, parent: Parent, link: Arc<Link>) -> Result<(), String> {
+fn run_worker(
+    meta: Arc<MetaSet>,
+    path: PathBuf,
+    parent: Parent,
+    link: Arc<Link>,
+) -> Result<(), String> {
     let mut rt = Runtime::new_worker(meta, parent)?;
     let st = rt.state.clone();
     begin_pending(&st); // released by close() / terminate()
@@ -104,7 +127,10 @@ fn spawn<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
         None => std::env::current_dir().unwrap_or_default().join(&spec),
     };
     if !path.is_file() {
-        return throw_error(scope, &format!("Worker script not found: {}", path.display()));
+        return throw_error(
+            scope,
+            &format!("Worker script not found: {}", path.display()),
+        );
     }
     let id = st.next_request.get() + 1;
     st.next_request.set(id);
@@ -139,7 +165,9 @@ fn spawn<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
 fn post_message<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
     let st = state(scope);
     let id = args.get(0).uint32_value(scope).unwrap_or(0);
-    let Some(data) = serialize(scope, args.get(1)) else { return };
+    let Some(data) = serialize(scope, args.get(1)) else {
+        return;
+    };
     if id == 0 {
         if let Some(parent) = st.parent.borrow().as_ref() {
             deliver(parent.context, parent.id, data);
@@ -165,10 +193,13 @@ fn stop_worker(link: &Link) {
         isolate.terminate_execution();
     }
     if let Some(context) = *link.context.lock().unwrap() {
-        post_state(context, Box::new(|st| {
-            st.loop_refs.set(0);
-            st.timers.borrow_mut().clear();
-        }));
+        post_state(
+            context,
+            Box::new(|st| {
+                st.loop_refs.set(0);
+                st.timers.borrow_mut().clear();
+            }),
+        );
     }
 }
 
@@ -195,7 +226,11 @@ fn set_dispatch<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s
     }
 }
 
-pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, natives: v8::Local<'s, v8::Object>) {
+pub fn install<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    natives: v8::Local<'s, v8::Object>,
+) {
     macro_rules! set {
         ($name:literal, $f:expr) => {{
             let f = v8::Function::new(scope, $f).unwrap();

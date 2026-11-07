@@ -5,12 +5,14 @@ use nativescript_runtime::{MetaFile, Runtime};
 use std::path::PathBuf;
 
 fn runtime() -> Option<Runtime> {
-    let path = std::env::var_os("NS_TEST_METADATA").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../metadata-generator/tests/TestOutput/metadata-{}.bin",
-            std::env::consts::ARCH
-        ))
-    });
+    let path = std::env::var_os("NS_TEST_METADATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../metadata-generator/tests/TestOutput/metadata-{}.bin",
+                std::env::consts::ARCH
+            ))
+        });
     if !path.exists() {
         eprintln!("skipping: {} not found", path.display());
         return None;
@@ -36,7 +38,8 @@ fn default_context() -> std::sync::MutexGuard<'static, ()> {
 
 fn run(source: &str) {
     let Some(mut rt) = runtime() else { return };
-    rt.run_script(&format!("{PRELUDE}\n{source}"), "test.js").unwrap();
+    rt.run_script(&format!("{PRELUDE}\n{source}"), "test.js")
+        .unwrap();
 }
 
 #[test]
@@ -215,14 +218,17 @@ fn explicit_callbacks_and_release() {
 }
 
 fn run_loop(source: &str) -> Result<(), String> {
-    let Some(mut rt) = runtime() else { return Ok(()) };
+    let Some(mut rt) = runtime() else {
+        return Ok(());
+    };
     rt.run_script(&format!("{PRELUDE}\n{source}"), "loop.js")?;
     rt.run_event_loop()
 }
 
 #[test]
 fn timers_and_microtasks() {
-    run_loop(r#"
+    run_loop(
+        r#"
       const order = [];
       setTimeout(() => order.push("t10"), 10);
       setTimeout(() => order.push("t0"), 0);
@@ -234,13 +240,16 @@ fn timers_and_microtasks() {
         eq(order, ["micro", "t0", "t10"], "order");
         eq(n, 3, "interval");
       }, 30);
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 }
 
 #[test]
 fn promises_resolve_inside_native_main_loops() {
     let _guard = default_context();
-    run_loop(r#"
+    run_loop(
+        r#"
       const loop = g_main_loop_new(null, 0);
       let resolved = false;
       g_idle_add(() => {
@@ -251,12 +260,15 @@ fn promises_resolve_inside_native_main_loops() {
       g_main_loop_run(loop);
       g_main_loop_unref(loop);
       eq(resolved, true, "promise resolved while g_main_loop_run was blocking");
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 }
 
 #[test]
 fn callbacks_from_other_threads_run_on_the_js_thread() {
-    run_loop(r#"
+    run_loop(
+        r#"
       nativescript.ref();
       const js = g_thread_self().toString();
       let calls = 0;
@@ -267,7 +279,9 @@ fn callbacks_from_other_threads_run_on_the_js_thread() {
         return null;
       }, null);
       setTimeout(() => eq(calls, 1, "called"), 50);
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 }
 
 #[test]

@@ -5,11 +5,11 @@ use crate::js::Js;
 use crate::sys::*;
 use nativescript_core::glib::MainContext;
 use nativescript_core::Native;
-use nativescript_metadata::{MetaFile, Offset};
+use nativescript_metadata::{MetaId, MetaSet};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::hash::BuildHasherDefault;
 use std::ffi::c_void;
+use std::hash::BuildHasherDefault;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub struct State {
     pub env: napi_env,
     pub main_context: MainContext,
     pub thread: std::thread::ThreadId,
-    pub functions: RefCell<HashMap<Offset, Rc<CFunction>>>,
+    pub functions: RefCell<HashMap<MetaId, Rc<CFunction>>>,
     pub closures: RefCell<Vec<Box<ClosureData>>>,
     /// constructors: Pointer, Reference
     pub pointer_ctor: Cell<napi_ref>,
@@ -50,7 +50,7 @@ impl std::ops::Deref for State {
 }
 
 impl State {
-    pub fn new(meta: Arc<MetaFile>, env: napi_env) -> Self {
+    pub fn new(meta: Arc<MetaSet>, env: napi_env) -> Self {
         State {
             native: Native::new(meta),
             env,
@@ -158,7 +158,16 @@ unsafe extern "C" fn finalize_handle(env: napi_env, data: *mut c_void, _: *mut c
 /// Wraps `object`. Not type tagged: tags are slow on some engines, `handles` tells ours apart.
 pub fn attach(js: Js, object: napi_value, handle: Handle) -> *mut Handle {
     let ptr = Box::into_raw(Box::new(handle));
-    unsafe { napi_wrap(js.0, object, ptr as *mut c_void, Some(finalize_handle), std::ptr::null_mut(), std::ptr::null_mut()) };
+    unsafe {
+        napi_wrap(
+            js.0,
+            object,
+            ptr as *mut c_void,
+            Some(finalize_handle),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
     if let Some(st) = current() {
         st.handles.borrow_mut().insert(ptr as usize);
     }
@@ -185,6 +194,13 @@ pub fn handle_of<'a>(js: Js, v: napi_value, kind: Kind) -> Option<&'a mut Handle
 
 impl Handle {
     pub fn new(kind: Kind, address: usize, type_index: Option<u32>, owner: napi_ref) -> Self {
-        Handle { kind, address, type_index, owner, pending: std::ptr::null_mut(), keep: Vec::new() }
+        Handle {
+            kind,
+            address,
+            type_index,
+            owner,
+            pending: std::ptr::null_mut(),
+            keep: Vec::new(),
+        }
     }
 }

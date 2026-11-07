@@ -145,18 +145,40 @@ impl Js {
     }
     pub fn bigint_i64(self, v: napi_value) -> JsResult<i64> {
         let mut lossless = false;
-        out!(i64, |p| napi_get_value_bigint_int64(self.0, v, p, &mut lossless))
+        out!(i64, |p| napi_get_value_bigint_int64(
+            self.0,
+            v,
+            p,
+            &mut lossless
+        ))
     }
     pub fn bigint_u64_of(self, v: napi_value) -> JsResult<u64> {
         let mut lossless = false;
-        out!(u64, |p| napi_get_value_bigint_uint64(self.0, v, p, &mut lossless))
+        out!(u64, |p| napi_get_value_bigint_uint64(
+            self.0,
+            v,
+            p,
+            &mut lossless
+        ))
     }
     pub fn utf8_len(self, v: napi_value) -> JsResult<usize> {
-        out!(usize, |p| napi_get_value_string_utf8(self.0, v, null_mut(), 0, p))
+        out!(usize, |p| napi_get_value_string_utf8(
+            self.0,
+            v,
+            null_mut(),
+            0,
+            p
+        ))
     }
     /// Writes the string NUL terminated into `buf` (`utf8_len + 1` bytes).
     pub fn write_utf8(self, v: napi_value, buf: *mut u8, cap: usize) -> JsResult<usize> {
-        out!(usize, |p| napi_get_value_string_utf8(self.0, v, buf as *mut c_char, cap, p))
+        out!(usize, |p| napi_get_value_string_utf8(
+            self.0,
+            v,
+            buf as *mut c_char,
+            cap,
+            p
+        ))
     }
     pub fn rust_string(self, v: napi_value) -> JsResult<String> {
         let len = self.utf8_len(v)?;
@@ -176,21 +198,53 @@ impl Js {
     }
     pub fn get(self, object: napi_value, key: &str) -> JsResult<napi_value> {
         let key = CString::new(key).unwrap();
-        out!(napi_value, |p| napi_get_named_property(self.0, object, key.as_ptr(), p))
+        out!(napi_value, |p| napi_get_named_property(
+            self.0,
+            object,
+            key.as_ptr(),
+            p
+        ))
     }
     pub fn set(self, object: napi_value, key: &str, value: napi_value) {
         let key = CString::new(key).unwrap();
         unsafe { napi_set_named_property(self.0, object, key.as_ptr(), value) };
     }
-    pub fn call(self, f: napi_value, recv: napi_value, args: &[napi_value]) -> JsResult<napi_value> {
-        out!(napi_value, |p| napi_call_function(self.0, recv, f, args.len(), args.as_ptr(), p))
+    pub fn call(
+        self,
+        f: napi_value,
+        recv: napi_value,
+        args: &[napi_value],
+    ) -> JsResult<napi_value> {
+        out!(napi_value, |p| napi_call_function(
+            self.0,
+            recv,
+            f,
+            args.len(),
+            args.as_ptr(),
+            p
+        ))
     }
     pub fn new_instance(self, ctor: napi_value, args: &[napi_value]) -> JsResult<napi_value> {
-        out!(napi_value, |p| napi_new_instance(self.0, ctor, args.len(), args.as_ptr(), p))
+        out!(napi_value, |p| napi_new_instance(
+            self.0,
+            ctor,
+            args.len(),
+            args.as_ptr(),
+            p
+        ))
     }
     pub fn function(self, name: &str, cb: napi_callback, data: *mut c_void) -> napi_value {
         let mut v = null_mut();
-        unsafe { napi_create_function(self.0, name.as_ptr() as *const c_char, name.len(), cb, data, &mut v) };
+        unsafe {
+            napi_create_function(
+                self.0,
+                name.as_ptr() as *const c_char,
+                name.len(),
+                cb,
+                data,
+                &mut v,
+            )
+        };
         v
     }
     pub fn external(self, data: *mut c_void) -> napi_value {
@@ -230,7 +284,11 @@ impl Js {
                     let stack = self.rust_string(stack).unwrap_or_default();
                     let head = self.to_string(e);
                     // some engines leave the message out of `stack`
-                    return if stack.starts_with(&head) { stack } else { format!("{head}\n{}", stack.trim_end()) };
+                    return if stack.starts_with(&head) {
+                        stack
+                    } else {
+                        format!("{head}\n{}", stack.trim_end())
+                    };
                 }
             }
         }
@@ -274,7 +332,15 @@ impl Js {
                 let mut kind = 0;
                 let mut ab = null_mut();
                 let mut offset = 0;
-                napi_get_typedarray_info(self.0, v, &mut kind, &mut len, &mut data, &mut ab, &mut offset);
+                napi_get_typedarray_info(
+                    self.0,
+                    v,
+                    &mut kind,
+                    &mut len,
+                    &mut data,
+                    &mut ab,
+                    &mut offset,
+                );
                 let size = match kind {
                     0..=2 => 1,
                     3 | 4 => 2,
@@ -302,12 +368,22 @@ impl Js {
 
 /// Up to `N` arguments (missing ones are undefined), argc, `this` and the callback data.
 #[inline]
-pub unsafe fn cb_args<const N: usize>(env: napi_env, info: napi_callback_info) -> ([napi_value; N], usize, napi_value, *mut c_void) {
+pub unsafe fn cb_args<const N: usize>(
+    env: napi_env,
+    info: napi_callback_info,
+) -> ([napi_value; N], usize, napi_value, *mut c_void) {
     let mut argv = [null_mut(); N];
     let mut argc = N;
     let mut this = null_mut();
     let mut data = null_mut();
-    napi_get_cb_info(env, info, &mut argc, argv.as_mut_ptr(), &mut this, &mut data);
+    napi_get_cb_info(
+        env,
+        info,
+        &mut argc,
+        argv.as_mut_ptr(),
+        &mut this,
+        &mut data,
+    );
     if argc < N {
         let undefined = Js(env).undefined();
         for a in &mut argv[argc..] {

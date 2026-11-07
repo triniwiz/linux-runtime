@@ -25,7 +25,11 @@ unsafe extern "C" fn print(env: napi_env, info: napi_callback_info) -> napi_valu
     let (a, argc, ..) = cb_args::<3>(env, info);
     let stream = js.i32_of(a[0]).unwrap_or(1);
     let text = js.to_string(a[1]);
-    let end = if argc < 3 || js.bool_of(a[2]) { "\n" } else { "" };
+    let end = if argc < 3 || js.bool_of(a[2]) {
+        "\n"
+    } else {
+        ""
+    };
     // keep ordering with C stdio (printf)
     libc::fflush(std::ptr::null_mut());
     if stream == 2 {
@@ -52,8 +56,14 @@ fn url_parts(js: Js, u: &url::Url) -> napi_value {
         u.host_str().unwrap_or("").to_owned(),
         u.port().map(|p| p.to_string()).unwrap_or_default(),
         u.path().to_owned(),
-        u.query().filter(|q| !q.is_empty()).map(|q| format!("?{q}")).unwrap_or_default(),
-        u.fragment().filter(|f| !f.is_empty()).map(|f| format!("#{f}")).unwrap_or_default(),
+        u.query()
+            .filter(|q| !q.is_empty())
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default(),
+        u.fragment()
+            .filter(|f| !f.is_empty())
+            .map(|f| format!("#{f}"))
+            .unwrap_or_default(),
         u.origin().ascii_serialization(),
     ];
     let items: Vec<napi_value> = values.iter().map(|v| js.string(v)).collect();
@@ -69,24 +79,39 @@ unsafe extern "C" fn url_parse(env: napi_env, info: napi_callback_info) -> napi_
     } else {
         url::Url::parse(&js.to_string(a[1])).and_then(|b| b.join(&input))
     };
-    parsed.map(|u| url_parts(js, &u)).unwrap_or_else(|_| js.null())
+    parsed
+        .map(|u| url_parts(js, &u))
+        .unwrap_or_else(|_| js.null())
 }
 
 unsafe extern "C" fn url_set(env: napi_env, info: napi_callback_info) -> napi_value {
     let js = Js(env);
     let (a, ..) = cb_args::<3>(env, info);
     let (href, part, value) = (js.to_string(a[0]), js.to_string(a[1]), js.to_string(a[2]));
-    let Ok(mut u) = url::Url::parse(&href) else { return js.null() };
+    let Ok(mut u) = url::Url::parse(&href) else {
+        return js.null();
+    };
     let ok = match part.as_str() {
         "protocol" => u.set_scheme(value.trim_end_matches(':')).is_ok(),
         "username" => u.set_username(&value).is_ok(),
-        "password" => u.set_password(Some(value.as_str()).filter(|v| !v.is_empty())).is_ok(),
+        "password" => u
+            .set_password(Some(value.as_str()).filter(|v| !v.is_empty()))
+            .is_ok(),
         "host" => {
-            let (h, p) = value.rsplit_once(':').map(|(h, p)| (h, p.parse().ok())).unwrap_or((&value, None));
+            let (h, p) = value
+                .rsplit_once(':')
+                .map(|(h, p)| (h, p.parse().ok()))
+                .unwrap_or((&value, None));
             u.set_host(Some(h)).is_ok() && u.set_port(p).is_ok()
         }
         "hostname" => u.set_host(Some(&value)).is_ok(),
-        "port" => u.set_port(if value.is_empty() { None } else { value.parse().ok() }).is_ok(),
+        "port" => u
+            .set_port(if value.is_empty() {
+                None
+            } else {
+                value.parse().ok()
+            })
+            .is_ok(),
         "pathname" => {
             u.set_path(&value);
             true
@@ -113,7 +138,11 @@ unsafe extern "C" fn url_set(env: napi_env, info: napi_callback_info) -> napi_va
 unsafe extern "C" fn text_encode(env: napi_env, info: napi_callback_info) -> napi_value {
     let js = Js(env);
     let (a, ..) = cb_args::<1>(env, info);
-    let s = if js.type_of(a[0]) == UNDEFINED { String::new() } else { js.to_string(a[0]) };
+    let s = if js.type_of(a[0]) == UNDEFINED {
+        String::new()
+    } else {
+        js.to_string(a[0])
+    };
     js.uint8array(s.as_bytes())
 }
 
@@ -163,7 +192,10 @@ unsafe extern "C" fn now(env: napi_env, _: napi_callback_info) -> napi_value {
 }
 
 unsafe extern "C" fn hrtime(env: napi_env, _: napi_callback_info) -> napi_value {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     Js(env).bigint_u64(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64)
 }
@@ -177,7 +209,11 @@ unsafe extern "C" fn exit(env: napi_env, info: napi_callback_info) -> napi_value
 }
 
 unsafe extern "C" fn cwd(env: napi_env, _: napi_callback_info) -> napi_value {
-    Js(env).string(&std::env::current_dir().unwrap_or_default().to_string_lossy())
+    Js(env).string(
+        &std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy(),
+    )
 }
 
 unsafe extern "C" fn chdir(env: napi_env, info: napi_callback_info) -> napi_value {
@@ -193,7 +229,9 @@ unsafe extern "C" fn chdir(env: napi_env, info: napi_callback_info) -> napi_valu
 unsafe extern "C" fn getenv(env: napi_env, info: napi_callback_info) -> napi_value {
     let js = Js(env);
     let (a, ..) = cb_args::<1>(env, info);
-    std::env::var(js.to_string(a[0])).map(|v| js.string(&v)).unwrap_or_else(|_| js.undefined())
+    std::env::var(js.to_string(a[0]))
+        .map(|v| js.string(&v))
+        .unwrap_or_else(|_| js.undefined())
 }
 
 unsafe extern "C" fn setenv(env: napi_env, info: napi_callback_info) -> napi_value {
@@ -211,7 +249,9 @@ unsafe extern "C" fn setenv(env: napi_env, info: napi_callback_info) -> napi_val
 
 unsafe extern "C" fn env_keys(env: napi_env, _: napi_callback_info) -> napi_value {
     let js = Js(env);
-    let keys: Vec<napi_value> = std::env::vars_os().map(|(k, _)| js.string(&k.to_string_lossy())).collect();
+    let keys: Vec<napi_value> = std::env::vars_os()
+        .map(|(k, _)| js.string(&k.to_string_lossy()))
+        .collect();
     js.array(&keys)
 }
 
@@ -234,7 +274,11 @@ pub fn create(js: Js, argv: &[String], engine: &str) -> napi_value {
         ("setenv", setenv),
         ("envKeys", env_keys),
     ] {
-        js.set(natives, name, js.function(name, Some(cb), std::ptr::null_mut()));
+        js.set(
+            natives,
+            name,
+            js.function(name, Some(cb), std::ptr::null_mut()),
+        );
     }
     let items: Vec<napi_value> = argv.iter().map(|a| js.string(a)).collect();
     js.set(natives, "argv", js.array(&items));

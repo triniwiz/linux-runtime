@@ -151,7 +151,10 @@ impl MetaFile {
                 return Err(Error::Malformed("table out of bounds"));
             }
             *pos = end;
-            Ok(Table { start, len: len as u32 })
+            Ok(Table {
+                start,
+                len: len as u32,
+            })
         };
         let js_table = table(&mut pos)?;
         let native_protocols = table(&mut pos)?;
@@ -201,7 +204,10 @@ impl MetaFile {
 
     #[inline]
     pub(crate) fn heap_u8(&self, offset: Offset) -> u8 {
-        self.bytes().get(self.heap + offset as usize).copied().unwrap_or(0)
+        self.bytes()
+            .get(self.heap + offset as usize)
+            .copied()
+            .unwrap_or(0)
     }
 
     #[inline]
@@ -223,15 +229,27 @@ impl MetaFile {
     /// `i32 count, count x i32` array of offsets in the heap.
     pub(crate) fn heap_array(&self, offset: Offset) -> OffsetArray<'_> {
         if offset == 0 {
-            return OffsetArray { file: self, start: 0, len: 0 };
+            return OffsetArray {
+                file: self,
+                start: 0,
+                len: 0,
+            };
         }
         let len = self.heap_i32(offset).max(0) as u32;
-        OffsetArray { file: self, start: offset + 4, len }
+        OffsetArray {
+            file: self,
+            start: offset + 4,
+            len,
+        }
     }
 
     fn bucket(&self, table: Table, name: &str) -> OffsetArray<'_> {
         if table.len == 0 {
-            return OffsetArray { file: self, start: 0, len: 0 };
+            return OffsetArray {
+                file: self,
+                start: 0,
+                len: 0,
+            };
         }
         let index = string_hash(name.as_bytes()) % table.len;
         let bucket = read_i32(self.bytes(), table.start + index as usize * 4).unwrap_or(0);
@@ -242,7 +260,10 @@ impl MetaFile {
     pub fn find(&self, js_name: &str) -> Option<Meta<'_>> {
         self.bucket(self.js_table, js_name)
             .iter()
-            .map(|o| Meta { file: self, offset: o })
+            .map(|o| Meta {
+                file: self,
+                offset: o,
+            })
             .find(|m| m.js_name() == js_name)
     }
 
@@ -250,7 +271,10 @@ impl MetaFile {
     pub fn find_native(&self, name: &str) -> Option<Meta<'_>> {
         self.bucket(self.native_names, name)
             .iter()
-            .map(|o| Meta { file: self, offset: o })
+            .map(|o| Meta {
+                file: self,
+                offset: o,
+            })
             .find(|m| m.name() == name || m.demangled_name() == Some(name))
     }
 
@@ -264,22 +288,87 @@ impl MetaFile {
     pub fn iter(&self) -> impl Iterator<Item = Meta<'_>> + '_ {
         (0..self.js_table.len).flat_map(move |i| {
             let bucket = read_i32(self.bytes(), self.js_table.start + i as usize * 4).unwrap_or(0);
-            self.heap_array(bucket as u32)
-                .iter()
-                .map(move |o| Meta { file: self, offset: o })
+            self.heap_array(bucket as u32).iter().map(move |o| Meta {
+                file: self,
+                offset: o,
+            })
         })
     }
 
     pub fn modules(&self) -> impl Iterator<Item = Module<'_>> + '_ {
         (0..self.modules.len).map(move |i| {
             let offset = read_i32(self.bytes(), self.modules.start + i as usize * 4).unwrap_or(0);
-            Module { file: self, offset: offset as u32 }
+            Module {
+                file: self,
+                offset: offset as u32,
+            }
         })
     }
 
     /// Objective-C protocol table, kept for completeness, empty for C metadata.
     pub fn protocol_bucket_count(&self) -> u32 {
         self.native_protocols.len
+    }
+}
+
+/// File-qualified declaration id: `file index << 32 | offset`.
+pub type MetaId = u64;
+
+/// Several metadata files searched in order (SDK first, then app and plugin
+/// metadata); the first file declaring a name wins.
+#[derive(Debug, Default)]
+pub struct MetaSet {
+    files: Vec<MetaFile>,
+}
+
+impl MetaSet {
+    pub fn new(files: Vec<MetaFile>) -> Self {
+        MetaSet { files }
+    }
+
+    pub fn push(&mut self, file: MetaFile) {
+        self.files.push(file);
+    }
+
+    pub fn files(&self) -> &[MetaFile] {
+        &self.files
+    }
+
+    pub fn find(&self, js_name: &str) -> Option<Meta<'_>> {
+        self.files.iter().find_map(|f| f.find(js_name))
+    }
+
+    pub fn find_native(&self, name: &str) -> Option<Meta<'_>> {
+        self.files.iter().find_map(|f| f.find_native(name))
+    }
+
+    /// Id of a declaration (or module) offset inside `file`, a member of this set.
+    pub fn id_in(&self, file: &MetaFile, offset: Offset) -> MetaId {
+        let index = self
+            .files
+            .iter()
+            .position(|f| std::ptr::eq(f, file))
+            .unwrap_or(0);
+        (index as u64) << 32 | offset as u64
+    }
+
+    pub fn id(&self, meta: &Meta) -> MetaId {
+        self.id_in(meta.file, meta.offset)
+    }
+
+    pub fn meta_at(&self, id: MetaId) -> Option<Meta<'_>> {
+        let file = self.files.get((id >> 32) as usize)?;
+        Some(file.meta_at(id as Offset))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Meta<'_>> + '_ {
+        self.files.iter().flat_map(|f| f.iter())
+    }
+}
+
+impl From<MetaFile> for MetaSet {
+    fn from(file: MetaFile) -> Self {
+        MetaSet { files: vec![file] }
     }
 }
 
@@ -317,6 +406,10 @@ impl<'a> Module<'a> {
         self.offset
     }
 
+    pub fn file(&self) -> &'a MetaFile {
+        self.file
+    }
+
     fn flags(&self) -> u8 {
         self.file.heap_u8(self.offset)
     }
@@ -348,7 +441,10 @@ impl fmt::Debug for Module<'_> {
         f.debug_struct("Module")
             .field("name", &self.name())
             .field("system", &self.is_system())
-            .field("libraries", &self.libraries().map(|l| l.name()).collect::<Vec<_>>())
+            .field(
+                "libraries",
+                &self.libraries().map(|l| l.name()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -438,7 +534,8 @@ impl<'a> Meta<'a> {
             return self.file.heap_str(self.names_offset());
         }
         let index = if self.has_flag(flags::HAS_NAME) { 1 } else { 0 };
-        self.file.heap_str(self.file.heap_ptr(self.names_offset() + index * 4))
+        self.file
+            .heap_str(self.file.heap_ptr(self.names_offset() + index * 4))
     }
 
     pub fn demangled_name(&self) -> Option<&'a str> {
@@ -446,7 +543,10 @@ impl<'a> Meta<'a> {
             return None;
         }
         let index = if self.has_flag(flags::HAS_NAME) { 2 } else { 1 };
-        Some(self.file.heap_str(self.file.heap_ptr(self.names_offset() + index * 4)))
+        Some(
+            self.file
+                .heap_str(self.file.heap_ptr(self.names_offset() + index * 4)),
+        )
     }
 
     pub fn module(&self) -> Module<'a> {
@@ -483,7 +583,10 @@ impl<'a> Meta<'a> {
         if self.kind() != MetaKind::JsCode {
             return None;
         }
-        Some(self.file.heap_str(self.file.heap_ptr(self.offset + META_HEADER)))
+        Some(
+            self.file
+                .heap_str(self.file.heap_ptr(self.offset + META_HEADER)),
+        )
     }
 
     /// Layout of a struct or union computed by clang.
@@ -499,7 +602,9 @@ impl<'a> Meta<'a> {
         if !matches!(self.kind(), MetaKind::Struct | MetaKind::Union) {
             return None;
         }
-        let names = self.file.heap_array(self.file.heap_ptr(self.offset + META_HEADER));
+        let names = self
+            .file
+            .heap_array(self.file.heap_ptr(self.offset + META_HEADER));
         let encodings = self.file.heap_ptr(self.offset + META_HEADER + 4);
         let types = types::decode_list(self.file, encodings);
         Some(
@@ -507,7 +612,10 @@ impl<'a> Meta<'a> {
                 .into_iter()
                 .enumerate()
                 .map(|(i, ty)| {
-                    let name = names.get(i as u32).map(|o| self.file.heap_str(o)).unwrap_or("");
+                    let name = names
+                        .get(i as u32)
+                        .map(|o| self.file.heap_str(o))
+                        .unwrap_or("");
                     (Cow::Borrowed(name), ty)
                 })
                 .collect(),

@@ -30,7 +30,12 @@ pub struct CallCx {
 
 impl Default for CallCx {
     fn default() -> Self {
-        CallCx { inline: [std::mem::MaybeUninit::uninit(); INLINE], used: 0, heap: Vec::new(), copy_back: Vec::new() }
+        CallCx {
+            inline: [std::mem::MaybeUninit::uninit(); INLINE],
+            used: 0,
+            heap: Vec::new(),
+            copy_back: Vec::new(),
+        }
     }
 }
 
@@ -55,7 +60,8 @@ impl CallCx {
     fn c_string(&mut self, js: Js, s: napi_value) -> Result<*mut u8, String> {
         let len = js.utf8_len(s).map_err(|_| "string expected")?;
         let p = self.scratch(len + 1);
-        js.write_utf8(s, p, len + 1).map_err(|_| "string expected")?;
+        js.write_utf8(s, p, len + 1)
+            .map_err(|_| "string expected")?;
         Ok(p)
     }
 
@@ -104,14 +110,21 @@ fn to_f64(js: Js, v: napi_value, ty: &Type) -> Result<f64, String> {
 }
 
 fn is_signed(ty: &Type) -> bool {
-    matches!(ty, Type::Char | Type::Short | Type::Int | Type::Long | Type::LongLong)
+    matches!(
+        ty,
+        Type::Char | Type::Short | Type::Int | Type::Long | Type::LongLong
+    )
 }
 
 fn bit_span(offset_bits: u32, width: u8) -> (usize, u32, usize, u128) {
     let byte = (offset_bits / 8) as usize;
     let shift = offset_bits % 8;
     let len = (shift as usize + width as usize).div_ceil(8);
-    let mask = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
+    let mask = if width >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << width) - 1
+    };
     (byte, shift, len, mask)
 }
 
@@ -137,17 +150,32 @@ unsafe fn write_bits(base: *mut u8, offset_bits: u32, width: u8, value: i64) {
     std::ptr::copy_nonoverlapping(raw.to_le_bytes().as_ptr(), base.add(byte), len);
 }
 
-pub unsafe fn read_field(st: &State, field: &Field, base: *const u8, mem: Mem) -> Result<napi_value, String> {
+pub unsafe fn read_field(
+    st: &State,
+    field: &Field,
+    base: *const u8,
+    mem: Mem,
+) -> Result<napi_value, String> {
     match field.bits {
         Some((offset, width)) => {
             let v = read_bits(base, offset, width, is_signed(&field.ty));
-            Ok(if field.ty == Type::Bool { st.js().boolean(v != 0) } else { st.js().i64(v) })
+            Ok(if field.ty == Type::Bool {
+                st.js().boolean(v != 0)
+            } else {
+                st.js().i64(v)
+            })
         }
         None => read(st, &field.ty, base.add(field.offset), mem),
     }
 }
 
-pub unsafe fn write_field(st: &State, field: &Field, value: napi_value, base: *mut u8, cx: &mut CallCx) -> Result<(), String> {
+pub unsafe fn write_field(
+    st: &State,
+    field: &Field,
+    value: napi_value,
+    base: *mut u8,
+    cx: &mut CallCx,
+) -> Result<(), String> {
     match field.bits {
         Some((offset, width)) => {
             write_bits(base, offset, width, to_i64(st.js(), value, &field.ty)?);
@@ -170,13 +198,21 @@ fn pointer_like(st: &State, pointee: &Type, value: napi_value) -> Result<Option<
     }
     match handle(js, value) {
         Some(h) if matches!(h.kind, Kind::Pointer | Kind::Struct) => Ok(Some(h.address)),
-        Some(h) if h.kind == Kind::Reference => interop::reference_ensure_storage(st, value, h, pointee).map(Some),
+        Some(h) if h.kind == Kind::Reference => {
+            interop::reference_ensure_storage(st, value, h, pointee).map(Some)
+        }
         _ => Ok(None),
     }
 }
 
 /// Writes `value` as a `ty` at `dst` (`layout(ty).size` writable bytes).
-pub unsafe fn write(st: &State, ty: &Type, value: napi_value, dst: *mut u8, cx: &mut CallCx) -> Result<(), String> {
+pub unsafe fn write(
+    st: &State,
+    ty: &Type,
+    value: napi_value,
+    dst: *mut u8,
+    cx: &mut CallCx,
+) -> Result<(), String> {
     let js = st.js();
     macro_rules! int {
         ($t:ty) => {{
@@ -194,7 +230,11 @@ pub unsafe fn write(st: &State, ty: &Type, value: napi_value, dst: *mut u8, cx: 
         Type::UInt => int!(u32),
         Type::Long | Type::LongLong => int!(i64),
         Type::ULong | Type::ULongLong => {
-            let v = if js.type_of(value) == BIGINT { js.bigint_u64_of(value).unwrap_or(0) } else { to_i64(js, value, ty)? as u64 };
+            let v = if js.type_of(value) == BIGINT {
+                js.bigint_u64_of(value).unwrap_or(0)
+            } else {
+                to_i64(js, value, ty)? as u64
+            };
             (dst as *mut u64).write_unaligned(v);
         }
         Type::Float => (dst as *mut f32).write_unaligned(to_f64(js, value, ty)? as f32),
@@ -207,7 +247,9 @@ pub unsafe fn write(st: &State, ty: &Type, value: napi_value, dst: *mut u8, cx: 
             let addr = if js.type_of(value) == STRING {
                 cx.c_string(js, value)? as usize
             } else {
-                pointer_like(st, &Type::Char, value)?.ok_or_else(|| type_error("a string, Pointer, Reference, ArrayBuffer or null", ty))?
+                pointer_like(st, &Type::Char, value)?.ok_or_else(|| {
+                    type_error("a string, Pointer, Reference, ArrayBuffer or null", ty)
+                })?
             };
             (dst as *mut usize).write_unaligned(addr);
         }
@@ -222,7 +264,8 @@ pub unsafe fn write(st: &State, ty: &Type, value: napi_value, dst: *mut u8, cx: 
                     None => ffi::closure_for(st, value, sig)?,
                 }
             } else {
-                pointer_like(st, &Type::Void, value)?.ok_or_else(|| type_error("a function, Pointer or null", ty))?
+                pointer_like(st, &Type::Void, value)?
+                    .ok_or_else(|| type_error("a function, Pointer or null", ty))?
             };
             (dst as *mut usize).write_unaligned(addr);
         }
@@ -243,7 +286,9 @@ pub unsafe fn write(st: &State, ty: &Type, value: napi_value, dst: *mut u8, cx: 
                 if field.name.is_empty() {
                     continue;
                 }
-                let v = js.get(value, &field.name).map_err(|_| "failed to read field")?;
+                let v = js
+                    .get(value, &field.name)
+                    .map_err(|_| "failed to read field")?;
                 if js.type_of(v) == UNDEFINED {
                     continue;
                 }
@@ -279,7 +324,12 @@ pub unsafe fn write(st: &State, ty: &Type, value: napi_value, dst: *mut u8, cx: 
 }
 
 /// Value passed for a `T*` parameter.
-unsafe fn pointer_arg(st: &State, pointee: &Type, value: napi_value, cx: &mut CallCx) -> Result<usize, String> {
+unsafe fn pointer_arg(
+    st: &State,
+    pointee: &Type,
+    value: napi_value,
+    cx: &mut CallCx,
+) -> Result<usize, String> {
     let js = st.js();
     if let Some(addr) = pointer_like(st, pointee, value)? {
         return Ok(addr);
@@ -308,7 +358,9 @@ unsafe fn pointer_arg(st: &State, pointee: &Type, value: napi_value, cx: &mut Ca
             return Ok(mem as usize);
         }
     }
-    Err(format!("expected a Pointer, Reference, struct, ArrayBuffer or null for pointer to {pointee:?}"))
+    Err(format!(
+        "expected a Pointer, Reference, struct, ArrayBuffer or null for pointer to {pointee:?}"
+    ))
 }
 
 /// Reads a `ty` from `src`.
@@ -351,10 +403,12 @@ pub unsafe fn read(st: &State, ty: &Type, src: *const u8, mem: Mem) -> Result<na
                 interop::new_pointer(st, addr, None)
             }
         }
-        Type::Struct(_) | Type::Union(_) | Type::AnonymousStruct(..) | Type::AnonymousUnion(..) => match mem {
-            Mem::Temp => structs::copy(st, ty, src)?,
-            Mem::Live(owner) => structs::view(st, ty, src as usize, Some(owner))?,
-        },
+        Type::Struct(_) | Type::Union(_) | Type::AnonymousStruct(..) | Type::AnonymousUnion(..) => {
+            match mem {
+                Mem::Temp => structs::copy(st, ty, src)?,
+                Mem::Live(owner) => structs::view(st, ty, src as usize, Some(owner))?,
+            }
+        }
         Type::ConstantArray(n, inner) | Type::ExtVector(n, inner) => {
             let elem = st.layout(inner)?;
             let mut items = Vec::with_capacity(*n as usize);
@@ -368,7 +422,11 @@ pub unsafe fn read(st: &State, ty: &Type, src: *const u8, mem: Mem) -> Result<na
 }
 
 /// Plain object with the fields of the record at `src` (copied).
-pub unsafe fn record_to_object(st: &State, ty: &Type, src: *const u8) -> Result<napi_value, String> {
+pub unsafe fn record_to_object(
+    st: &State,
+    ty: &Type,
+    src: *const u8,
+) -> Result<napi_value, String> {
     let js = st.js();
     let record = st.record(ty)?;
     let object = js.object();

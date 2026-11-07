@@ -7,7 +7,7 @@ use crate::sys::*;
 use libffi::raw;
 use nativescript_core::call::{CallDesc, FastCall};
 use nativescript_core::closure::Closure;
-use nativescript_metadata::Type;
+use nativescript_metadata::{MetaId, Type};
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::rc::Rc;
@@ -26,8 +26,17 @@ impl std::ops::Deref for CFunction {
 }
 
 impl CFunction {
-    pub fn new(st: &State, name: &str, address: usize, signature: Vec<Type>, variadic: bool) -> Result<Self, String> {
-        Ok(CFunction { desc: CallDesc::new(st, name, address, signature, variadic)?, state: st })
+    pub fn new(
+        st: &State,
+        name: &str,
+        address: usize,
+        signature: Vec<Type>,
+        variadic: bool,
+    ) -> Result<Self, String> {
+        Ok(CFunction {
+            desc: CallDesc::new(st, name, address, signature, variadic)?,
+            state: st,
+        })
     }
 
     fn vararg_type(js: Js, v: napi_value) -> Result<Type, String> {
@@ -54,7 +63,13 @@ impl CFunction {
         let fixed = self.signature.len() - 1;
         let argc = args.len();
         if argc < fixed || (!self.variadic && argc > fixed) {
-            return Err(format!("{}() expects {}{} argument(s), got {}", self.name, fixed, if self.variadic { "+" } else { "" }, argc));
+            return Err(format!(
+                "{}() expects {}{} argument(s), got {}",
+                self.name,
+                fixed,
+                if self.variadic { "+" } else { "" },
+                argc
+            ));
         }
         if let Some(fast) = &self.fast {
             return self.call_fast(st, args, fast);
@@ -88,18 +103,28 @@ impl CFunction {
                 None => st.layout(ty)?.size.max(8),
             };
             let slot = cx.scratch(size);
-            unsafe { marshal::write(st, ty, args[i], slot, &mut cx) }.map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+            unsafe { marshal::write(st, ty, args[i], slot, &mut cx) }
+                .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
             argv[i] = slot as *mut c_void;
         }
         let ret_ty = &signature[0];
-        let ret = cx.scratch(if self.variadic { st.layout(ret_ty)?.size.max(16) } else { self.ret_size });
+        let ret = cx.scratch(if self.variadic {
+            st.layout(ret_ty)?.size.max(16)
+        } else {
+            self.ret_size
+        });
         unsafe { self.desc.call(cif, argv, ret) };
         let result = unsafe { marshal::read(st, ret_ty, ret, Mem::Temp)? };
         cx.finish(st)?;
         Ok(result)
     }
 
-    fn call_fast(&self, st: &State, args: &[napi_value], fast: &FastCall) -> Result<napi_value, String> {
+    fn call_fast(
+        &self,
+        st: &State,
+        args: &[napi_value],
+        fast: &FastCall,
+    ) -> Result<napi_value, String> {
         let mut cx = CallCx::default();
         let mut ints = [0i64; 8];
         let mut floats = [0f64; 8];
@@ -117,25 +142,49 @@ impl CFunction {
             }
         }
         let ret = unsafe { self.desc.call_fast(fast.float_ret, ints, floats) };
-        let result = unsafe { marshal::read(st, &self.signature[0], &ret as *const u128 as *const u8, Mem::Temp)? };
+        let result = unsafe {
+            marshal::read(
+                st,
+                &self.signature[0],
+                &ret as *const u128 as *const u8,
+                Mem::Temp,
+            )?
+        };
         cx.finish(st)?;
         Ok(result)
     }
 }
 
 /// napi callback for C functions, `data` points at the `CFunction`.
-pub unsafe extern "C" fn c_function_callback(env: napi_env, info: napi_callback_info) -> napi_value {
+pub unsafe extern "C" fn c_function_callback(
+    env: napi_env,
+    info: napi_callback_info,
+) -> napi_value {
     let mut argc = 16usize;
     let mut argv = [null_mut(); 16];
     let mut data: *mut c_void = null_mut();
-    napi_get_cb_info(env, info, &mut argc, argv.as_mut_ptr(), null_mut(), &mut data);
+    napi_get_cb_info(
+        env,
+        info,
+        &mut argc,
+        argv.as_mut_ptr(),
+        null_mut(),
+        &mut data,
+    );
     let function = &*(data as *const CFunction);
     let st = &*function.state;
     let result = if argc <= 16 {
         function.call(st, &argv[..argc])
     } else {
         let mut all = vec![null_mut(); argc];
-        napi_get_cb_info(env, info, &mut argc, all.as_mut_ptr(), null_mut(), null_mut());
+        napi_get_cb_info(
+            env,
+            info,
+            &mut argc,
+            all.as_mut_ptr(),
+            null_mut(),
+            null_mut(),
+        );
         function.call(st, &all)
     };
     match result {
@@ -149,31 +198,51 @@ pub unsafe extern "C" fn c_function_callback(env: napi_env, info: napi_callback_
     }
 }
 
-/// Cached [`CFunction`] for the function declared at metadata `offset`.
-pub fn function_for(st: &State, offset: u32) -> Result<Rc<CFunction>, String> {
-    if let Some(f) = st.functions.borrow().get(&offset) {
+/// Cached [`CFunction`] for the function declaration `id`.
+pub fn function_for(st: &State, id: MetaId) -> Result<Rc<CFunction>, String> {
+    if let Some(f) = st.functions.borrow().get(&id) {
         return Ok(f.clone());
     }
-    let meta = st.meta.meta_at(offset);
+    let meta = st.meta.meta_at(id).ok_or("unknown function")?;
     let address = st.symbol(&meta)? as usize;
-    let function = Rc::new(CFunction::new(st, meta.name(), address, meta.signature().unwrap_or_default(), meta.is_variadic())?);
-    st.functions.borrow_mut().insert(offset, function.clone());
+    let function = Rc::new(CFunction::new(
+        st,
+        meta.name(),
+        address,
+        meta.signature().unwrap_or_default(),
+        meta.is_variadic(),
+    )?);
+    st.functions.borrow_mut().insert(id, function.clone());
     Ok(function)
 }
 
 /// JS function wrapping a C function.
 pub fn js_function(st: &State, name: &str, function: &Rc<CFunction>) -> napi_value {
-    let f = st.js().function(name, Some(c_function_callback), Rc::as_ptr(function) as *mut c_void);
+    let f = st.js().function(
+        name,
+        Some(c_function_callback),
+        Rc::as_ptr(function) as *mut c_void,
+    );
     crate::interop::tag_function(st, f, function.address);
     f
 }
 
 /// Callable JS function for a C function pointer.
-pub fn function_from_pointer(st: &State, address: usize, signature: &[Type]) -> Result<napi_value, String> {
+pub fn function_from_pointer(
+    st: &State,
+    address: usize,
+    signature: &[Type],
+) -> Result<napi_value, String> {
     if signature.is_empty() {
         return Err("function pointer without signature".into());
     }
-    let function = Rc::new(CFunction::new(st, "<function pointer>", address, signature.to_vec(), false)?);
+    let function = Rc::new(CFunction::new(
+        st,
+        "<function pointer>",
+        address,
+        signature.to_vec(),
+        false,
+    )?);
     let f = js_function(st, "", &function);
     // owned by the JS function
     unsafe extern "C" fn drop_function(_: napi_env, data: *mut c_void, _: *mut c_void) {
@@ -211,7 +280,12 @@ pub fn closure_for(st: &State, function: napi_value, signature: &[Type]) -> Resu
         state: st,
         closure: None,
     });
-    let closure = Closure::new(st, signature, closure_trampoline, &mut *data as *mut ClosureData as *mut c_void)?;
+    let closure = Closure::new(
+        st,
+        signature,
+        closure_trampoline,
+        &mut *data as *mut ClosureData as *mut c_void,
+    )?;
     let address = closure.code as usize;
     data.closure = Some(closure);
     st.closures.borrow_mut().push(data);
@@ -233,7 +307,12 @@ pub fn release_closures(st: &State, function: napi_value) -> usize {
     before - closures.len()
 }
 
-unsafe extern "C" fn closure_trampoline(_cif: *mut raw::ffi_cif, ret: *mut c_void, args: *mut *mut c_void, userdata: *mut c_void) {
+unsafe extern "C" fn closure_trampoline(
+    _cif: *mut raw::ffi_cif,
+    ret: *mut c_void,
+    args: *mut *mut c_void,
+    userdata: *mut c_void,
+) {
     let data = &*(userdata as *const ClosureData);
     let st = &*data.state;
     if std::thread::current().id() != st.thread {
@@ -244,7 +323,11 @@ unsafe extern "C" fn closure_trampoline(_cif: *mut raw::ffi_cif, ret: *mut c_voi
         nativescript_core::glib::invoke(
             data.main_context,
             Box::new(move || {
-                invoke_js(&*(data_ptr as *const ClosureData), ret as *mut c_void, args as *mut *mut c_void);
+                invoke_js(
+                    &*(data_ptr as *const ClosureData),
+                    ret as *mut c_void,
+                    args as *mut *mut c_void,
+                );
                 *signal.0.lock().unwrap() = true;
                 signal.1.notify_all();
             }),
@@ -264,7 +347,11 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     let js = st.js();
     let ret_ty = &data.signature[0];
     let ret_size = st.layout(ret_ty).map(|l| l.size).unwrap_or(0);
-    std::ptr::write_bytes(ret as *mut u8, 0, ret_size.max(std::mem::size_of::<usize>()));
+    std::ptr::write_bytes(
+        ret as *mut u8,
+        0,
+        ret_size.max(std::mem::size_of::<usize>()),
+    );
     let mut scope = null_mut();
     napi_open_handle_scope(js.0, &mut scope);
     let mut argv = Vec::with_capacity(data.signature.len() - 1);
@@ -285,10 +372,12 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
             let mut cx = CallCx::default();
             let res = match ret_ty {
                 Type::Bool | Type::Char | Type::Short | Type::Int | Type::Long | Type::LongLong => {
-                    marshal::to_i64(js, result, ret_ty).map(|v| (ret as *mut i64).write_unaligned(v))
+                    marshal::to_i64(js, result, ret_ty)
+                        .map(|v| (ret as *mut i64).write_unaligned(v))
                 }
                 Type::UChar | Type::UShort | Type::Unichar | Type::UInt => {
-                    marshal::to_i64(js, result, ret_ty).map(|v| (ret as *mut u64).write_unaligned(v as u64))
+                    marshal::to_i64(js, result, ret_ty)
+                        .map(|v| (ret as *mut u64).write_unaligned(v as u64))
                 }
                 _ => marshal::write(st, ret_ty, result, ret as *mut u8, &mut cx),
             };

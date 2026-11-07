@@ -2,8 +2,10 @@ use nativescript_runtime::{MetaFile, Runtime};
 use std::path::PathBuf;
 
 fn run(source: &str) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../metadata-generator/tests/TestOutput/metadata-{}.bin", std::env::consts::ARCH));
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../metadata-generator/tests/TestOutput/metadata-{}.bin",
+        std::env::consts::ARCH
+    ));
     if !path.exists() {
         return;
     }
@@ -14,7 +16,8 @@ fn run(source: &str) {
         if (a !== e) throw new Error(`${what}: expected ${e}, got ${a}`);
       }
     "#;
-    rt.run_script(&format!("{prelude}\n{source}"), "web.js").unwrap();
+    rt.run_script(&format!("{prelude}\n{source}"), "web.js")
+        .unwrap();
     rt.run_event_loop().unwrap();
 }
 

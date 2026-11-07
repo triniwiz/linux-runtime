@@ -7,7 +7,7 @@ use crate::{report_exception, throw_error};
 use libffi::raw;
 use nativescript_core::call::{CallDesc, FastCall};
 use nativescript_core::closure::Closure;
-use nativescript_metadata::Type;
+use nativescript_metadata::{MetaId, Type};
 use std::ffi::c_void;
 use std::rc::Rc;
 
@@ -26,8 +26,17 @@ impl std::ops::Deref for CFunction {
 }
 
 impl CFunction {
-    pub fn new(st: &State, name: &str, address: usize, signature: Vec<Type>, variadic: bool) -> Result<Self, String> {
-        Ok(CFunction { desc: CallDesc::new(st, name, address, signature, variadic)?, state: st })
+    pub fn new(
+        st: &State,
+        name: &str,
+        address: usize,
+        signature: Vec<Type>,
+        variadic: bool,
+    ) -> Result<Self, String> {
+        Ok(CFunction {
+            desc: CallDesc::new(st, name, address, signature, variadic)?,
+            state: st,
+        })
     }
 
     /// C type used for a variadic argument, inferred from the JS value
@@ -119,7 +128,11 @@ impl CFunction {
         }
 
         let ret_ty = &signature[0];
-        let ret = cx.scratch(if self.variadic { st.layout(ret_ty)?.size.max(16) } else { self.ret_size });
+        let ret = cx.scratch(if self.variadic {
+            st.layout(ret_ty)?.size.max(16)
+        } else {
+            self.ret_size
+        });
 
         unsafe { self.desc.call(cif, argv, ret) };
 
@@ -143,8 +156,17 @@ impl CFunction {
         let (mut ni, mut nf) = (0, 0);
         for (i, ty) in self.signature[1..].iter().enumerate() {
             let mut slot = 0u128;
-            unsafe { marshal::write(scope, st, ty, args.get(i as i32), &mut slot as *mut u128 as *mut u8, &mut cx) }
-                .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+            unsafe {
+                marshal::write(
+                    scope,
+                    st,
+                    ty,
+                    args.get(i as i32),
+                    &mut slot as *mut u128 as *mut u8,
+                    &mut cx,
+                )
+            }
+            .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
             if fast.float_args[i] {
                 // a float sits in the low 32 bits of the register
                 floats[nf] = f64::from_bits(slot as u64);
@@ -155,7 +177,15 @@ impl CFunction {
             }
         }
         let ret = unsafe { self.desc.call_fast(fast.float_ret, ints, floats) };
-        let result = unsafe { marshal::read(scope, st, &self.signature[0], &ret as *const u128 as *const u8, Mem::Temp)? };
+        let result = unsafe {
+            marshal::read(
+                scope,
+                st,
+                &self.signature[0],
+                &ret as *const u128 as *const u8,
+                Mem::Temp,
+            )?
+        };
         cx.finish(scope, st)?;
         Ok(result)
     }
@@ -168,7 +198,9 @@ pub fn c_function_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
-    let Ok(ext) = v8::Local::<v8::External>::try_from(args.data()) else { return };
+    let Ok(ext) = v8::Local::<v8::External>::try_from(args.data()) else {
+        return;
+    };
     let function = unsafe { &*(ext.value() as *const CFunction) };
     let st = unsafe { &*function.state };
     match function.call(scope, st, &args) {
@@ -177,12 +209,12 @@ pub fn c_function_callback<'s>(
     }
 }
 
-/// Cached [`CFunction`] for the function declared at metadata `offset`.
-pub fn function_for(st: &State, offset: u32) -> Result<Rc<CFunction>, String> {
-    if let Some(f) = st.functions.borrow().get(&offset) {
+/// Cached [`CFunction`] for the function declaration `id`.
+pub fn function_for(st: &State, id: MetaId) -> Result<Rc<CFunction>, String> {
+    if let Some(f) = st.functions.borrow().get(&id) {
         return Ok(f.clone());
     }
-    let meta = st.meta.meta_at(offset);
+    let meta = st.meta.meta_at(id).ok_or("unknown function")?;
     let address = st.symbol(&meta)? as usize;
     let function = Rc::new(CFunction::new(
         st,
@@ -191,7 +223,7 @@ pub fn function_for(st: &State, offset: u32) -> Result<Rc<CFunction>, String> {
         meta.signature().unwrap_or_default(),
         meta.is_variadic(),
     )?);
-    st.functions.borrow_mut().insert(offset, function.clone());
+    st.functions.borrow_mut().insert(id, function.clone());
     Ok(function)
 }
 
@@ -281,7 +313,12 @@ pub fn closure_for<'s>(
         state: st as *const State,
         closure: None,
     });
-    let closure = Closure::new(st, signature, closure_trampoline, &mut *data as *mut ClosureData as *mut c_void)?;
+    let closure = Closure::new(
+        st,
+        signature,
+        closure_trampoline,
+        &mut *data as *mut ClosureData as *mut c_void,
+    )?;
     let address = closure.code as usize;
     data.closure = Some(closure);
     st.closures.borrow_mut().push(data);
@@ -291,7 +328,11 @@ pub fn closure_for<'s>(
 }
 
 /// Frees the libffi closures created for `function` (`interop.release`).
-pub fn release_closures<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, function: v8::Local<'s, v8::Function>) -> usize {
+pub fn release_closures<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    function: v8::Local<'s, v8::Function>,
+) -> usize {
     let mut released = Vec::new();
     {
         let mut closures = st.closures.borrow_mut();
@@ -324,9 +365,12 @@ unsafe extern "C" fn closure_trampoline(
     if std::thread::current().id() != st.thread {
         // called by C on another thread: run on the JS thread and wait
         let (ret, args) = (ret as usize, args as usize);
-        crate::event_loop::run_on_js_thread(data.main_context, Box::new(move || unsafe {
-            invoke_js(data, ret as *mut c_void, args as *mut *mut c_void);
-        }));
+        crate::event_loop::run_on_js_thread(
+            data.main_context,
+            Box::new(move || unsafe {
+                invoke_js(data, ret as *mut c_void, args as *mut *mut c_void);
+            }),
+        );
         return;
     }
     invoke_js(data, ret, args);
@@ -338,7 +382,11 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     let ret_ty = &data.signature[0];
     let ret_size = st.layout(ret_ty).map(|l| l.size).unwrap_or(0);
     // libffi expects integral returns widened to ffi_arg
-    std::ptr::write_bytes(ret as *mut u8, 0, ret_size.max(std::mem::size_of::<usize>()));
+    std::ptr::write_bytes(
+        ret as *mut u8,
+        0,
+        ret_size.max(std::mem::size_of::<usize>()),
+    );
     let isolate = st.isolate.get();
     let Some(context) = st.context.borrow().clone() else {
         return;

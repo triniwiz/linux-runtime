@@ -53,12 +53,20 @@ pub fn resolve_path(p: &Path) -> Option<PathBuf> {
         }
     }
     if p.is_dir() {
-        if let Some(main) = read_json(&p.join("package.json")).and_then(|j| j["main"].as_str().map(str::to_owned)) {
+        if let Some(main) =
+            read_json(&p.join("package.json")).and_then(|j| j["main"].as_str().map(str::to_owned))
+        {
             if let Some(r) = resolve_path(&p.join(main)) {
                 return Some(r);
             }
         }
-        for index in ["index.js", "index.mjs", "index.cjs", "index.json", "index.node"] {
+        for index in [
+            "index.js",
+            "index.mjs",
+            "index.cjs",
+            "index.json",
+            "index.node",
+        ] {
             let c = p.join(index);
             if c.is_file() {
                 return Some(normalize(&c));
@@ -69,7 +77,11 @@ pub fn resolve_path(p: &Path) -> Option<PathBuf> {
 }
 
 /// `package.json` "exports" target for `subpath` ("." or "./x").
-fn resolve_exports(exports: &serde_json::Value, subpath: &str, conditions: &[&str]) -> Option<String> {
+fn resolve_exports(
+    exports: &serde_json::Value,
+    subpath: &str,
+    conditions: &[&str],
+) -> Option<String> {
     use serde_json::Value;
     fn target(v: &Value, conditions: &[&str], star: Option<&str>) -> Option<String> {
         match v {
@@ -85,9 +97,12 @@ fn resolve_exports(exports: &serde_json::Value, subpath: &str, conditions: &[&st
             _ => None,
         }
     }
-    let is_subpath_map = matches!(exports, Value::Object(m) if m.keys().all(|k| k.starts_with('.')));
+    let is_subpath_map =
+        matches!(exports, Value::Object(m) if m.keys().all(|k| k.starts_with('.')));
     if !is_subpath_map {
-        return (subpath == ".").then(|| target(exports, conditions, None)).flatten();
+        return (subpath == ".")
+            .then(|| target(exports, conditions, None))
+            .flatten();
     }
     let map = exports.as_object()?;
     if let Some(v) = map.get(subpath) {
@@ -107,7 +122,10 @@ fn resolve_package(spec: &str, base: &Path, kind: Kind) -> Option<PathBuf> {
     } else {
         parts.next()?.to_owned()
     };
-    let subpath = parts.next().map(|s| format!("./{s}")).unwrap_or_else(|| ".".into());
+    let subpath = parts
+        .next()
+        .map(|s| format!("./{s}"))
+        .unwrap_or_else(|| ".".into());
     let conditions: &[&str] = match kind {
         Kind::Import => &["import", "default"],
         Kind::Require => &["require", "default"],
@@ -176,17 +194,32 @@ pub fn resolve(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
     }
     // NativeScript app-relative specifiers
     if let Some(rest) = spec.strip_prefix("~/") {
-        let root = APP_ROOT.read().unwrap().clone().unwrap_or_else(|| base.to_path_buf());
-        return resolve_path(&root.join(rest)).ok_or_else(|| format!("Cannot find module '{spec}' from '{}'", root.display()));
+        let root = APP_ROOT
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| base.to_path_buf());
+        return resolve_path(&root.join(rest))
+            .ok_or_else(|| format!("Cannot find module '{spec}' from '{}'", root.display()));
     }
     // relative imports inside a remote module
-    if is_url(base) && (spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../")) {
-        let base = url::Url::parse(&format!("{}/", base.to_string_lossy())).map_err(|e| e.to_string())?;
-        return base.join(spec).map(|u| PathBuf::from(u.as_str())).map_err(|e| e.to_string());
+    if is_url(base) && (spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../"))
+    {
+        let base =
+            url::Url::parse(&format!("{}/", base.to_string_lossy())).map_err(|e| e.to_string())?;
+        return base
+            .join(spec)
+            .map(|u| PathBuf::from(u.as_str()))
+            .map_err(|e| e.to_string());
     }
     let found = if spec.starts_with("file://") {
         resolve_path(&file_url_to_path(spec))
-    } else if spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == ".." {
+    } else if spec.starts_with('/')
+        || spec.starts_with("./")
+        || spec.starts_with("../")
+        || spec == "."
+        || spec == ".."
+    {
         resolve_path(&base.join(spec))
     } else {
         resolve_package(spec, base, kind)
@@ -197,7 +230,10 @@ pub fn resolve(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, String> {
 fn looks_like_esm(source: &str) -> bool {
     source.lines().any(|l| {
         let l = l.trim_start();
-        (l.starts_with("import ") || l.starts_with("import{") || l.starts_with("import*") || l.starts_with("export "))
+        (l.starts_with("import ")
+            || l.starts_with("import{")
+            || l.starts_with("import*")
+            || l.starts_with("export "))
             && !l.starts_with("import(")
     })
 }
@@ -248,7 +284,8 @@ pub fn entry_point(path: &Path) -> Result<PathBuf, String> {
     let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if path.is_dir() {
         set_app_root(&path);
-        return resolve_path(&path).ok_or_else(|| format!("{}: no package.json \"main\" or index.js", path.display()));
+        return resolve_path(&path)
+            .ok_or_else(|| format!("{}: no package.json \"main\" or index.js", path.display()));
     }
     if APP_ROOT.read().unwrap().is_none() {
         set_app_root(&dir_of(&path));
@@ -257,6 +294,7 @@ pub fn entry_point(path: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn dir_of(path: &Path) -> PathBuf {
-    path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"))
+    path.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
-

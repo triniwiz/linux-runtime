@@ -11,8 +11,8 @@ use std::sync::mpsc::{channel, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use v8::inspector::{
-    Channel, ChannelImpl, StringBuffer, StringView, V8Inspector, V8InspectorClient, V8InspectorClientImpl,
-    V8InspectorClientTrustLevel, V8InspectorSession,
+    Channel, ChannelImpl, StringBuffer, StringView, V8Inspector, V8InspectorClient,
+    V8InspectorClientImpl, V8InspectorClientTrustLevel, V8InspectorSession,
 };
 
 const GROUP: i32 = 1;
@@ -48,7 +48,9 @@ impl V8InspectorClientImpl for Client {
         let st = unsafe { &*self.state };
         self.paused.set(true);
         while self.paused.get() {
-            let Some((session, inbox)) = session_of(st) else { break };
+            let Some((session, inbox)) = session_of(st) else {
+                break;
+            };
             let message = {
                 let mut queue = inbox.queue.lock().unwrap();
                 loop {
@@ -58,7 +60,11 @@ impl V8InspectorClientImpl for Client {
                     if !inbox.connected.load(Ordering::SeqCst) {
                         break None;
                     }
-                    queue = inbox.ready.wait_timeout(queue, Duration::from_millis(100)).unwrap().0;
+                    queue = inbox
+                        .ready
+                        .wait_timeout(queue, Duration::from_millis(100))
+                        .unwrap()
+                        .0;
                 }
             };
             match message {
@@ -78,7 +84,11 @@ impl V8InspectorClientImpl for Client {
     }
 
     fn ensure_default_context_in_group(&self, _group: i32) -> Option<v8::Local<'_, v8::Context>> {
-        Some(unsafe { std::mem::transmute::<std::ptr::NonNull<v8::Context>, v8::Local<'_, v8::Context>>(self.context) })
+        Some(unsafe {
+            std::mem::transmute::<std::ptr::NonNull<v8::Context>, v8::Local<'_, v8::Context>>(
+                self.context,
+            )
+        })
     }
 
     fn resource_name_to_url(&self, name: &StringView) -> Option<v8::UniquePtr<StringBuffer>> {
@@ -95,7 +105,9 @@ struct Out(Arc<Mutex<Option<Sender<String>>>>);
 
 impl Out {
     fn send(&self, message: v8::UniquePtr<StringBuffer>) {
-        let Some(message) = message.as_ref() else { return };
+        let Some(message) = message.as_ref() else {
+            return;
+        };
         if let Some(tx) = self.0.lock().unwrap().as_ref() {
             let _ = tx.send(message.string().to_string());
         }
@@ -120,18 +132,29 @@ fn session_of(st: &State) -> Option<(Rc<V8InspectorSession>, Arc<Inbox>)> {
 
 /// Dispatches queued frontend messages (outside of pauses).
 fn pump(st: &State) {
-    let Some((session, inbox)) = session_of(st) else { return };
+    let Some((session, inbox)) = session_of(st) else {
+        return;
+    };
     loop {
-        let Some(m) = inbox.queue.lock().unwrap().pop_front() else { break };
+        let Some(m) = inbox.queue.lock().unwrap().pop_front() else {
+            break;
+        };
         session.dispatch_protocol_message(StringView::from(m.as_bytes()));
     }
 }
 
 fn connect(st: &State) {
     let mut inspector = st.inspector.borrow_mut();
-    let Some(i) = inspector.as_mut().filter(|i| i.session.is_none()) else { return };
+    let Some(i) = inspector.as_mut().filter(|i| i.session.is_none()) else {
+        return;
+    };
     let channel = Channel::new(Box::new(Out(i.outbox.clone())));
-    let session = i.inspector.connect(GROUP, channel, StringView::empty(), V8InspectorClientTrustLevel::FullyTrusted);
+    let session = i.inspector.connect(
+        GROUP,
+        channel,
+        StringView::empty(),
+        V8InspectorClientTrustLevel::FullyTrusted,
+    );
     i.session = Some(Rc::new(session));
 }
 
@@ -142,21 +165,43 @@ pub fn start(st: &Rc<State>, port: u16, title: &str) -> Result<(), String> {
     let paused = Rc::new(std::cell::Cell::new(false));
     let waiting = Rc::new(std::cell::Cell::new(false));
     let context = st.context.borrow().clone().ok_or("no context")?.into_raw();
-    let client = V8InspectorClient::new(Box::new(Client { state: Rc::as_ptr(st), context, paused, waiting: waiting.clone() }));
+    let client = V8InspectorClient::new(Box::new(Client {
+        state: Rc::as_ptr(st),
+        context,
+        paused,
+        waiting: waiting.clone(),
+    }));
     let inspector = V8Inspector::create(isolate, client);
     with_js(st, |scope| {
         let context = scope.get_current_context();
         let name = format!("NativeScript {title}");
-        inspector.context_created(context, GROUP, StringView::from(name.as_bytes()), StringView::empty());
+        inspector.context_created(
+            context,
+            GROUP,
+            StringView::from(name.as_bytes()),
+            StringView::empty(),
+        );
     });
     let inbox = Arc::new(Inbox::default());
     let outbox = Arc::new(Mutex::new(None));
-    *st.inspector.borrow_mut() = Some(Inspector { inspector, session: None, inbox: inbox.clone(), outbox: outbox.clone(), waiting });
+    *st.inspector.borrow_mut() = Some(Inspector {
+        inspector,
+        session: None,
+        inbox: inbox.clone(),
+        outbox: outbox.clone(),
+        waiting,
+    });
 
-    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("inspector port {port}: {e}"))?;
-    let id = format!("{:016x}", (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .map_err(|e| format!("inspector port {port}: {e}"))?;
+    let id = format!(
+        "{:016x}",
+        (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    );
     eprintln!("Debugger listening on ws://127.0.0.1:{port}/{id}");
-    eprintln!("Open chrome://inspect or devtools://devtools/bundled/js_app.html?ws=127.0.0.1:{port}/{id}");
+    eprintln!(
+        "Open chrome://inspect or devtools://devtools/bundled/js_app.html?ws=127.0.0.1:{port}/{id}"
+    );
     let context = st.main_context.context;
     let title = title.to_owned();
     std::thread::Builder::new()
@@ -172,12 +217,19 @@ pub fn start(st: &Rc<State>, port: u16, title: &str) -> Result<(), String> {
 
 /// `--inspect-brk`: waits for a frontend and pauses on the first statement.
 pub fn wait_for_debugger(st: &State) {
-    let Some(inbox) = st.inspector.borrow().as_ref().map(|i| i.inbox.clone()) else { return };
+    let Some(inbox) = st.inspector.borrow().as_ref().map(|i| i.inbox.clone()) else {
+        return;
+    };
     eprintln!("Waiting for the debugger to attach...");
     if let Some(i) = st.inspector.borrow().as_ref() {
         i.waiting.set(true);
     }
-    while st.inspector.borrow().as_ref().is_some_and(|i| i.waiting.get()) {
+    while st
+        .inspector
+        .borrow()
+        .as_ref()
+        .is_some_and(|i| i.waiting.get())
+    {
         let message = {
             let mut queue = inbox.queue.lock().unwrap();
             while queue.is_empty() {
@@ -185,16 +237,24 @@ pub fn wait_for_debugger(st: &State) {
             }
             queue.pop_front()
         };
-        if st.inspector.borrow().as_ref().is_some_and(|i| i.session.is_none()) {
+        if st
+            .inspector
+            .borrow()
+            .as_ref()
+            .is_some_and(|i| i.session.is_none())
+        {
             connect(st);
         }
         if let (Some(m), Some((session, _))) = (message, session_of(st)) {
-            with_js(st, |_| session.dispatch_protocol_message(StringView::from(m.as_bytes())));
+            with_js(st, |_| {
+                session.dispatch_protocol_message(StringView::from(m.as_bytes()))
+            });
         }
     }
     if let Some((session, _)) = session_of(st) {
         let reason = b"Break on start";
-        session.schedule_pause_on_next_statement(StringView::from(&reason[..]), StringView::empty());
+        session
+            .schedule_pause_on_next_statement(StringView::from(&reason[..]), StringView::empty());
     }
 }
 
@@ -206,7 +266,15 @@ fn http(stream: &mut TcpStream, status: &str, body: &str) {
     );
 }
 
-fn serve(mut stream: TcpStream, port: u16, id: &str, title: &str, context: usize, inbox: &Arc<Inbox>, outbox: &Arc<Mutex<Option<Sender<String>>>>) {
+fn serve(
+    mut stream: TcpStream,
+    port: u16,
+    id: &str,
+    title: &str,
+    context: usize,
+    inbox: &Arc<Inbox>,
+    outbox: &Arc<Mutex<Option<Sender<String>>>>,
+) {
     let mut head = [0u8; 2048];
     let n = stream.peek(&mut head).unwrap_or(0);
     let request = String::from_utf8_lossy(&head[..n]).to_ascii_lowercase();
@@ -228,7 +296,11 @@ fn serve(mut stream: TcpStream, port: u16, id: &str, title: &str, context: usize
                 }]);
                 http(&mut stream, "200 OK", &body.to_string());
             }
-            "/json/version" => http(&mut stream, "200 OK", r#"{"Browser":"NativeScript-Linux/0.1","Protocol-Version":"1.3"}"#),
+            "/json/version" => http(
+                &mut stream,
+                "200 OK",
+                r#"{"Browser":"NativeScript-Linux/0.1","Protocol-Version":"1.3"}"#,
+            ),
             _ => http(&mut stream, "404 Not Found", "{}"),
         }
         return;
@@ -265,7 +337,11 @@ fn serve(mut stream: TcpStream, port: u16, id: &str, title: &str, context: usize
             }
             Ok(tungstenite::Message::Close(_)) => break,
             Ok(_) => {}
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
             Err(_) => break,
         }
     }

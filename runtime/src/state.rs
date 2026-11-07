@@ -2,7 +2,7 @@
 
 use crate::ffi::{CFunction, ClosureData};
 use nativescript_core::Native;
-use nativescript_metadata::{MetaFile, Offset};
+use nativescript_metadata::{MetaId, MetaSet};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -12,7 +12,7 @@ pub struct State {
     pub isolate: Cell<*mut v8::Isolate>,
     pub context: RefCell<Option<v8::Global<v8::Context>>>,
     pub thread: std::thread::ThreadId,
-    pub functions: RefCell<HashMap<Offset, Rc<CFunction>>>,
+    pub functions: RefCell<HashMap<MetaId, Rc<CFunction>>>,
     struct_arena: RefCell<Option<(v8::Global<v8::ArrayBuffer>, usize, usize)>>,
     /// libffi closures handed to C, kept alive for the lifetime of the runtime
     pub closures: RefCell<Vec<Box<ClosureData>>>,
@@ -45,7 +45,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(meta: std::sync::Arc<MetaFile>) -> Self {
+    pub fn new(meta: std::sync::Arc<MetaSet>) -> Self {
         State {
             native: Native::new(meta),
             isolate: Cell::new(std::ptr::null_mut()),
@@ -81,7 +81,11 @@ impl State {
     /// Registers a type and returns its index (used to tag JS objects).
     /// GC managed memory for small struct copies, bump allocated from a shared
     /// ArrayBuffer (the returned owner keeps it alive).
-    pub fn struct_memory<'s>(&self, scope: &mut v8::PinScope<'s, '_>, size: usize) -> (v8::Local<'s, v8::ArrayBuffer>, usize) {
+    pub fn struct_memory<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        size: usize,
+    ) -> (v8::Local<'s, v8::ArrayBuffer>, usize) {
         const ARENA: usize = 64 * 1024;
         let size = size.max(1).div_ceil(16) * 16;
         if size > ARENA / 8 {

@@ -13,7 +13,10 @@ type Rv<'s> = v8::ReturnValue<'s, v8::Value>;
 
 /// Address of the memory behind a struct view.
 #[inline]
-pub fn address<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
+pub fn address<'s>(
+    _scope: &mut v8::PinScope<'s, '_>,
+    v: v8::Local<'s, v8::Value>,
+) -> Option<usize> {
     handles::is(v, Kind::Struct).map(handles::address)
 }
 
@@ -35,7 +38,15 @@ fn field_get<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s
     let index = args.data().uint32_value(scope).unwrap_or(0) as usize;
     let result = st.record(&ty).and_then(|record| {
         let field = record.fields.get(index).ok_or("unknown field")?;
-        unsafe { marshal::read_field(scope, &st, field, addr as *const u8, Mem::Live(Some(this.into()))) }
+        unsafe {
+            marshal::read_field(
+                scope,
+                &st,
+                field,
+                addr as *const u8,
+                Mem::Live(Some(this.into())),
+            )
+        }
     });
     match result {
         Ok(v) => rv.set(v),
@@ -103,9 +114,15 @@ fn template<'s>(
         return Ok(v8::Local::new(scope, t));
     }
     let record = st.record(ty)?;
-    let tmpl = v8::FunctionTemplate::new(scope, |scope: &mut v8::PinScope, _: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
-        throw_error(scope, "struct views are created by the runtime, use the struct's constructor");
-    });
+    let tmpl = v8::FunctionTemplate::new(
+        scope,
+        |scope: &mut v8::PinScope, _: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            throw_error(
+                scope,
+                "struct views are created by the runtime, use the struct's constructor",
+            );
+        },
+    );
     let name = v8::String::new(scope, type_name(ty)).unwrap();
     tmpl.set_class_name(name);
     let proto = tmpl.prototype_template(scope);
@@ -114,10 +131,19 @@ fn template<'s>(
             continue;
         }
         let data = v8::Integer::new_from_unsigned(scope, i as u32);
-        let getter = v8::FunctionTemplate::builder(field_get).data(data.into()).build(scope);
-        let setter = v8::FunctionTemplate::builder(field_set).data(data.into()).build(scope);
+        let getter = v8::FunctionTemplate::builder(field_get)
+            .data(data.into())
+            .build(scope);
+        let setter = v8::FunctionTemplate::builder(field_set)
+            .data(data.into())
+            .build(scope);
         let key = v8::String::new(scope, &field.name).unwrap();
-        proto.set_accessor_property(key.into(), Some(getter), Some(setter), v8::PropertyAttribute::NONE);
+        proto.set_accessor_property(
+            key.into(),
+            Some(getter),
+            Some(setter),
+            v8::PropertyAttribute::NONE,
+        );
     }
     let key = v8::String::new(scope, "toJSON").unwrap();
     let json = v8::FunctionTemplate::new(scope, to_json);
@@ -125,8 +151,11 @@ fn template<'s>(
     let instances = tmpl.instance_template(scope);
     instances.set_internal_field_count(handles::FIELDS);
     // instantiates the class so instances get its prototype
-    tmpl.get_function(scope).ok_or("failed to create struct class")?;
-    st.struct_templates.borrow_mut().insert(index, v8::Global::new(scope, instances));
+    tmpl.get_function(scope)
+        .ok_or("failed to create struct class")?;
+    st.struct_templates
+        .borrow_mut()
+        .insert(index, v8::Global::new(scope, instances));
     Ok(instances)
 }
 
@@ -140,7 +169,9 @@ pub fn view<'s>(
 ) -> Result<v8::Local<'s, v8::Value>, String> {
     let index = st.register_type(ty);
     let tmpl = template(scope, st, ty, index)?;
-    let object = tmpl.new_instance(scope).ok_or("failed to create struct view")?;
+    let object = tmpl
+        .new_instance(scope)
+        .ok_or("failed to create struct view")?;
     handles::init(scope, object, Kind::Struct, addr, Some(index), owner);
     Ok(object.into())
 }

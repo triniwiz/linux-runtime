@@ -2,10 +2,10 @@
 //! Mirrors the API of the NativeScript iOS runtime.
 
 use crate::ffi;
-use crate::marshal::{self, CallCx, Mem};
 use crate::handles::{self, Kind};
-use crate::structs;
+use crate::marshal::{self, CallCx, Mem};
 use crate::state::{state, State};
+use crate::structs;
 use crate::throw_error;
 use nativescript_metadata::Type;
 use std::ffi::{c_void, CStr};
@@ -36,7 +36,10 @@ pub mod keys {
         key(scope, "ns#keep")
     }
     /// Memory for a string stored in a struct field
-    pub fn keep_field<'s>(scope: &v8::PinScope<'s, '_, ()>, field: &str) -> v8::Local<'s, v8::Private> {
+    pub fn keep_field<'s>(
+        scope: &v8::PinScope<'s, '_, ()>,
+        field: &str,
+    ) -> v8::Local<'s, v8::Private> {
         key(scope, &format!("ns#keep:{field}"))
     }
     /// BigInt address of a native function
@@ -48,7 +51,10 @@ pub mod keys {
         key(scope, "ns#fnmeta")
     }
     /// BigInt address of the libffi closure created for a JS function and signature
-    pub fn closure<'s>(scope: &v8::PinScope<'s, '_, ()>, signature: &[Type]) -> v8::Local<'s, v8::Private> {
+    pub fn closure<'s>(
+        scope: &v8::PinScope<'s, '_, ()>,
+        signature: &[Type],
+    ) -> v8::Local<'s, v8::Private> {
         key(scope, &format!("ns#closure:{signature:?}"))
     }
 }
@@ -67,12 +73,17 @@ fn private_value<'s>(
 }
 
 fn bigint_usize(v: v8::Local<v8::Value>) -> Option<usize> {
-    v8::Local::<v8::BigInt>::try_from(v).ok().map(|b| b.u64_value().0 as usize)
+    v8::Local::<v8::BigInt>::try_from(v)
+        .ok()
+        .map(|b| b.u64_value().0 as usize)
 }
 
 /// Address held by an `interop.Pointer`.
 #[inline]
-pub fn pointer_address<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
+pub fn pointer_address<'s>(
+    _scope: &mut v8::PinScope<'s, '_>,
+    v: v8::Local<'s, v8::Value>,
+) -> Option<usize> {
     handles::is(v, Kind::Pointer).map(handles::address)
 }
 
@@ -82,7 +93,11 @@ pub fn new_pointer<'s>(
     address: usize,
     owner: Option<v8::Local<'s, v8::Value>>,
 ) -> v8::Local<'s, v8::Object> {
-    let template = st.pointer_template.borrow().clone().expect("interop not installed");
+    let template = st
+        .pointer_template
+        .borrow()
+        .clone()
+        .expect("interop not installed");
     let object = v8::Local::new(scope, template).new_instance(scope).unwrap();
     handles::init(scope, object, Kind::Pointer, address, None, owner);
     object
@@ -95,11 +110,20 @@ pub fn is_reference<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::
 
 /// Storage address of a Reference, if it has storage.
 #[inline]
-pub fn reference_storage<'s>(_scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Option<usize> {
-    handles::is(v, Kind::Reference).map(handles::address).filter(|a| *a != 0)
+pub fn reference_storage<'s>(
+    _scope: &mut v8::PinScope<'s, '_>,
+    v: v8::Local<'s, v8::Value>,
+) -> Option<usize> {
+    handles::is(v, Kind::Reference)
+        .map(handles::address)
+        .filter(|a| *a != 0)
 }
 
-fn reference_type<'s>(_scope: &mut v8::PinScope<'s, '_>, st: &State, v: v8::Local<'s, v8::Value>) -> Option<Type> {
+fn reference_type<'s>(
+    _scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    v: v8::Local<'s, v8::Value>,
+) -> Option<Type> {
     let o = handles::is(v, Kind::Reference)?;
     st.type_at(handles::type_index(o)?)
 }
@@ -121,7 +145,9 @@ pub fn reference_ensure_storage<'s>(
     };
     let object = v8::Local::<v8::Object>::try_from(v).unwrap();
     let pending_key = keys::pending(scope);
-    let pending = object.get_private(scope, pending_key).filter(|p| !p.is_undefined());
+    let pending = object
+        .get_private(scope, pending_key)
+        .filter(|p| !p.is_undefined());
     allocate_reference_storage(scope, st, object, &ty)?;
     if let Some(value) = pending {
         reference_write(scope, st, object, value)?;
@@ -196,12 +222,16 @@ pub fn native_function_address<'s>(
         return Some(addr);
     }
     let key = keys::function_meta(scope);
-    let offset = private_value(scope, f.into(), key)?.uint32_value(scope)?;
-    ffi::function_for(st, offset).ok().map(|f| f.address)
+    let id = private_value(scope, f.into(), key)?.number_value(scope)?;
+    ffi::function_for(st, id as u64).ok().map(|f| f.address)
 }
 
 /// Type described by an `interop.types.*` value, a struct constructor or a struct value.
-pub fn type_from_value<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, v: v8::Local<'s, v8::Value>) -> Option<Type> {
+pub fn type_from_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    v: v8::Local<'s, v8::Value>,
+) -> Option<Type> {
     if let Some((o, Kind::Struct)) = handles::of(v) {
         return st.type_at(handles::type_index(o)?);
     }
@@ -210,13 +240,21 @@ pub fn type_from_value<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, v: v8::
     st.type_at(index)
 }
 
-pub fn tag_type<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, object: v8::Local<'s, v8::Object>, ty: Type) {
+pub fn tag_type<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    object: v8::Local<'s, v8::Object>,
+    ty: Type,
+) {
     let tag = v8::Integer::new_from_unsigned(scope, st.register_type(&ty));
     let key = keys::type_tag(scope);
     object.set_private(scope, key, tag.into());
 }
 
-fn this_pointer<'s>(scope: &mut v8::PinScope<'s, '_>, args: &v8::FunctionCallbackArguments<'s>) -> Option<usize> {
+fn this_pointer<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+) -> Option<usize> {
     let this = args.this();
     let addr = pointer_address(scope, this.into());
     if addr.is_none() {
@@ -225,11 +263,17 @@ fn this_pointer<'s>(scope: &mut v8::PinScope<'s, '_>, args: &v8::FunctionCallbac
     addr
 }
 
-fn this_owner<'s>(scope: &mut v8::PinScope<'s, '_>, args: &v8::FunctionCallbackArguments<'s>) -> Option<v8::Local<'s, v8::Value>> {
+fn this_owner<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+) -> Option<v8::Local<'s, v8::Value>> {
     handles::owner(scope, args.this())
 }
 
-fn address_from_value<'s>(scope: &mut v8::PinScope<'s, '_>, v: v8::Local<'s, v8::Value>) -> Result<usize, String> {
+fn address_from_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    v: v8::Local<'s, v8::Value>,
+) -> Result<usize, String> {
     if v.is_null_or_undefined() {
         return Ok(0);
     }
@@ -285,14 +329,21 @@ fn pointer_ctor<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv
 }
 
 fn offset_pointer<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>, sign: i64) {
-    let Some(addr) = this_pointer(scope, &args) else { return };
+    let Some(addr) = this_pointer(scope, &args) else {
+        return;
+    };
     let delta = match marshal::to_i64(scope, args.get(0), &Type::Long) {
         Ok(d) => d,
         Err(e) => return throw_error(scope, &e),
     };
     let owner = this_owner(scope, &args);
     let st = state(scope);
-    let p = new_pointer(scope, &st, (addr as i64).wrapping_add(sign * delta) as usize, owner);
+    let p = new_pointer(
+        scope,
+        &st,
+        (addr as i64).wrapping_add(sign * delta) as usize,
+        owner,
+    );
     rv.set(p.into());
 }
 
@@ -318,25 +369,36 @@ fn pointer_to_bigint<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut r
 
 fn pointer_to_hex<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     if let Some(addr) = this_pointer(scope, &args) {
-        rv.set(v8::String::new(scope, &format!("{addr:#x}")).unwrap().into());
+        rv.set(
+            v8::String::new(scope, &format!("{addr:#x}"))
+                .unwrap()
+                .into(),
+        );
     }
 }
 
 fn pointer_to_string<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     if let Some(addr) = this_pointer(scope, &args) {
-        rv.set(v8::String::new(scope, &format!("<Pointer: {addr:#x}>")).unwrap().into());
+        rv.set(
+            v8::String::new(scope, &format!("<Pointer: {addr:#x}>"))
+                .unwrap()
+                .into(),
+        );
     }
 }
 
 fn pointer_equals<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
-    let Some(addr) = this_pointer(scope, &args) else { return };
+    let Some(addr) = this_pointer(scope, &args) else {
+        return;
+    };
     let other = address_from_value(scope, args.get(0)).ok();
     rv.set(v8::Boolean::new(scope, other == Some(addr)).into());
 }
 
 fn pointer_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
     let tmpl = v8::FunctionTemplate::new(scope, pointer_ctor);
-    tmpl.instance_template(scope).set_internal_field_count(handles::FIELDS);
+    tmpl.instance_template(scope)
+        .set_internal_field_count(handles::FIELDS);
     let name = v8::String::new(scope, "Pointer").unwrap();
     tmpl.set_class_name(name);
     let proto: v8::Local<v8::Template> = tmpl.prototype_template(scope).into();
@@ -391,8 +453,12 @@ fn reference_get<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: R
     let this: v8::Local<v8::Value> = args.this().into();
     match reference_storage(scope, this) {
         Some(addr) => {
-            let Some(ty) = reference_type(scope, &st, this) else { return };
-            match unsafe { marshal::read(scope, &st, &ty, addr as *const u8, Mem::Live(Some(this))) } {
+            let Some(ty) = reference_type(scope, &st, this) else {
+                return;
+            };
+            match unsafe {
+                marshal::read(scope, &st, &ty, addr as *const u8, Mem::Live(Some(this)))
+            } {
                 Ok(v) => rv.set(v),
                 Err(e) => throw_error(scope, &e),
             }
@@ -415,14 +481,20 @@ fn reference_set<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'
 
 fn reference_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
     let tmpl = v8::FunctionTemplate::new(scope, reference_ctor);
-    tmpl.instance_template(scope).set_internal_field_count(handles::FIELDS);
+    tmpl.instance_template(scope)
+        .set_internal_field_count(handles::FIELDS);
     let name = v8::String::new(scope, "Reference").unwrap();
     tmpl.set_class_name(name);
     let proto = tmpl.prototype_template(scope);
     let key = v8::String::new(scope, "value").unwrap();
     let getter = v8::FunctionTemplate::new(scope, reference_get);
     let setter = v8::FunctionTemplate::new(scope, reference_set);
-    proto.set_accessor_property(key.into(), Some(getter), Some(setter), v8::PropertyAttribute::NONE);
+    proto.set_accessor_property(
+        key.into(),
+        Some(getter),
+        Some(setter),
+        v8::PropertyAttribute::NONE,
+    );
     tmpl
 }
 
@@ -457,7 +529,9 @@ pub fn struct_constructor<'s>(
 ) -> Option<v8::Local<'s, v8::Function>> {
     let index = st.register_type(&ty);
     let data = v8::Integer::new_from_unsigned(scope, index);
-    let f = v8::Function::builder(struct_ctor).data(data.into()).build(scope)?;
+    let f = v8::Function::builder(struct_ctor)
+        .data(data.into())
+        .build(scope)?;
     let name = v8::String::new(scope, name).unwrap();
     f.set_name(name);
     tag_type(scope, st, f.into(), ty);
@@ -478,7 +552,9 @@ fn interop_free<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s
         return throw_error(scope, "interop.free expects a Pointer");
     };
     // memory from interop.alloc is garbage collected
-    let owned = handles::is(v, Kind::Pointer).and_then(|o| handles::owner(scope, o)).is_some();
+    let owned = handles::is(v, Kind::Pointer)
+        .and_then(|o| handles::owner(scope, o))
+        .is_some();
     if !owned {
         unsafe { libc::free(addr as *mut c_void) };
     }
@@ -492,7 +568,11 @@ fn interop_sizeof<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: 
             Ok(l) => l.size,
             Err(e) => return throw_error(scope, &e),
         }
-    } else if pointer_address(scope, v).is_some() || is_reference(scope, v) || v.is_function() || v.is_string() {
+    } else if pointer_address(scope, v).is_some()
+        || is_reference(scope, v)
+        || v.is_function()
+        || v.is_string()
+    {
         std::mem::size_of::<usize>()
     } else {
         return throw_error(scope, "interop.sizeof expects a type, struct or Pointer");
@@ -525,7 +605,11 @@ fn interop_handleof<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv
     }
 }
 
-fn interop_string_from_cstring<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+fn interop_string_from_cstring<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: Args<'s>,
+    mut rv: Rv<'s>,
+) {
     // const char* results are already strings
     if args.get(0).is_string() {
         return rv.set(args.get(0));
@@ -558,7 +642,10 @@ fn interop_callback<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv
     };
     let result = (|| -> Result<usize, String> {
         let spec = args.get(1);
-        let spec = spec.to_object(scope).filter(|_| spec.is_object()).ok_or("expected { returns, args }")?;
+        let spec = spec
+            .to_object(scope)
+            .filter(|_| spec.is_object())
+            .ok_or("expected { returns, args }")?;
         let key = v8::String::new(scope, "returns").unwrap();
         let returns = spec.get(scope, key.into()).unwrap();
         let ret = if returns.is_undefined() {
@@ -572,7 +659,10 @@ fn interop_callback<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv
         if let Ok(list) = v8::Local::<v8::Array>::try_from(list) {
             for i in 0..list.length() {
                 let t = list.get_index(scope, i).unwrap();
-                signature.push(type_from_value(scope, &st, t).ok_or_else(|| format!("invalid type for argument {}", i + 1))?);
+                signature.push(
+                    type_from_value(scope, &st, t)
+                        .ok_or_else(|| format!("invalid type for argument {}", i + 1))?,
+                );
             }
         }
         ffi::closure_for(scope, &st, function, &signature)
@@ -612,13 +702,21 @@ fn interop_release<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv:
 fn interop_buffer_from_data<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let st = state(scope);
     let Some(addr) = pointer_address(scope, args.get(0)) else {
-        return throw_error(scope, "interop.bufferFromData expects a Pointer and a length");
+        return throw_error(
+            scope,
+            "interop.bufferFromData expects a Pointer and a length",
+        );
     };
     let len = args.get(1).integer_value(scope).unwrap_or(0).max(0) as usize;
     let free = match v8::Local::<v8::Function>::try_from(args.get(2)) {
         Ok(f) => match native_function_address(scope, &st, f) {
             Some(a) => a,
-            None => return throw_error(scope, "the free function must be a native function such as free or g_free"),
+            None => {
+                return throw_error(
+                    scope,
+                    "the free function must be a native function such as free or g_free",
+                )
+            }
         },
         Err(_) => 0,
     };
@@ -628,11 +726,23 @@ fn interop_buffer_from_data<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>
             free(data);
         }
     }
-    let store = unsafe { v8::ArrayBuffer::new_backing_store_from_ptr(addr as *mut c_void, len, release, free as *mut c_void) }.make_shared();
+    let store = unsafe {
+        v8::ArrayBuffer::new_backing_store_from_ptr(
+            addr as *mut c_void,
+            len,
+            release,
+            free as *mut c_void,
+        )
+    }
+    .make_shared();
     rv.set(v8::ArrayBuffer::with_backing_store(scope, &store).into());
 }
 
-pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, global: v8::Local<'s, v8::Object>) {
+pub fn install<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    global: v8::Local<'s, v8::Object>,
+) {
     let interop = v8::Object::new(scope);
 
     let pointer_tmpl = pointer_template(scope);
@@ -683,7 +793,12 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, global: v8::Loc
     set_function(scope, interop, "free", interop_free);
     set_function(scope, interop, "sizeof", interop_sizeof);
     set_function(scope, interop, "handleof", interop_handleof);
-    set_function(scope, interop, "stringFromCString", interop_string_from_cstring);
+    set_function(
+        scope,
+        interop,
+        "stringFromCString",
+        interop_string_from_cstring,
+    );
     set_function(scope, interop, "bufferFromData", interop_buffer_from_data);
     set_function(scope, interop, "callback", interop_callback);
     set_function(scope, interop, "cstring", interop_cstring);

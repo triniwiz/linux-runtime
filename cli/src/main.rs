@@ -1,6 +1,6 @@
 mod watch;
 
-use nativescript_runtime::{MetaFile, Runtime};
+use nativescript_runtime::Runtime;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -35,7 +35,10 @@ fn main() -> ExitCode {
             _ if script.is_some() || eval.is_some() => rest.push(arg),
             "--metadata" => metadata = args.next().map(PathBuf::from),
             a if a.starts_with("--inspect") => {
-                let port = a.split_once('=').and_then(|(_, p)| p.parse().ok()).unwrap_or(9229);
+                let port = a
+                    .split_once('=')
+                    .and_then(|(_, p)| p.parse().ok())
+                    .unwrap_or(9229);
                 inspect = Some((port, a.starts_with("--inspect-brk")));
             }
             "-e" | "--eval" => eval = args.next(),
@@ -46,14 +49,22 @@ fn main() -> ExitCode {
     }
     // packaged apps: `<exe dir>/app`
     if script.is_none() && eval.is_none() {
-        script = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("app"))).filter(|a| a.is_dir());
+        script = std::env::current_exe()
+            .ok()
+            .and_then(|e| Some(e.parent()?.join("app")))
+            .filter(|a| a.is_dir());
     }
     if script.is_none() && eval.is_none() {
         return usage();
     }
     if watch {
-        let Some(script) = &script else { return usage() };
-        let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--watch").collect();
+        let Some(script) = &script else {
+            return usage();
+        };
+        let args: Vec<String> = std::env::args()
+            .skip(1)
+            .filter(|a| a != "--watch")
+            .collect();
         return watch::run(script, args);
     }
 
@@ -61,10 +72,10 @@ fn main() -> ExitCode {
         eprintln!("ns-linux: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);
     };
-    let metadata = match MetaFile::open(&metadata) {
+    let metadata = match nativescript_core::bundle::load_metadata(&metadata) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("ns-linux: {}: {e}", metadata.display());
+            eprintln!("ns-linux: {e}");
             return ExitCode::from(2);
         }
     };
@@ -76,15 +87,25 @@ fn main() -> ExitCode {
         }
     };
     // node style: [exe, script, ...args]
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut argv = vec![exe];
     if let Some(script) = &script {
-        argv.push(std::fs::canonicalize(script).unwrap_or(script.clone()).to_string_lossy().into_owned());
+        argv.push(
+            std::fs::canonicalize(script)
+                .unwrap_or(script.clone())
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     argv.extend(rest);
     runtime.set_argv(&argv);
     if let Some((port, wait)) = inspect {
-        let title = script.as_ref().map(|s| s.display().to_string()).unwrap_or_else(|| "[eval]".into());
+        let title = script
+            .as_ref()
+            .map(|s| s.display().to_string())
+            .unwrap_or_else(|| "[eval]".into());
         if let Err(e) = runtime.start_inspector(port, wait, &title) {
             eprintln!("ns-linux: {e}");
             return ExitCode::FAILURE;

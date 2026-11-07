@@ -77,7 +77,10 @@ pub fn set_type(o: v8::Local<v8::Object>, type_index: Option<u32>) {
     set(o, 2, type_index.map(|i| i as usize + 1).unwrap_or(0));
 }
 
-pub fn owner<'s>(scope: &mut v8::PinScope<'s, '_>, o: v8::Local<'s, v8::Object>) -> Option<v8::Local<'s, v8::Value>> {
+pub fn owner<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    o: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Value>> {
     let data = o.get_internal_field(scope, 3)?;
     let v = v8::Local::<v8::Value>::try_from(data).ok()?;
     (!v.is_undefined()).then_some(v)

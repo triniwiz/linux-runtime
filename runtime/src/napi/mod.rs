@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-
 pub type napi_status = i32;
 pub type napi_env = *mut Env;
 pub type napi_value = *mut v8::Value;
@@ -101,7 +100,9 @@ pub struct Env {
 impl Env {
     #[inline]
     pub(crate) fn context<'s>(&self) -> v8::Local<'s, v8::Context> {
-        unsafe { std::mem::transmute::<NonNull<v8::Context>, v8::Local<'s, v8::Context>>(self.context) }
+        unsafe {
+            std::mem::transmute::<NonNull<v8::Context>, v8::Local<'s, v8::Context>>(self.context)
+        }
     }
 
     #[inline]
@@ -115,7 +116,13 @@ impl Env {
     }
 
     /// Queues `cb` for when `value` is garbage collected.
-    pub(crate) fn finalize_on_gc(&mut self, value: v8::Local<v8::Value>, cb: napi_finalize, data: *mut c_void, hint: *mut c_void) {
+    pub(crate) fn finalize_on_gc(
+        &mut self,
+        value: v8::Local<v8::Value>,
+        cb: napi_finalize,
+        data: *mut c_void,
+        hint: *mut c_void,
+    ) {
         let Some(cb) = cb else { return };
         let queue = self.finalizers.clone();
         let weak = v8::Weak::with_finalizer(
@@ -155,10 +162,19 @@ pub(crate) unsafe fn local<'s>(v: napi_value) -> Option<v8::Local<'s, v8::Value>
 }
 
 /// JS entry point for napi callbacks.
-pub(crate) fn trampoline<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, mut rv: v8::ReturnValue<'s, v8::Value>) {
-    let Ok(ext) = v8::Local::<v8::External>::try_from(args.data()) else { return };
+pub(crate) fn trampoline<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Ok(ext) = v8::Local::<v8::External>::try_from(args.data()) else {
+        return;
+    };
     let data = unsafe { &*(ext.value() as *const CallbackData) };
-    let info = CallbackInfo { args: &args as *const _ as *const c_void, data: data.data };
+    let info = CallbackInfo {
+        args: &args as *const _ as *const c_void,
+        data: data.data,
+    };
     let result = unsafe { (data.cb)(data.env, &info) };
     let env = unsafe { &mut *data.env };
     if let Some(e) = env.exception.take() {
@@ -179,17 +195,31 @@ type ExternalFinalizer = (usize, usize, usize, usize);
 
 /// Finalizers of external buffers, whose deleters may run on any thread.
 fn external_finalizers() -> &'static std::sync::Mutex<Vec<ExternalFinalizer>> {
-    static Q: std::sync::OnceLock<std::sync::Mutex<Vec<ExternalFinalizer>>> = std::sync::OnceLock::new();
+    static Q: std::sync::OnceLock<std::sync::Mutex<Vec<ExternalFinalizer>>> =
+        std::sync::OnceLock::new();
     Q.get_or_init(Default::default)
 }
 
-pub(crate) fn queue_external_finalizer(env: usize, cb: unsafe extern "C" fn(napi_env, *mut c_void, *mut c_void), data: *mut c_void, hint: *mut c_void) {
-    external_finalizers().lock().unwrap().push((env, cb as usize, data as usize, hint as usize));
+pub(crate) fn queue_external_finalizer(
+    env: usize,
+    cb: unsafe extern "C" fn(napi_env, *mut c_void, *mut c_void),
+    data: *mut c_void,
+    hint: *mut c_void,
+) {
+    external_finalizers()
+        .lock()
+        .unwrap()
+        .push((env, cb as usize, data as usize, hint as usize));
 }
 
 /// Runs finalizers queued by GC (outside GC, where napi calls are allowed).
 pub fn drain_finalizers(st: &State) {
-    let envs: Vec<napi_env> = st.napi_envs.borrow().iter().map(|e| &**e as *const Env as napi_env).collect();
+    let envs: Vec<napi_env> = st
+        .napi_envs
+        .borrow()
+        .iter()
+        .map(|e| &**e as *const Env as napi_env)
+        .collect();
     if envs.is_empty() {
         return;
     }
@@ -200,7 +230,8 @@ pub fn drain_finalizers(st: &State) {
         mine
     };
     for (env, cb, data, hint) in mine {
-        let cb: unsafe extern "C" fn(napi_env, *mut c_void, *mut c_void) = unsafe { std::mem::transmute(cb) };
+        let cb: unsafe extern "C" fn(napi_env, *mut c_void, *mut c_void) =
+            unsafe { std::mem::transmute(cb) };
         unsafe { cb(env as napi_env, data as *mut c_void, hint as *mut c_void) };
     }
     for env in envs {
@@ -222,28 +253,41 @@ thread_local! {
 }
 
 /// Loads a `.node` addon and returns its exports.
-pub fn load_addon<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) -> Result<v8::Local<'s, v8::Value>, Option<String>> {
+pub fn load_addon<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    path: &Path,
+) -> Result<v8::Local<'s, v8::Value>, Option<String>> {
     if let Some(exports) = st.napi_addons.borrow().get(path) {
         return Ok(v8::Local::new(scope, exports));
     }
-    let cpath = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
+    let cpath =
+        CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
     PENDING_MODULE.with(|m| m.borrow_mut().take());
     let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
     if handle.is_null() {
-        return Err(Some(format!("{}: {}", path.display(), nativescript_core::dlerror())));
+        return Err(Some(format!(
+            "{}: {}",
+            path.display(),
+            nativescript_core::dlerror()
+        )));
     }
     let sym = |name: &str| {
         let name = CString::new(name).unwrap();
         unsafe { libc::dlsym(handle, name.as_ptr()) }
     };
     let init: napi_addon_register_func = match sym("napi_register_module_v1") {
-        p if !p.is_null() => unsafe { std::mem::transmute::<*mut c_void, napi_addon_register_func>(p) },
+        p if !p.is_null() => unsafe {
+            std::mem::transmute::<*mut c_void, napi_addon_register_func>(p)
+        },
         _ => PENDING_MODULE
             .with(|m| m.borrow_mut().take())
             .ok_or_else(|| format!("{}: not a Node-API module", path.display()))?,
     };
     let _version = match sym("node_api_module_get_api_version_v1") {
-        p if !p.is_null() => unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> i32>(p)() },
+        p if !p.is_null() => unsafe {
+            std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> i32>(p)()
+        },
         _ => 8,
     };
 
@@ -264,7 +308,8 @@ pub fn load_addon<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path)
         instance_data: None,
         cleanup_hooks: Vec::new(),
         finalizers: Rc::new(RefCell::new(Vec::new())),
-        filename: CString::new(nativescript_core::resolve::path_to_file_url(path)).unwrap_or_default(),
+        filename: CString::new(nativescript_core::resolve::path_to_file_url(path))
+            .unwrap_or_default(),
         callbacks: Vec::new(),
     });
     let env_ptr: napi_env = &mut *env;
@@ -279,7 +324,9 @@ pub fn load_addon<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path)
         return Err(None);
     }
     let exports = unsafe { local(result) }.unwrap_or(exports.into());
-    st.napi_addons.borrow_mut().insert(PathBuf::from(path), v8::Global::new(scope, exports));
+    st.napi_addons
+        .borrow_mut()
+        .insert(PathBuf::from(path), v8::Global::new(scope, exports));
     Ok(exports)
 }
 

@@ -19,17 +19,34 @@ extern "C" {
     pub fn g_main_context_push_thread_default(context: gpointer);
     pub fn g_main_context_pop_thread_default(context: gpointer);
     pub fn g_main_context_iteration(context: gpointer, may_block: gboolean) -> gboolean;
-    pub fn g_main_context_invoke_full(context: gpointer, priority: i32, func: SourceFunc, data: gpointer, notify: Option<unsafe extern "C" fn(gpointer)>);
+    pub fn g_main_context_invoke_full(
+        context: gpointer,
+        priority: i32,
+        func: SourceFunc,
+        data: gpointer,
+        notify: Option<unsafe extern "C" fn(gpointer)>,
+    );
     pub fn g_timeout_source_new(interval: u32) -> gpointer;
     pub fn g_idle_source_new() -> gpointer;
-    pub fn g_source_set_callback(source: gpointer, func: SourceFunc, data: gpointer, notify: Option<unsafe extern "C" fn(gpointer)>);
+    pub fn g_source_set_callback(
+        source: gpointer,
+        func: SourceFunc,
+        data: gpointer,
+        notify: Option<unsafe extern "C" fn(gpointer)>,
+    );
     pub fn g_source_set_priority(source: gpointer, priority: i32);
     pub fn g_source_attach(source: gpointer, context: gpointer) -> u32;
     pub fn g_source_destroy(source: gpointer);
     pub fn g_source_unref(source: gpointer);
     pub fn g_main_current_source() -> gpointer;
     pub fn g_source_get_context(source: gpointer) -> gpointer;
-    pub fn g_unix_signal_add_full(priority: i32, signum: i32, handler: SourceFunc, data: gpointer, notify: Option<unsafe extern "C" fn(gpointer)>) -> u32;
+    pub fn g_unix_signal_add_full(
+        priority: i32,
+        signum: i32,
+        handler: SourceFunc,
+        data: gpointer,
+        notify: Option<unsafe extern "C" fn(gpointer)>,
+    ) -> u32;
 }
 
 /// Runs `f` on the default main context each time `signum` arrives (e.g. SIGUSR1 for livesync).
@@ -55,14 +72,23 @@ impl MainContext {
             let is_main = libc::getpid() == libc::gettid();
             let existing = g_main_context_get_thread_default();
             if !existing.is_null() {
-                return MainContext { context: g_main_context_ref(existing) as usize, pushed: false };
+                return MainContext {
+                    context: g_main_context_ref(existing) as usize,
+                    pushed: false,
+                };
             }
             if is_main {
-                return MainContext { context: g_main_context_ref(g_main_context_default()) as usize, pushed: false };
+                return MainContext {
+                    context: g_main_context_ref(g_main_context_default()) as usize,
+                    pushed: false,
+                };
             }
             let context = g_main_context_new();
             g_main_context_push_thread_default(context);
-            MainContext { context: context as usize, pushed: true }
+            MainContext {
+                context: context as usize,
+                pushed: true,
+            }
         }
     }
 }

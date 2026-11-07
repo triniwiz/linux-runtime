@@ -47,10 +47,17 @@ fn url_parts<'s>(scope: &mut v8::PinScope<'s, '_>, u: &url::Url) -> v8::Local<'s
         u.host_str().unwrap_or("").to_owned(),
         u.port().map(|p| p.to_string()).unwrap_or_default(),
         u.path().to_owned(),
-        u.query().filter(|q| !q.is_empty()).map(|q| format!("?{q}")).unwrap_or_default(),
-        u.fragment().filter(|f| !f.is_empty()).map(|f| format!("#{f}")).unwrap_or_default(),
+        u.query()
+            .filter(|q| !q.is_empty())
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default(),
+        u.fragment()
+            .filter(|f| !f.is_empty())
+            .map(|f| format!("#{f}"))
+            .unwrap_or_default(),
     ];
-    let mut items: Vec<v8::Local<v8::Value>> = values.iter().map(|v| str(scope, v).into()).collect();
+    let mut items: Vec<v8::Local<v8::Value>> =
+        values.iter().map(|v| str(scope, v).into()).collect();
     items.push(str(scope, &u.origin().ascii_serialization()).into());
     v8::Array::new_with_elements(scope, &items).into()
 }
@@ -75,17 +82,30 @@ fn url_set<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
     let href = args.get(0).to_rust_string_lossy(scope);
     let part = args.get(1).to_rust_string_lossy(scope);
     let value = args.get(2).to_rust_string_lossy(scope);
-    let Ok(mut u) = url::Url::parse(&href) else { return rv.set_null() };
+    let Ok(mut u) = url::Url::parse(&href) else {
+        return rv.set_null();
+    };
     let ok = match part.as_str() {
         "protocol" => u.set_scheme(value.trim_end_matches(':')).is_ok(),
         "username" => u.set_username(&value).is_ok(),
-        "password" => u.set_password(Some(&value).filter(|v| !v.is_empty()).map(|v| v.as_str())).is_ok(),
+        "password" => u
+            .set_password(Some(&value).filter(|v| !v.is_empty()).map(|v| v.as_str()))
+            .is_ok(),
         "host" => {
-            let (h, p) = value.rsplit_once(':').map(|(h, p)| (h, p.parse().ok())).unwrap_or((&value, None));
+            let (h, p) = value
+                .rsplit_once(':')
+                .map(|(h, p)| (h, p.parse().ok()))
+                .unwrap_or((&value, None));
             u.set_host(Some(h)).is_ok() && u.set_port(p).is_ok()
         }
         "hostname" => u.set_host(Some(&value)).is_ok(),
-        "port" => u.set_port(if value.is_empty() { None } else { value.parse().ok() }).is_ok(),
+        "port" => u
+            .set_port(if value.is_empty() {
+                None
+            } else {
+                value.parse().ok()
+            })
+            .is_ok(),
         "pathname" => {
             u.set_path(&value);
             true
@@ -110,7 +130,11 @@ fn url_set<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
 }
 
 fn text_encode<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
-    let s = if args.get(0).is_undefined() { String::new() } else { args.get(0).to_rust_string_lossy(scope) };
+    let s = if args.get(0).is_undefined() {
+        String::new()
+    } else {
+        args.get(0).to_rust_string_lossy(scope)
+    };
     let len = s.len();
     let store = v8::ArrayBuffer::new_backing_store_from_vec(s.into_bytes()).make_shared();
     let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
@@ -124,7 +148,9 @@ fn text_decode<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<
         unsafe { std::slice::from_raw_parts(view.data() as *const u8, view.byte_length()) }
     } else if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(v) {
         match buf.data() {
-            Some(p) => unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, buf.byte_length()) },
+            Some(p) => unsafe {
+                std::slice::from_raw_parts(p.as_ptr() as *const u8, buf.byte_length())
+            },
             None => &[],
         }
     } else {
@@ -155,11 +181,20 @@ fn random_fill<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<
         return throw_error(scope, "expected a typed array");
     };
     if view.byte_length() > 65536 {
-        return throw_error(scope, "QuotaExceededError: getRandomValues is limited to 65536 bytes");
+        return throw_error(
+            scope,
+            "QuotaExceededError: getRandomValues is limited to 65536 bytes",
+        );
     }
     let mut filled = 0;
     while filled < view.byte_length() {
-        let n = unsafe { libc::getrandom((view.data() as *mut u8).add(filled) as *mut _, view.byte_length() - filled, 0) };
+        let n = unsafe {
+            libc::getrandom(
+                (view.data() as *mut u8).add(filled) as *mut _,
+                view.byte_length() - filled,
+                0,
+            )
+        };
         if n <= 0 {
             return throw_error(scope, "getrandom failed");
         }
@@ -174,7 +209,10 @@ fn now<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, mut rv: Rv<'s>) {
 }
 
 fn hrtime<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, mut rv: Rv<'s>) {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     let ns = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
     rv.set(v8::BigInt::new_from_u64(scope, ns).into());
@@ -267,7 +305,10 @@ pub fn create<'s>(scope: &mut v8::PinScope<'s, '_>, argv: &[String]) -> v8::Loca
         "aarch64" => "arm64",
         other => other,
     };
-    for (k, v) in [("arch", arch.to_owned()), ("v8", v8::V8::get_version().to_owned())] {
+    for (k, v) in [
+        ("arch", arch.to_owned()),
+        ("v8", v8::V8::get_version().to_owned()),
+    ] {
         let k = str(scope, k);
         let v = str(scope, &v);
         natives.set(scope, k.into(), v.into());

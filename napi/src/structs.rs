@@ -8,7 +8,11 @@ use nativescript_metadata::Type;
 use std::ffi::{c_void, CString};
 use std::ptr::null_mut;
 
-unsafe fn this_and_data(env: napi_env, info: napi_callback_info, arg: &mut napi_value) -> (napi_value, usize) {
+unsafe fn this_and_data(
+    env: napi_env,
+    info: napi_callback_info,
+    arg: &mut napi_value,
+) -> (napi_value, usize) {
     let mut argc = 1;
     let mut this = null_mut();
     let mut data = null_mut();
@@ -73,7 +77,9 @@ unsafe extern "C" fn to_json(env: napi_env, info: napi_callback_info) -> napi_va
     let st = state(env);
     let mut arg = null_mut();
     let (this, _) = this_and_data(env, info, &mut arg);
-    let Some((h, ty)) = view_of(st, this) else { return null_mut() };
+    let Some((h, ty)) = view_of(st, this) else {
+        return null_mut();
+    };
     marshal::record_to_object(st, &ty, h.address as *const u8).unwrap_or_else(|e| {
         st.js().throw(&e);
         null_mut()
@@ -100,7 +106,11 @@ fn class(st: &State, ty: &Type, index: u32) -> Result<napi_value, String> {
         return Ok(js.deref(*r));
     }
     let record = st.record(ty)?;
-    let names: Vec<CString> = record.fields.iter().map(|f| CString::new(f.name.as_str()).unwrap_or_default()).collect();
+    let names: Vec<CString> = record
+        .fields
+        .iter()
+        .map(|f| CString::new(f.name.as_str()).unwrap_or_default())
+        .collect();
     let mut props: Vec<napi_property_descriptor> = record
         .fields
         .iter()
@@ -130,21 +140,46 @@ fn class(st: &State, ty: &Type, index: u32) -> Result<napi_value, String> {
     let name = type_name(ty);
     let mut ctor = null_mut();
     unsafe {
-        napi_define_class(js.0, name.as_ptr() as *const _, name.len(), Some(view_ctor), null_mut(), props.len(), props.as_ptr(), &mut ctor)
+        napi_define_class(
+            js.0,
+            name.as_ptr() as *const _,
+            name.len(),
+            Some(view_ctor),
+            null_mut(),
+            props.len(),
+            props.as_ptr(),
+            &mut ctor,
+        )
     };
-    st.struct_classes.borrow_mut().insert(index, js.reference(ctor, 1));
+    st.struct_classes
+        .borrow_mut()
+        .insert(index, js.reference(ctor, 1));
     Ok(ctor)
 }
 
 /// Live view of the record `ty` at `addr`.
-pub fn view(st: &State, ty: &Type, addr: usize, owner: Option<napi_value>) -> Result<napi_value, String> {
+pub fn view(
+    st: &State,
+    ty: &Type,
+    addr: usize,
+    owner: Option<napi_value>,
+) -> Result<napi_value, String> {
     let js = st.js();
     let index = st.register_type(ty);
     let ctor = class(st, ty, index)?;
-    let object = js.new_instance(ctor, &[]).map_err(|_| "failed to create struct view")?;
+    let object = js
+        .new_instance(ctor, &[])
+        .map_err(|_| "failed to create struct view")?;
     // static memory (C globals) has no owner
-    let owner = owner.filter(|o| matches!(js.type_of(*o), OBJECT | FUNCTION)).map(|o| js.reference(o, 1)).unwrap_or(null_mut());
-    attach(js, object, Handle::new(Kind::Struct, addr, Some(index), owner));
+    let owner = owner
+        .filter(|o| matches!(js.type_of(*o), OBJECT | FUNCTION))
+        .map(|o| js.reference(o, 1))
+        .unwrap_or(null_mut());
+    attach(
+        js,
+        object,
+        Handle::new(Kind::Struct, addr, Some(index), owner),
+    );
     Ok(object)
 }
 

@@ -2,8 +2,10 @@ use nativescript_runtime::{MetaFile, Runtime};
 use std::path::PathBuf;
 
 fn run(source: &str) {
-    let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../metadata-generator/tests/TestOutput/metadata-{}.bin", std::env::consts::ARCH));
+    let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../metadata-generator/tests/TestOutput/metadata-{}.bin",
+        std::env::consts::ARCH
+    ));
     if !meta.exists() {
         return;
     }
@@ -19,7 +21,8 @@ fn run(source: &str) {
     "#,
         fixtures.display()
     );
-    rt.run_script(&format!("{prelude}\n{source}"), "workers.js").unwrap();
+    rt.run_script(&format!("{prelude}\n{source}"), "workers.js")
+        .unwrap();
     rt.run_event_loop().unwrap();
 }
 

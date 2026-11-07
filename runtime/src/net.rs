@@ -17,18 +17,27 @@ fn str<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> v8::Local<'s, v8::Strin
 
 fn bytes_of(v: v8::Local<v8::Value>) -> Option<Vec<u8>> {
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(v) {
-        return Some(unsafe { std::slice::from_raw_parts(view.data() as *const u8, view.byte_length()) }.to_vec());
+        return Some(
+            unsafe { std::slice::from_raw_parts(view.data() as *const u8, view.byte_length()) }
+                .to_vec(),
+        );
     }
     if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(v) {
         return Some(match buf.data() {
-            Some(p) => unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, buf.byte_length()) }.to_vec(),
+            Some(p) => {
+                unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, buf.byte_length()) }
+                    .to_vec()
+            }
             None => Vec::new(),
         });
     }
     None
 }
 
-fn array_buffer<'s>(scope: &mut v8::PinScope<'s, '_>, bytes: Vec<u8>) -> v8::Local<'s, v8::ArrayBuffer> {
+fn array_buffer<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    bytes: Vec<u8>,
+) -> v8::Local<'s, v8::ArrayBuffer> {
     let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
     v8::ArrayBuffer::with_backing_store(scope, &store)
 }
@@ -47,13 +56,29 @@ fn agent(follow: bool) -> &'static ureq::Agent {
     static FOLLOW: OnceLock<ureq::Agent> = OnceLock::new();
     static MANUAL: OnceLock<ureq::Agent> = OnceLock::new();
     let cell = if follow { &FOLLOW } else { &MANUAL };
-    cell.get_or_init(|| ureq::AgentBuilder::new().redirects(if follow { 20 } else { 0 }).build())
+    cell.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .redirects(if follow { 20 } else { 0 })
+            .build()
+    })
 }
 
-fn http(method: &str, url: &str, headers: &[(String, String)], body: Option<&[u8]>, follow: bool) -> Result<HttpResponse, String> {
+fn http(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&[u8]>,
+    follow: bool,
+) -> Result<HttpResponse, String> {
     if let Some(path) = url.strip_prefix("file://") {
         let body = std::fs::read(path).map_err(|e| e.to_string())?;
-        return Ok(HttpResponse { status: 200, status_text: "OK".into(), url: url.into(), headers: vec![], body });
+        return Ok(HttpResponse {
+            status: 200,
+            status_text: "OK".into(),
+            url: url.into(),
+            headers: vec![],
+            body,
+        });
     }
     let mut request = agent(follow).request(method, url);
     for (k, v) in headers {
@@ -74,10 +99,23 @@ fn http(method: &str, url: &str, headers: &[(String, String)], body: Option<&[u8
             headers.push((name.clone(), value.to_owned()));
         }
     }
-    let (status, status_text, url) = (response.status(), response.status_text().to_owned(), response.get_url().to_owned());
+    let (status, status_text, url) = (
+        response.status(),
+        response.status_text().to_owned(),
+        response.get_url().to_owned(),
+    );
     let mut body = Vec::new();
-    response.into_reader().read_to_end(&mut body).map_err(|e| e.to_string())?;
-    Ok(HttpResponse { status, status_text, url, headers, body })
+    response
+        .into_reader()
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
+    Ok(HttpResponse {
+        status,
+        status_text,
+        url,
+        headers,
+        body,
+    })
 }
 
 /// httpRequest(method, url, [[name, value]], body | null, redirect) -> Promise<{status, statusText, url, headers, body}>
@@ -88,20 +126,35 @@ fn http_request<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv
     let mut headers = Vec::new();
     if let Ok(list) = v8::Local::<v8::Array>::try_from(args.get(2)) {
         for i in 0..list.length() {
-            let Some(pair) = list.get_index(scope, i).and_then(|p| v8::Local::<v8::Array>::try_from(p).ok()) else { continue };
-            let k = pair.get_index(scope, 0).unwrap().to_rust_string_lossy(scope);
-            let v = pair.get_index(scope, 1).unwrap().to_rust_string_lossy(scope);
+            let Some(pair) = list
+                .get_index(scope, i)
+                .and_then(|p| v8::Local::<v8::Array>::try_from(p).ok())
+            else {
+                continue;
+            };
+            let k = pair
+                .get_index(scope, 0)
+                .unwrap()
+                .to_rust_string_lossy(scope);
+            let v = pair
+                .get_index(scope, 1)
+                .unwrap()
+                .to_rust_string_lossy(scope);
             headers.push((k, v));
         }
     }
     let body = bytes_of(args.get(3));
     let follow = args.get(4).to_rust_string_lossy(scope) != "manual";
 
-    let Some(resolver) = v8::PromiseResolver::new(scope) else { return };
+    let Some(resolver) = v8::PromiseResolver::new(scope) else {
+        return;
+    };
     rv.set(resolver.get_promise(scope).into());
     let id = st.next_request.get() + 1;
     st.next_request.set(id);
-    st.requests.borrow_mut().insert(id, v8::Global::new(scope, resolver));
+    st.requests
+        .borrow_mut()
+        .insert(id, v8::Global::new(scope, resolver));
     begin_pending(&st);
     let context = st.main_context.context;
     std::thread::spawn(move || {
@@ -110,7 +163,9 @@ fn http_request<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv
             context,
             true,
             Box::new(move |scope, st| {
-                let Some(resolver) = st.requests.borrow_mut().remove(&id) else { return };
+                let Some(resolver) = st.requests.borrow_mut().remove(&id) else {
+                    return;
+                };
                 let resolver = v8::Local::new(scope, resolver);
                 match result {
                     Ok(r) => {
@@ -127,7 +182,10 @@ fn http_request<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv
                             ("status", v8::Integer::new(scope, r.status as i32).into()),
                             ("statusText", str(scope, &r.status_text).into()),
                             ("url", str(scope, &r.url).into()),
-                            ("headers", v8::Array::new_with_elements(scope, &pairs).into()),
+                            (
+                                "headers",
+                                v8::Array::new_with_elements(scope, &pairs).into(),
+                            ),
                             ("body", array_buffer(scope, r.body).into()),
                         ];
                         for (k, v) in fields {
@@ -169,13 +227,23 @@ fn dispatch_ws(context: usize, id: u32, event: WsEvent) {
         context,
         closing,
         Box::new(move |scope, st| {
-            let Some(dispatch) = st.ws_dispatch.borrow().clone() else { return };
+            let Some(dispatch) = st.ws_dispatch.borrow().clone() else {
+                return;
+            };
             let dispatch = v8::Local::new(scope, dispatch);
             let id_v = v8::Integer::new_from_unsigned(scope, id).into();
             let args: Vec<v8::Local<v8::Value>> = match event {
-                WsEvent::Open(protocol) => vec![id_v, str(scope, "open").into(), str(scope, &protocol).into()],
+                WsEvent::Open(protocol) => vec![
+                    id_v,
+                    str(scope, "open").into(),
+                    str(scope, &protocol).into(),
+                ],
                 WsEvent::Text(t) => vec![id_v, str(scope, "message").into(), str(scope, &t).into()],
-                WsEvent::Binary(b) => vec![id_v, str(scope, "message").into(), array_buffer(scope, b).into()],
+                WsEvent::Binary(b) => vec![
+                    id_v,
+                    str(scope, "message").into(),
+                    array_buffer(scope, b).into(),
+                ],
                 WsEvent::Error(e) => vec![id_v, str(scope, "error").into(), str(scope, &e).into()],
                 WsEvent::Close(code, reason, clean) => {
                     st.websockets.borrow_mut().remove(&id);
@@ -194,16 +262,30 @@ fn dispatch_ws(context: usize, id: u32, event: WsEvent) {
     );
 }
 
-fn ws_thread(context: usize, id: u32, url: String, protocols: Vec<String>, commands: std::sync::mpsc::Receiver<WsCommand>) {
+fn ws_thread(
+    context: usize,
+    id: u32,
+    url: String,
+    protocols: Vec<String>,
+    commands: std::sync::mpsc::Receiver<WsCommand>,
+) {
     use tungstenite::client::IntoClientRequest;
     use tungstenite::stream::MaybeTlsStream;
     use tungstenite::Message;
 
     let connect = || -> Result<_, String> {
-        let mut request = url.as_str().into_client_request().map_err(|e| e.to_string())?;
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| e.to_string())?;
         if !protocols.is_empty() {
-            let value = protocols.join(", ").parse().map_err(|_| "invalid protocol")?;
-            request.headers_mut().insert("Sec-WebSocket-Protocol", value);
+            let value = protocols
+                .join(", ")
+                .parse()
+                .map_err(|_| "invalid protocol")?;
+            request
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", value);
         }
         tungstenite::connect(request).map_err(|e| e.to_string())
     };
@@ -239,15 +321,20 @@ fn ws_thread(context: usize, id: u32, url: String, protocols: Vec<String>, comma
             let sent = match commands.try_recv() {
                 Ok(WsCommand::Text(t)) => socket.send(Message::text(t)),
                 Ok(WsCommand::Binary(b)) => socket.send(Message::binary(b)),
-                Ok(WsCommand::Close(code, reason)) => socket.close(Some(tungstenite::protocol::CloseFrame {
-                    code: code.into(),
-                    reason: reason.into(),
-                })),
+                Ok(WsCommand::Close(code, reason)) => {
+                    socket.close(Some(tungstenite::protocol::CloseFrame {
+                        code: code.into(),
+                        reason: reason.into(),
+                    }))
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => socket.close(None),
             };
             if let Err(e) = sent {
-                if !matches!(e, tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) {
+                if !matches!(
+                    e,
+                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed
+                ) {
                     dispatch_ws(context, id, WsEvent::Error(e.to_string()));
                 }
             }
@@ -256,14 +343,20 @@ fn ws_thread(context: usize, id: u32, url: String, protocols: Vec<String>, comma
             Ok(Message::Text(t)) => dispatch_ws(context, id, WsEvent::Text(t.to_string())),
             Ok(Message::Binary(b)) => dispatch_ws(context, id, WsEvent::Binary(b.to_vec())),
             Ok(Message::Close(frame)) => {
-                let (code, reason) = frame.map(|f| (u16::from(f.code), f.reason.to_string())).unwrap_or((1005, String::new()));
+                let (code, reason) = frame
+                    .map(|f| (u16::from(f.code), f.reason.to_string()))
+                    .unwrap_or((1005, String::new()));
                 // tungstenite replies to the close frame on the next read/flush
                 let _ = socket.flush();
                 dispatch_ws(context, id, WsEvent::Close(code, reason, true));
                 return;
             }
             Ok(_) => {}
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                 dispatch_ws(context, id, WsEvent::Close(1000, String::new(), true));
                 return;
@@ -284,7 +377,11 @@ fn ws_connect<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'
     let mut protocols = Vec::new();
     if let Ok(list) = v8::Local::<v8::Array>::try_from(args.get(1)) {
         for i in 0..list.length() {
-            protocols.push(list.get_index(scope, i).unwrap().to_rust_string_lossy(scope));
+            protocols.push(
+                list.get_index(scope, i)
+                    .unwrap()
+                    .to_rust_string_lossy(scope),
+            );
         }
     }
     let id = st.next_request.get() + 1;
@@ -298,7 +395,11 @@ fn ws_connect<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'
 }
 
 fn ws_command(st: &State, id: u32, command: WsCommand) -> bool {
-    st.websockets.borrow().get(&id).map(|tx: &Sender<WsCommand>| tx.send(command).is_ok()).unwrap_or(false)
+    st.websockets
+        .borrow()
+        .get(&id)
+        .map(|tx: &Sender<WsCommand>| tx.send(command).is_ok())
+        .unwrap_or(false)
 }
 
 /// wsSend(id, string | buffer)

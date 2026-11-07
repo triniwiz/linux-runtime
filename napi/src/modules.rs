@@ -37,14 +37,23 @@ pub fn require_cjs(st: &State, path: &Path) -> Load<napi_value> {
     js.set(module, "filename", filename);
     js.set(module, "path", dirname);
     // cached before running so cycles see the partial exports
-    st.modules.borrow_mut().insert(path.to_path_buf(), js.reference(module, 1));
+    st.modules
+        .borrow_mut()
+        .insert(path.to_path_buf(), js.reference(module, 1));
 
     let outcome = (|| -> Load<()> {
         let source = read_source(path)?;
-        let wrapped = format!("(function (exports, require, module, __filename, __dirname) {{{source}\n}})");
-        let function = crate::run_script(js, &wrapped, &path.to_string_lossy()).map_err(|_| None)?;
+        let wrapped =
+            format!("(function (exports, require, module, __filename, __dirname) {{{source}\n}})");
+        let function =
+            crate::run_script(js, &wrapped, &path.to_string_lossy()).map_err(|_| None)?;
         let require = require_function(js, &dir_of(path));
-        js.call(function, exports, &[exports, require, module, filename, dirname]).map_err(|_| None)?;
+        js.call(
+            function,
+            exports,
+            &[exports, require, module, filename, dirname],
+        )
+        .map_err(|_| None)?;
         Ok(())
     })();
     if outcome.is_err() {
@@ -69,11 +78,16 @@ pub fn load_addon(st: &State, path: &Path) -> Load<napi_value> {
     if let Some(r) = st.modules.borrow().get(path) {
         return Ok(js.deref(*r));
     }
-    let cpath = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
+    let cpath =
+        CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "invalid path".to_string())?;
     PENDING_MODULE.with(|m| m.take());
     let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
     if handle.is_null() {
-        return Err(Some(format!("{}: {}", path.display(), nativescript_core::dlerror())));
+        return Err(Some(format!(
+            "{}: {}",
+            path.display(),
+            nativescript_core::dlerror()
+        )));
     }
     let init = unsafe { libc::dlsym(handle, c"napi_register_module_v1".as_ptr()) };
     let init: AddonInit = if init.is_null() {
@@ -83,14 +97,17 @@ pub fn load_addon(st: &State, path: &Path) -> Load<napi_value> {
     } else {
         unsafe { std::mem::transmute::<*mut c_void, AddonInit>(init) }
     };
-    *st.module_file.borrow_mut() = CString::new(nativescript_core::resolve::path_to_file_url(path)).unwrap_or_default();
+    *st.module_file.borrow_mut() =
+        CString::new(nativescript_core::resolve::path_to_file_url(path)).unwrap_or_default();
     let exports = js.object();
     let result = unsafe { init(js.0, exports) };
     if js.is_exception_pending() {
         return Err(None);
     }
     let exports = if result.is_null() { exports } else { result };
-    st.modules.borrow_mut().insert(path.to_path_buf(), js.reference(exports, 1));
+    st.modules
+        .borrow_mut()
+        .insert(path.to_path_buf(), js.reference(exports, 1));
     Ok(exports)
 }
 
@@ -98,11 +115,15 @@ fn require_any(st: &State, path: &Path) -> Load<napi_value> {
     match format_of(path) {
         Format::CommonJs => require_cjs(st, path),
         Format::Json => {
-            let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
             parse_json(st.js(), &text)
         }
         Format::Addon => load_addon(st, path),
-        Format::Esm => Err(Some(format!("{}: ES modules aren't supported on this engine yet", path.display()))),
+        Format::Esm => Err(Some(format!(
+            "{}: ES modules aren't supported on this engine yet",
+            path.display()
+        ))),
     }
 }
 
@@ -115,7 +136,10 @@ unsafe fn base_and_spec(env: napi_env, info: napi_callback_info) -> (PathBuf, St
 unsafe extern "C" fn require_callback(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let (base, spec) = base_and_spec(env, info);
-    match resolve(&spec, &base, Kind::Require).map_err(Some).and_then(|p| require_any(st, &p)) {
+    match resolve(&spec, &base, Kind::Require)
+        .map_err(Some)
+        .and_then(|p| require_any(st, &p))
+    {
         Ok(v) => v,
         Err(Some(e)) => {
             st.js().throw(&e);
@@ -145,7 +169,11 @@ unsafe extern "C" fn drop_base(_: napi_env, data: *mut c_void, _: *mut c_void) {
 pub fn require_function(js: Js, dir: &Path) -> napi_value {
     let base = Box::into_raw(Box::new(dir.to_path_buf())) as *mut c_void;
     let require = js.function("require", Some(require_callback), base);
-    js.set(require, "resolve", js.function("resolve", Some(require_resolve), base));
+    js.set(
+        require,
+        "resolve",
+        js.function("resolve", Some(require_resolve), base),
+    );
     unsafe { napi_add_finalizer(js.0, require, base, Some(drop_base), null_mut(), null_mut()) };
     require
 }

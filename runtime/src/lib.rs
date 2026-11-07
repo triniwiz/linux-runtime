@@ -16,7 +16,7 @@ mod state;
 mod structs;
 mod workers;
 
-pub use nativescript_metadata::MetaFile;
+pub use nativescript_metadata::{MetaFile, MetaSet};
 
 use state::State;
 use std::path::Path;
@@ -34,20 +34,23 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new(metadata: MetaFile) -> Result<Self, String> {
-        Self::build(Arc::new(metadata), None)
+    pub fn new(metadata: impl Into<MetaSet>) -> Result<Self, String> {
+        Self::build(Arc::new(metadata.into()), None)
     }
 
     /// Runtime sharing already loaded metadata (e.g. with other threads).
-    pub fn with_metadata(metadata: Arc<MetaFile>) -> Result<Self, String> {
+    pub fn with_metadata(metadata: Arc<MetaSet>) -> Result<Self, String> {
         Self::build(metadata, None)
     }
 
-    pub(crate) fn new_worker(metadata: Arc<MetaFile>, parent: workers::Parent) -> Result<Self, String> {
+    pub(crate) fn new_worker(
+        metadata: Arc<MetaSet>,
+        parent: workers::Parent,
+    ) -> Result<Self, String> {
         Self::build(metadata, Some(parent))
     }
 
-    fn build(metadata: Arc<MetaFile>, parent: Option<workers::Parent>) -> Result<Self, String> {
+    fn build(metadata: Arc<MetaSet>, parent: Option<workers::Parent>) -> Result<Self, String> {
         V8_INIT.call_once(|| {
             let platform = v8::new_default_platform(0, false).make_shared();
             v8::V8::initialize_platform(platform);
@@ -103,10 +106,14 @@ impl Runtime {
             event_loop::install_livesync_signal();
         }
 
-        Ok(Runtime { context, state, isolate })
+        Ok(Runtime {
+            context,
+            state,
+            isolate,
+        })
     }
 
-    pub fn metadata(&self) -> &MetaFile {
+    pub fn metadata(&self) -> &MetaSet {
         &self.state.meta
     }
 
@@ -121,7 +128,19 @@ impl Runtime {
 
         let source = v8::String::new(tc, source).ok_or("script too large")?;
         let resource = v8::String::new(tc, name).unwrap();
-        let origin = v8::ScriptOrigin::new(tc, resource.into(), 0, 0, false, 0, None, false, false, false, None);
+        let origin = v8::ScriptOrigin::new(
+            tc,
+            resource.into(),
+            0,
+            0,
+            false,
+            0,
+            None,
+            false,
+            false,
+            false,
+            None,
+        );
         let ran = v8::Script::compile(tc, source, Some(&origin)).and_then(|script| script.run(tc));
         if let Some(exception) = tc.exception() {
             let message = tc.message();
@@ -157,11 +176,17 @@ impl Runtime {
         v8::scope!(let scope, &mut **self.isolate);
         let context = v8::Local::new(scope, &self.context);
         let scope = &mut v8::ContextScope::new(scope, context);
-        let items: Vec<v8::Local<v8::Value>> = argv.iter().map(|a| v8::String::new(scope, a).unwrap().into()).collect();
+        let items: Vec<v8::Local<v8::Value>> = argv
+            .iter()
+            .map(|a| v8::String::new(scope, a).unwrap().into())
+            .collect();
         let array = v8::Array::new_with_elements(scope, &items);
         let global = context.global(scope);
         let key = v8::String::new(scope, "process").unwrap();
-        if let Some(process) = global.get(scope, key.into()).and_then(|p| p.to_object(scope)) {
+        if let Some(process) = global
+            .get(scope, key.into())
+            .and_then(|p| p.to_object(scope))
+        {
             let key = v8::String::new(scope, "argv").unwrap();
             process.set(scope, key.into(), array.into());
         }
@@ -178,7 +203,10 @@ impl Runtime {
         match value {
             Some(v) => Ok(v.to_rust_string_lossy(tc)),
             None => {
-                let e = tc.exception().map(|e| e.to_rust_string_lossy(tc)).unwrap_or_default();
+                let e = tc
+                    .exception()
+                    .map(|e| e.to_rust_string_lossy(tc))
+                    .unwrap_or_default();
                 Err(e)
             }
         }
@@ -245,7 +273,10 @@ fn notify_uncaught<'s>(scope: &mut v8::PinScope<'s, '_>, exception: v8::Local<'s
     let context = scope.get_current_context();
     let global = context.global(scope);
     let key = v8::String::new(scope, "__onUncaughtError").unwrap();
-    let Some(hook) = global.get(scope, key.into()).and_then(|h| v8::Local::<v8::Function>::try_from(h).ok()) else {
+    let Some(hook) = global
+        .get(scope, key.into())
+        .and_then(|h| v8::Local::<v8::Function>::try_from(h).ok())
+    else {
         return;
     };
     v8::tc_scope!(let tc, scope);

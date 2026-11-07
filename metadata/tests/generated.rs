@@ -5,14 +5,19 @@ use nativescript_metadata::{MetaFile, MetaKind, Type};
 use std::path::PathBuf;
 
 fn metadata() -> Option<MetaFile> {
-    let path = std::env::var_os("NS_TEST_METADATA").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../metadata-generator/tests/TestOutput/metadata-{}.bin",
-            std::env::consts::ARCH
-        ))
-    });
+    let path = std::env::var_os("NS_TEST_METADATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../metadata-generator/tests/TestOutput/metadata-{}.bin",
+                std::env::consts::ARCH
+            ))
+        });
     if !path.exists() {
-        eprintln!("skipping: {} not found, run metadata-generator/tests/test-mdg-executable.sh", path.display());
+        eprintln!(
+            "skipping: {} not found, run metadata-generator/tests/test-mdg-executable.sh",
+            path.display()
+        );
         return None;
     }
     Some(MetaFile::open(&path).expect("open metadata"))
@@ -35,7 +40,10 @@ fn every_declaration_is_reachable_by_name() {
 #[test]
 fn modules_and_libraries() {
     let Some(file) = metadata() else { return };
-    let libc = file.modules().find(|m| m.name() == "libc").expect("libc module");
+    let libc = file
+        .modules()
+        .find(|m| m.name() == "libc")
+        .expect("libc module");
     assert!(libc.is_system());
     let libs: Vec<_> = libc.libraries().map(|l| l.name()).collect();
     assert_eq!(libs, ["libc.so.6", "libm.so.6"]);
@@ -49,12 +57,18 @@ fn functions() {
     let Some(file) = metadata() else { return };
     let strlen = file.find("strlen").unwrap();
     assert_eq!(strlen.kind(), MetaKind::Function);
-    assert_eq!(strlen.signature().unwrap(), vec![Type::ULong, Type::ConstCString]);
+    assert_eq!(
+        strlen.signature().unwrap(),
+        vec![Type::ULong, Type::ConstCString]
+    );
     assert!(!strlen.is_variadic());
 
     let printf = file.find("printf").unwrap();
     assert!(printf.is_variadic());
-    assert_eq!(printf.signature().unwrap(), vec![Type::Int, Type::ConstCString]);
+    assert_eq!(
+        printf.signature().unwrap(),
+        vec![Type::Int, Type::ConstCString]
+    );
 
     let qsort = file.find("qsort").unwrap();
     let sig = qsort.signature().unwrap();
@@ -75,7 +89,9 @@ fn records() {
     assert_eq!(fields[1].0, "data");
     match &fields[1].1 {
         Type::ConstantArray(2, inner) => {
-            assert!(matches!(&**inner, Type::AnonymousUnion(f, _) if f.iter().any(|(n, _)| n == "v_pointer")))
+            assert!(
+                matches!(&**inner, Type::AnonymousUnion(f, _) if f.iter().any(|(n, _)| n == "v_pointer"))
+            )
         }
         other => panic!("unexpected GValue.data type {other:?}"),
     }

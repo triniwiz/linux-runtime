@@ -1,17 +1,38 @@
 //! Metadata access, symbol loading, C layouts and libffi types.
 
-use nativescript_metadata::{Meta, MetaFile, MetaKind, Offset, RecordLayout as ClangLayout, Type};
+use nativescript_metadata::{Meta, MetaId, MetaKind, MetaSet, RecordLayout as ClangLayout, Type};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_void, CString};
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+static LIBRARY_DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Directories searched for metadata sonames before the system paths
+/// (the app's bundled `lib/`). Set once, before any symbol is resolved.
+pub fn set_library_dirs(dirs: Vec<PathBuf>) {
+    let _ = LIBRARY_DIRS.set(dirs);
+}
+
+fn library_path(name: &str) -> CString {
+    let bundled = (!name.contains('/'))
+        .then(|| LIBRARY_DIRS.get())
+        .flatten()
+        .and_then(|dirs| dirs.iter().map(|d| d.join(name)).find(|p| p.exists()));
+    match bundled {
+        Some(path) => CString::new(path.into_os_string().into_encoded_bytes()),
+        None => CString::new(name),
+    }
+    .unwrap_or_default()
+}
 
 /// Engine independent runtime state (one per JS thread).
 pub struct Native {
-    pub meta: Arc<MetaFile>,
-    /// dlopen handles per module (keyed by module offset)
-    libraries: RefCell<HashMap<Offset, Vec<usize>>>,
+    pub meta: Arc<MetaSet>,
+    /// dlopen handles per module
+    libraries: RefCell<HashMap<MetaId, Vec<usize>>>,
     records: RefCell<HashMap<Type, Rc<RecordLayout>>>,
     /// Types referenced from JS (interop.types.*, struct constructors, references)
     pub types: RefCell<Vec<Type>>,
@@ -19,7 +40,7 @@ pub struct Native {
 }
 
 impl Native {
-    pub fn new(meta: Arc<MetaFile>) -> Self {
+    pub fn new(meta: Arc<MetaSet>) -> Self {
         Native {
             meta,
             libraries: Default::default(),
@@ -50,12 +71,12 @@ impl Native {
         let handles = {
             let mut libraries = self.libraries.borrow_mut();
             libraries
-                .entry(module.offset())
+                .entry(self.meta.id_in(module.file(), module.offset()))
                 .or_insert_with(|| {
                     module
                         .libraries()
                         .filter_map(|lib| {
-                            let name = CString::new(lib.name()).ok()?;
+                            let name = library_path(lib.name());
                             // SAFETY: plain dlopen of a soname from the metadata
                             let handle = unsafe {
                                 libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL)
@@ -78,7 +99,11 @@ impl Native {
         };
 
         let name = CString::new(meta.name()).map_err(|_| "invalid symbol name".to_string())?;
-        for handle in handles.iter().copied().chain(std::iter::once(libc::RTLD_DEFAULT as usize)) {
+        for handle in handles
+            .iter()
+            .copied()
+            .chain(std::iter::once(libc::RTLD_DEFAULT as usize))
+        {
             // SAFETY: valid handle from dlopen (or RTLD_DEFAULT) and a NUL terminated name
             let sym = unsafe { libc::dlsym(handle as *mut c_void, name.as_ptr()) };
             if !sym.is_null() {
@@ -89,7 +114,11 @@ impl Native {
             "symbol '{}' not found in module {} ({})",
             meta.name(),
             module.name(),
-            module.libraries().map(|l| l.name()).collect::<Vec<_>>().join(", ")
+            module
+                .libraries()
+                .map(|l| l.name())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
     }
 
@@ -102,10 +131,18 @@ impl Native {
             Type::Struct(name) => (name, false),
             Type::Union(name) => (name, true),
             Type::AnonymousStruct(fields, layout) => {
-                return Ok(Rc::new(self.compute_record(fields.clone(), false, layout.as_ref())?))
+                return Ok(Rc::new(self.compute_record(
+                    fields.clone(),
+                    false,
+                    layout.as_ref(),
+                )?))
             }
             Type::AnonymousUnion(fields, layout) => {
-                return Ok(Rc::new(self.compute_record(fields.clone(), true, layout.as_ref())?))
+                return Ok(Rc::new(self.compute_record(
+                    fields.clone(),
+                    true,
+                    layout.as_ref(),
+                )?))
             }
             other => return Err(format!("{other:?} is not a record type")),
         };
@@ -113,7 +150,9 @@ impl Native {
             .meta
             .find(name)
             .filter(|m| matches!(m.kind(), MetaKind::Struct | MetaKind::Union))
-            .ok_or_else(|| format!("'{name}' is an opaque or unknown record, its layout is not available"))?;
+            .ok_or_else(|| {
+                format!("'{name}' is an opaque or unknown record, its layout is not available")
+            })?;
         let fields = meta
             .fields()
             .unwrap_or_default()
@@ -144,7 +183,12 @@ impl Native {
             offset = natural_offset + l.size;
             size = size.max(offset);
             align = align.max(l.align);
-            let mut field = Field { name, ty, offset: natural_offset, bits: None };
+            let mut field = Field {
+                name,
+                ty,
+                offset: natural_offset,
+                bits: None,
+            };
             if let Some(f) = clang.and_then(|c| c.fields.get(i)) {
                 if f.bit_width > 0 {
                     field.bits = Some((f.offset_bits, f.bit_width));
@@ -164,7 +208,13 @@ impl Native {
             }
             None => (align_up(size, align), align),
         };
-        Ok(RecordLayout { fields: out, size, align, union, natural })
+        Ok(RecordLayout {
+            fields: out,
+            size,
+            align,
+            union,
+            natural,
+        })
     }
 
     /// C layout of a type on this (LP64 Linux) target.
@@ -180,16 +230,28 @@ impl Native {
             t if t.is_pointer_like() => prim(std::mem::size_of::<usize>()),
             Type::ConstantArray(n, inner) => {
                 let l = self.layout(inner)?;
-                Ok(Layout { size: l.size * *n as usize, align: l.align })
+                Ok(Layout {
+                    size: l.size * *n as usize,
+                    align: l.align,
+                })
             }
             Type::ExtVector(n, inner) => {
                 let l = self.layout(inner)?;
                 let size = (l.size * *n as usize).next_power_of_two();
-                Ok(Layout { size, align: size.min(16) })
+                Ok(Layout {
+                    size,
+                    align: size.min(16),
+                })
             }
-            Type::Struct(_) | Type::Union(_) | Type::AnonymousStruct(..) | Type::AnonymousUnion(..) => {
+            Type::Struct(_)
+            | Type::Union(_)
+            | Type::AnonymousStruct(..)
+            | Type::AnonymousUnion(..) => {
                 let r = self.record(ty)?;
-                Ok(Layout { size: r.size, align: r.align })
+                Ok(Layout {
+                    size: r.size,
+                    align: r.align,
+                })
             }
             other => Err(format!("unsupported type {other:?}")),
         }
@@ -214,9 +276,10 @@ impl Native {
             // C arrays decay to pointers when passed to functions
             Type::ConstantArray(..) => F::pointer(),
             t if t.is_pointer_like() => F::pointer(),
-            Type::Struct(_) | Type::AnonymousStruct(..) | Type::Union(_) | Type::AnonymousUnion(..) => {
-                self.ffi_record(ty)?
-            }
+            Type::Struct(_)
+            | Type::AnonymousStruct(..)
+            | Type::Union(_)
+            | Type::AnonymousUnion(..) => self.ffi_record(ty)?,
             Type::ExtVector(n, inner) => {
                 let elem = self.ffi_type(inner)?;
                 F::structure((0..*n).map(|_| elem.clone()))
@@ -246,7 +309,9 @@ impl Native {
                 _ => F::u64(),
             };
             let unit_size = record.align.min(8);
-            return Ok(F::structure((0..record.size.div_ceil(unit_size)).map(|_| unit.clone())));
+            return Ok(F::structure(
+                (0..record.size.div_ceil(unit_size)).map(|_| unit.clone()),
+            ));
         }
         let mut elements = Vec::new();
         for field in &record.fields {
@@ -312,4 +377,3 @@ pub fn dlerror() -> String {
         }
     }
 }
-

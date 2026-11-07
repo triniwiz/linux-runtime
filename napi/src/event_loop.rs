@@ -85,8 +85,16 @@ pub fn schedule_jobs(st: &State) {
     unsafe {
         // the context dispatching this callback (a nested loop may iterate another one)
         let source = g_main_current_source();
-        let context = if source.is_null() { null_mut() } else { g_source_get_context(source) };
-        let context = if context.is_null() { st.main_context.context } else { context as usize };
+        let context = if source.is_null() {
+            null_mut()
+        } else {
+            g_source_get_context(source)
+        };
+        let context = if context.is_null() {
+            st.main_context.context
+        } else {
+            context as usize
+        };
         queue(context, run, null_mut());
     }
 }
@@ -112,7 +120,11 @@ unsafe extern "C" fn timer_fired(data: gpointer) -> gboolean {
         (t.function, t.args.clone(), t.repeat)
     };
     // a one-shot timer's refs must outlive the call
-    let one_shot = if repeat { None } else { st.timers.borrow_mut().remove(&id) };
+    let one_shot = if repeat {
+        None
+    } else {
+        st.timers.borrow_mut().remove(&id)
+    };
     with_js(st, |js| {
         let argv: Vec<napi_value> = args.iter().map(|a| js.deref(*a)).collect();
         let _ = js.call(js.deref(function), js.undefined(), &argv);
@@ -130,12 +142,24 @@ unsafe fn add_timer(env: napi_env, info: napi_callback_info, repeat: bool) -> na
     let mut argv = vec![null_mut(); argc.max(2)];
     let undefined = js.undefined();
     argv.iter_mut().for_each(|a| *a = undefined);
-    napi_get_cb_info(env, info, &mut argc, argv.as_mut_ptr(), null_mut(), null_mut());
+    napi_get_cb_info(
+        env,
+        info,
+        &mut argc,
+        argv.as_mut_ptr(),
+        null_mut(),
+        null_mut(),
+    );
     if js.type_of(argv[0]) != FUNCTION {
         js.throw_type("the callback must be a function");
         return null_mut();
     }
-    let delay = js.f64_of(argv[1]).ok().filter(|d| d.is_finite()).unwrap_or(0.0).max(0.0);
+    let delay = js
+        .f64_of(argv[1])
+        .ok()
+        .filter(|d| d.is_finite())
+        .unwrap_or(0.0)
+        .max(0.0);
     let id = st.next_timer.get().wrapping_add(1).max(1);
     st.next_timer.set(id);
     let interval = (delay as u32).max(repeat as u32);
@@ -223,7 +247,11 @@ pub fn install(st: &State, global: napi_value) -> JsResult<()> {
     }
     let ns = js.object();
     js.set(ns, "ref", js.function("ref", Some(loop_ref), null_mut()));
-    js.set(ns, "unref", js.function("unref", Some(loop_unref), null_mut()));
+    js.set(
+        ns,
+        "unref",
+        js.function("unref", Some(loop_unref), null_mut()),
+    );
     js.set(global, "nativescript", ns);
 
     let init = crate::run_script(js, REJECTIONS, "nativescript:rejections")?;
@@ -251,7 +279,11 @@ pub fn post(context: usize, release: bool, f: Box<dyn FnOnce(&State) + Send>) {
         }
         0
     }
-    queue(context, dispatch, Box::into_raw(Box::new(Job { release, f })) as gpointer);
+    queue(
+        context,
+        dispatch,
+        Box::into_raw(Box::new(Job { release, f })) as gpointer,
+    );
 }
 
 /// Keeps the loop alive until a matching `post(.., release = true, ..)`.

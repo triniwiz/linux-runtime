@@ -11,7 +11,13 @@ fn build_addon() -> Option<PathBuf> {
     std::fs::create_dir_all(&out).ok()?;
     let addon = out.join("addon.node");
     let status = Command::new("cc")
-        .args(["-shared", "-fPIC", "-O2", "-DNODE_GYP_MODULE_NAME=addon", "-I"])
+        .args([
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-DNODE_GYP_MODULE_NAME=addon",
+            "-I",
+        ])
         .arg(fixtures().join("include"))
         .arg(fixtures().join("addon.c"))
         .arg("-o")
@@ -24,8 +30,10 @@ fn build_addon() -> Option<PathBuf> {
 
 #[test]
 fn addon() {
-    let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../metadata-generator/tests/TestOutput/metadata-{}.bin", std::env::consts::ARCH));
+    let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../metadata-generator/tests/TestOutput/metadata-{}.bin",
+        std::env::consts::ARCH
+    ));
     if !meta.exists() || build_addon().is_none() {
         eprintln!("skipping: metadata or C compiler missing");
         return;
@@ -33,7 +41,11 @@ fn addon() {
     let mut rt = Runtime::new(MetaFile::open(meta).unwrap()).unwrap();
     rt.run_file(fixtures().join("test.js")).unwrap();
     rt.run_event_loop().unwrap();
-    let json: serde_json::Value = serde_json::from_str(&rt.eval_to_string("JSON.stringify(globalThis.napiResults)").unwrap()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(
+        &rt.eval_to_string("JSON.stringify(globalThis.napiResults)")
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         json,
         serde_json::json!({

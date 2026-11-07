@@ -1,6 +1,6 @@
 //! Command line shared by the Node-API engine binaries.
 
-use crate::{MetaFile, Runtime};
+use crate::Runtime;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -39,7 +39,10 @@ pub fn main(engine: &str) -> ExitCode {
     }
     // packaged apps: `<exe dir>/app`
     if script.is_none() && eval.is_none() {
-        script = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("app"))).filter(|a| a.is_dir());
+        script = std::env::current_exe()
+            .ok()
+            .and_then(|e| Some(e.parent()?.join("app")))
+            .filter(|a| a.is_dir());
     }
     if script.is_none() && eval.is_none() {
         return usage();
@@ -48,10 +51,10 @@ pub fn main(engine: &str) -> ExitCode {
         eprintln!("{bin}: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);
     };
-    let metadata = match MetaFile::open(&metadata) {
+    let metadata = match nativescript_core::bundle::load_metadata(&metadata) {
         Ok(m) => Arc::new(m),
         Err(e) => {
-            eprintln!("{bin}: {}: {e}", metadata.display());
+            eprintln!("{bin}: {e}");
             return ExitCode::from(2);
         }
     };
@@ -62,10 +65,17 @@ pub fn main(engine: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut argv = vec![exe];
     if let Some(script) = &script {
-        argv.push(std::fs::canonicalize(script).unwrap_or(script.clone()).to_string_lossy().into_owned());
+        argv.push(
+            std::fs::canonicalize(script)
+                .unwrap_or(script.clone())
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     argv.extend(rest);
     runtime.set_argv(&argv);

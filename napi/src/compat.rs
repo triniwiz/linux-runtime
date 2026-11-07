@@ -61,15 +61,28 @@ pub unsafe extern "C" fn napi_get_version(env: napi_env, result: *mut u32) -> na
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_fatal_error(location: *const c_char, location_len: usize, message: *const c_char, message_len: usize) -> ! {
+pub unsafe extern "C" fn napi_fatal_error(
+    location: *const c_char,
+    location_len: usize,
+    message: *const c_char,
+    message_len: usize,
+) -> ! {
     let text = |p: *const c_char, len: usize| -> String {
         if p.is_null() {
             return String::new();
         }
-        let len = if len == usize::MAX { libc::strlen(p) } else { len };
+        let len = if len == usize::MAX {
+            libc::strlen(p)
+        } else {
+            len
+        };
         String::from_utf8_lossy(std::slice::from_raw_parts(p as *const u8, len)).into_owned()
     };
-    eprintln!("FATAL ERROR: {} {}", text(location, location_len), text(message, message_len));
+    eprintln!(
+        "FATAL ERROR: {} {}",
+        text(location, location_len),
+        text(message, message_len)
+    );
     std::process::abort();
 }
 
@@ -86,7 +99,12 @@ pub unsafe extern "C" fn napi_fatal_exception(env: napi_env, err: napi_value) ->
 // ---------- async context (no async_hooks here) ----------
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_async_init(env: napi_env, _resource: napi_value, _name: napi_value, result: *mut *mut c_void) -> napi_status {
+pub unsafe extern "C" fn napi_async_init(
+    env: napi_env,
+    _resource: napi_value,
+    _name: napi_value,
+    result: *mut *mut c_void,
+) -> napi_status {
     arg!(env, result);
     *result = 1 as *mut c_void;
     OK
@@ -112,14 +130,22 @@ pub unsafe extern "C" fn napi_make_callback(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_open_callback_scope(env: napi_env, _resource: napi_value, _context: *mut c_void, result: *mut *mut c_void) -> napi_status {
+pub unsafe extern "C" fn napi_open_callback_scope(
+    env: napi_env,
+    _resource: napi_value,
+    _context: *mut c_void,
+    result: *mut *mut c_void,
+) -> napi_status {
     arg!(env, result);
     *result = 1 as *mut c_void;
     OK
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_close_callback_scope(env: napi_env, _scope: *mut c_void) -> napi_status {
+pub unsafe extern "C" fn napi_close_callback_scope(
+    env: napi_env,
+    _scope: *mut c_void,
+) -> napi_status {
     arg!(env);
     OK
 }
@@ -134,7 +160,10 @@ fn pool() -> &'static Mutex<Sender<Job>> {
     POOL.get_or_init(|| {
         let (tx, rx) = channel::<Job>();
         let rx = std::sync::Arc::new(Mutex::new(rx));
-        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 16);
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 16);
         for i in 0..n {
             let rx = rx.clone();
             std::thread::Builder::new()
@@ -177,14 +206,26 @@ pub unsafe extern "C" fn napi_create_async_work(
     result: *mut *mut AsyncWork,
 ) -> napi_status {
     arg!(env, result);
-    let Some(execute) = execute else { return INVALID_ARG };
-    let work = AsyncWork { env, main_context: main_context(), execute, complete, data, state: AtomicU8::new(IDLE) };
+    let Some(execute) = execute else {
+        return INVALID_ARG;
+    };
+    let work = AsyncWork {
+        env,
+        main_context: main_context(),
+        execute,
+        complete,
+        data,
+        state: AtomicU8::new(IDLE),
+    };
     *result = Box::into_raw(Box::new(work));
     OK
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_delete_async_work(env: napi_env, work: *mut AsyncWork) -> napi_status {
+pub unsafe extern "C" fn napi_delete_async_work(
+    env: napi_env,
+    work: *mut AsyncWork,
+) -> napi_status {
     arg!(env, work);
     drop(Box::from_raw(work));
     OK
@@ -220,7 +261,10 @@ pub unsafe extern "C" fn napi_queue_async_work(env: napi_env, work: *mut AsyncWo
     let work = work as usize;
     let job: Job = Box::new(move || {
         let w = unsafe { &*(work as *const AsyncWork) };
-        if w.state.compare_exchange(QUEUED, RUNNING, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if w.state
+            .compare_exchange(QUEUED, RUNNING, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return; // cancelled, completion already posted
         }
         unsafe { (w.execute)(w.env, w.data) };
@@ -232,9 +276,16 @@ pub unsafe extern "C" fn napi_queue_async_work(env: napi_env, work: *mut AsyncWo
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_cancel_async_work(env: napi_env, work: *mut AsyncWork) -> napi_status {
+pub unsafe extern "C" fn napi_cancel_async_work(
+    env: napi_env,
+    work: *mut AsyncWork,
+) -> napi_status {
     arg!(env, work);
-    if (*work).state.compare_exchange(QUEUED, CANCELLED_STATE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if (*work)
+        .state
+        .compare_exchange(QUEUED, CANCELLED_STATE, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return GENERIC_FAILURE;
     }
     complete_on_js((*work).main_context, work as usize, CANCELLED);
@@ -268,7 +319,11 @@ impl Tsfn {
             return;
         }
         let ptr = self as *const Tsfn as usize;
-        post(self.main_context, false, Box::new(move |_| unsafe { dispatch(ptr) }));
+        post(
+            self.main_context,
+            false,
+            Box::new(move |_| unsafe { dispatch(ptr) }),
+        );
     }
 }
 
@@ -279,7 +334,11 @@ unsafe fn dispatch(ptr: usize) {
     t.space.notify_all();
     let env = t.env as napi_env;
     let js = Js(env);
-    let func = if t.func == 0 { std::ptr::null_mut() } else { js.deref(t.func as napi_ref) };
+    let func = if t.func == 0 {
+        std::ptr::null_mut()
+    } else {
+        js.deref(t.func as napi_ref)
+    };
     for data in items {
         match t.call_js {
             Some(cb) => cb(env, func, t.context as *mut c_void, data as *mut c_void),
@@ -292,7 +351,10 @@ unsafe fn dispatch(ptr: usize) {
             return;
         }
     }
-    if t.closing.load(Ordering::SeqCst) && *t.threads.lock().unwrap() == 0 && t.queue.lock().unwrap().is_empty() {
+    if t.closing.load(Ordering::SeqCst)
+        && *t.threads.lock().unwrap() == 0
+        && t.queue.lock().unwrap().is_empty()
+    {
         finalize(ptr);
     }
 }
@@ -301,7 +363,11 @@ unsafe fn finalize(ptr: usize) {
     let t = Box::from_raw(ptr as *mut Tsfn);
     let env = t.env as napi_env;
     if let Some(cb) = t.finalize_cb {
-        cb(env, t.finalize_data as *mut c_void, t.context as *mut c_void);
+        cb(
+            env,
+            t.finalize_data as *mut c_void,
+            t.context as *mut c_void,
+        );
     }
     Js(env).delete_ref(t.func as napi_ref);
     if t.refd.load(Ordering::Relaxed) {
@@ -362,15 +428,24 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_get_threadsafe_function_context(func: *const Tsfn, result: *mut *mut c_void) -> napi_status {
+pub unsafe extern "C" fn napi_get_threadsafe_function_context(
+    func: *const Tsfn,
+    result: *mut *mut c_void,
+) -> napi_status {
     arg!(func, result);
     *result = (*func).context as *mut c_void;
     OK
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_call_threadsafe_function(func: *const Tsfn, data: *mut c_void, blocking: i32) -> napi_status {
-    let Some(t) = func.as_ref() else { return INVALID_ARG };
+pub unsafe extern "C" fn napi_call_threadsafe_function(
+    func: *const Tsfn,
+    data: *mut c_void,
+    blocking: i32,
+) -> napi_status {
+    let Some(t) = func.as_ref() else {
+        return INVALID_ARG;
+    };
     let mut queue = t.queue.lock().unwrap();
     while t.max_queue > 0 && queue.len() >= t.max_queue {
         if t.closing.load(Ordering::SeqCst) {
@@ -392,7 +467,9 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(func: *const Tsfn, data: 
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_acquire_threadsafe_function(func: *const Tsfn) -> napi_status {
-    let Some(t) = func.as_ref() else { return INVALID_ARG };
+    let Some(t) = func.as_ref() else {
+        return INVALID_ARG;
+    };
     if t.closing.load(Ordering::SeqCst) {
         return CLOSING;
     }
@@ -401,8 +478,13 @@ pub unsafe extern "C" fn napi_acquire_threadsafe_function(func: *const Tsfn) -> 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_release_threadsafe_function(func: *const Tsfn, mode: i32) -> napi_status {
-    let Some(t) = func.as_ref() else { return INVALID_ARG };
+pub unsafe extern "C" fn napi_release_threadsafe_function(
+    func: *const Tsfn,
+    mode: i32,
+) -> napi_status {
+    let Some(t) = func.as_ref() else {
+        return INVALID_ARG;
+    };
     {
         let mut threads = t.threads.lock().unwrap();
         if *threads == 0 {
@@ -424,7 +506,10 @@ pub unsafe extern "C" fn napi_release_threadsafe_function(func: *const Tsfn, mod
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_unref_threadsafe_function(env: napi_env, func: *const Tsfn) -> napi_status {
+pub unsafe extern "C" fn napi_unref_threadsafe_function(
+    env: napi_env,
+    func: *const Tsfn,
+) -> napi_status {
     arg!(env, func);
     if (*func).refd.swap(false, Ordering::Relaxed) {
         release_loop();
@@ -433,7 +518,10 @@ pub unsafe extern "C" fn napi_unref_threadsafe_function(env: napi_env, func: *co
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_ref_threadsafe_function(env: napi_env, func: *const Tsfn) -> napi_status {
+pub unsafe extern "C" fn napi_ref_threadsafe_function(
+    env: napi_env,
+    func: *const Tsfn,
+) -> napi_status {
     arg!(env, func);
     if !(*func).refd.swap(true, Ordering::Relaxed) {
         if let Some(st) = current() {
@@ -454,10 +542,18 @@ pub struct napi_node_version {
 }
 struct SyncVersion(napi_node_version);
 unsafe impl Sync for SyncVersion {}
-static NODE_VERSION: SyncVersion = SyncVersion(napi_node_version { major: 22, minor: 0, patch: 0, release: c"node".as_ptr() });
+static NODE_VERSION: SyncVersion = SyncVersion(napi_node_version {
+    major: 22,
+    minor: 0,
+    patch: 0,
+    release: c"node".as_ptr(),
+});
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_get_node_version(env: napi_env, version: *mut *const napi_node_version) -> napi_status {
+pub unsafe extern "C" fn napi_get_node_version(
+    env: napi_env,
+    version: *mut *const napi_node_version,
+) -> napi_status {
     arg!(env, version);
     *version = &NODE_VERSION.0;
     OK
@@ -465,7 +561,10 @@ pub unsafe extern "C" fn napi_get_node_version(env: napi_env, version: *mut *con
 
 /// No libuv here: a stable dummy pointer for addons that only check it.
 #[no_mangle]
-pub unsafe extern "C" fn napi_get_uv_event_loop(env: napi_env, result: *mut *mut c_void) -> napi_status {
+pub unsafe extern "C" fn napi_get_uv_event_loop(
+    env: napi_env,
+    result: *mut *mut c_void,
+) -> napi_status {
     static DUMMY: [u64; 64] = [0; 64];
     arg!(env, result);
     *result = DUMMY.as_ptr() as *mut c_void;
@@ -475,18 +574,32 @@ pub unsafe extern "C" fn napi_get_uv_event_loop(env: napi_env, result: *mut *mut
 pub type CleanupHook = unsafe extern "C" fn(*mut c_void);
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_add_env_cleanup_hook(env: napi_env, fun: Option<CleanupHook>, arg: *mut c_void) -> napi_status {
+pub unsafe extern "C" fn napi_add_env_cleanup_hook(
+    env: napi_env,
+    fun: Option<CleanupHook>,
+    arg: *mut c_void,
+) -> napi_status {
     arg!(env);
-    let (Some(fun), Some(st)) = (fun, current()) else { return INVALID_ARG };
+    let (Some(fun), Some(st)) = (fun, current()) else {
+        return INVALID_ARG;
+    };
     st.cleanup_hooks.borrow_mut().push((fun, arg as usize));
     OK
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_remove_env_cleanup_hook(env: napi_env, fun: Option<CleanupHook>, arg: *mut c_void) -> napi_status {
+pub unsafe extern "C" fn napi_remove_env_cleanup_hook(
+    env: napi_env,
+    fun: Option<CleanupHook>,
+    arg: *mut c_void,
+) -> napi_status {
     arg!(env);
-    let (Some(fun), Some(st)) = (fun, current()) else { return INVALID_ARG };
-    st.cleanup_hooks.borrow_mut().retain(|(f, a)| !(*f as usize == fun as usize && *a == arg as usize));
+    let (Some(fun), Some(st)) = (fun, current()) else {
+        return INVALID_ARG;
+    };
+    st.cleanup_hooks
+        .borrow_mut()
+        .retain(|(f, a)| !(*f as usize == fun as usize && *a == arg as usize));
     OK
 }
 
@@ -508,9 +621,13 @@ pub unsafe extern "C" fn napi_add_async_cleanup_hook(
     remove_handle: *mut *mut AsyncCleanupHook,
 ) -> napi_status {
     arg!(env);
-    let (Some(hook), Some(st)) = (hook, current()) else { return INVALID_ARG };
+    let (Some(hook), Some(st)) = (hook, current()) else {
+        return INVALID_ARG;
+    };
     let h = Box::into_raw(Box::new(AsyncCleanupHook { hook, arg }));
-    st.cleanup_hooks.borrow_mut().push((run_async_hook, h as usize));
+    st.cleanup_hooks
+        .borrow_mut()
+        .push((run_async_hook, h as usize));
     if !remove_handle.is_null() {
         *remove_handle = h;
     }
@@ -519,7 +636,9 @@ pub unsafe extern "C" fn napi_add_async_cleanup_hook(
 
 /// The handle stays valid until teardown; removing just skips the hook.
 #[no_mangle]
-pub unsafe extern "C" fn napi_remove_async_cleanup_hook(handle: *mut AsyncCleanupHook) -> napi_status {
+pub unsafe extern "C" fn napi_remove_async_cleanup_hook(
+    handle: *mut AsyncCleanupHook,
+) -> napi_status {
     arg!(handle);
     unsafe extern "C" fn noop(_: *mut AsyncCleanupHook, _: *mut c_void) {}
     (*handle).hook = noop;
@@ -528,20 +647,36 @@ pub unsafe extern "C" fn napi_remove_async_cleanup_hook(handle: *mut AsyncCleanu
 
 /// File URL of the addon being loaded (all addons share one env).
 #[no_mangle]
-pub unsafe extern "C" fn node_api_get_module_file_name(env: napi_env, result: *mut *const c_char) -> napi_status {
+pub unsafe extern "C" fn node_api_get_module_file_name(
+    env: napi_env,
+    result: *mut *const c_char,
+) -> napi_status {
     arg!(env, result);
-    let Some(st) = current() else { return GENERIC_FAILURE };
+    let Some(st) = current() else {
+        return GENERIC_FAILURE;
+    };
     *result = st.module_file.borrow().as_ptr();
     OK
 }
 
 /// Runs `finalize_cb` from the event loop instead of the GC.
 #[no_mangle]
-pub unsafe extern "C" fn node_api_post_finalizer(env: napi_env, finalize_cb: napi_finalize, data: *mut c_void, hint: *mut c_void) -> napi_status {
+pub unsafe extern "C" fn node_api_post_finalizer(
+    env: napi_env,
+    finalize_cb: napi_finalize,
+    data: *mut c_void,
+    hint: *mut c_void,
+) -> napi_status {
     arg!(env);
-    let Some(cb) = finalize_cb else { return INVALID_ARG };
+    let Some(cb) = finalize_cb else {
+        return INVALID_ARG;
+    };
     let (env, data, hint) = (env as usize, data as usize, hint as usize);
-    post(main_context(), false, Box::new(move |_| unsafe { cb(env as napi_env, data as *mut c_void, hint as *mut c_void) }));
+    post(
+        main_context(),
+        false,
+        Box::new(move |_| unsafe { cb(env as napi_env, data as *mut c_void, hint as *mut c_void) }),
+    );
     OK
 }
 
@@ -579,16 +714,30 @@ pub unsafe extern "C" fn node_api_create_external_string_utf16(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn node_api_create_property_key_utf16(env: napi_env, str: *const u16, length: usize, result: *mut napi_value) -> napi_status {
+pub unsafe extern "C" fn node_api_create_property_key_utf16(
+    env: napi_env,
+    str: *const u16,
+    length: usize,
+    result: *mut napi_value,
+) -> napi_status {
     napi_create_string_utf16(env, str, length, result)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn node_api_create_syntax_error(env: napi_env, code: napi_value, msg: napi_value, result: *mut napi_value) -> napi_status {
+pub unsafe extern "C" fn node_api_create_syntax_error(
+    env: napi_env,
+    code: napi_value,
+    msg: napi_value,
+    result: *mut napi_value,
+) -> napi_status {
     arg!(env, msg, result);
     let js = Js(env);
-    let Ok(ctor) = js.get(js.global(), "SyntaxError") else { return GENERIC_FAILURE };
-    let Ok(error) = js.new_instance(ctor, &[msg]) else { return GENERIC_FAILURE };
+    let Ok(ctor) = js.get(js.global(), "SyntaxError") else {
+        return GENERIC_FAILURE;
+    };
+    let Ok(error) = js.new_instance(ctor, &[msg]) else {
+        return GENERIC_FAILURE;
+    };
     if !code.is_null() {
         js.set(error, "code", code);
     }
@@ -597,11 +746,19 @@ pub unsafe extern "C" fn node_api_create_syntax_error(env: napi_env, code: napi_
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn node_api_throw_syntax_error(env: napi_env, code: *const c_char, msg: *const c_char) -> napi_status {
+pub unsafe extern "C" fn node_api_throw_syntax_error(
+    env: napi_env,
+    code: *const c_char,
+    msg: *const c_char,
+) -> napi_status {
     arg!(env, msg);
     let js = Js(env);
     let text = |p: *const c_char| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
-    let code = if code.is_null() { std::ptr::null_mut() } else { js.string(&text(code)) };
+    let code = if code.is_null() {
+        std::ptr::null_mut()
+    } else {
+        js.string(&text(code))
+    };
     let mut error = std::ptr::null_mut();
     let status = node_api_create_syntax_error(env, code, js.string(&text(msg)), &mut error);
     if status != OK {

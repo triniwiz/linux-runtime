@@ -2,8 +2,8 @@
 
 use crate::state::{state, State};
 use crate::throw_error;
-use std::collections::HashMap;
 use nativescript_core::resolve::*;
+use std::collections::HashMap;
 
 fn read_source(path: &Path) -> Result<String, String> {
     if is_url(path) {
@@ -35,18 +35,35 @@ type Load<T> = Result<T, Option<String>>;
 
 fn origin<'s>(scope: &mut v8::PinScope<'s, '_>, path: &Path, module: bool) -> v8::ScriptOrigin<'s> {
     let name = str(scope, &path.to_string_lossy());
-    v8::ScriptOrigin::new(scope, name.into(), 0, 0, false, 0, None, false, false, module, None)
+    v8::ScriptOrigin::new(
+        scope,
+        name.into(),
+        0,
+        0,
+        false,
+        0,
+        None,
+        false,
+        false,
+        module,
+        None,
+    )
 }
 
 /// Loads (but doesn't evaluate) the module graph rooted at `path`.
-pub fn load<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) -> Load<v8::Local<'s, v8::Module>> {
+pub fn load<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    path: &Path,
+) -> Load<v8::Local<'s, v8::Module>> {
     if let Some(m) = st.modules.borrow().esm.get(path) {
         return Ok(v8::Local::new(scope, m));
     }
     let module = match format_of(path) {
         Format::Esm => {
             let source = read_source(path)?;
-            let source = v8::String::new(scope, &source).ok_or(Some("module too large".to_string()))?;
+            let source =
+                v8::String::new(scope, &source).ok_or(Some("module too large".to_string()))?;
             let origin = origin(scope, path, true);
             let mut source = v8::script_compiler::Source::new(source, Some(&origin));
             v8::script_compiler::compile_module(scope, &mut source).ok_or(None)?
@@ -79,18 +96,23 @@ pub fn load<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) -> Lo
     let hash = module.get_identity_hash().get();
     {
         let mut map = st.modules.borrow_mut();
-        map.esm.insert(path.to_path_buf(), v8::Global::new(scope, module));
+        map.esm
+            .insert(path.to_path_buf(), v8::Global::new(scope, module));
         map.paths.insert(hash, path.to_path_buf());
     }
     let requests = module.get_module_requests();
     let base = dir_of(path);
     for i in 0..requests.length() {
         let request = requests.get(scope, i).unwrap();
-        let request = v8::Local::<v8::ModuleRequest>::try_from(request).map_err(|_| Some("bad module request".to_string()))?;
+        let request = v8::Local::<v8::ModuleRequest>::try_from(request)
+            .map_err(|_| Some("bad module request".to_string()))?;
         let spec = request.get_specifier().to_rust_string_lossy(scope);
         let resolved = resolve(&spec, &base, Kind::Import)?;
         load(scope, st, &resolved)?;
-        st.modules.borrow_mut().resolutions.insert((hash, spec), resolved);
+        st.modules
+            .borrow_mut()
+            .resolutions
+            .insert((hash, spec), resolved);
     }
     Ok(module)
 }
@@ -104,15 +126,28 @@ fn synthetic<'s>(
     let names: Vec<_> = exports.iter().map(|(n, _)| str(scope, n)).collect();
     let name = str(scope, &path.to_string_lossy());
     let module = v8::Module::create_synthetic_module(scope, name, &names, synthetic_steps);
-    let values = exports.into_iter().map(|(n, v)| (n, v8::Global::new(scope, v))).collect();
-    st.modules.borrow_mut().synthetic_exports.insert(module.get_identity_hash().get(), values);
+    let values = exports
+        .into_iter()
+        .map(|(n, v)| (n, v8::Global::new(scope, v)))
+        .collect();
+    st.modules
+        .borrow_mut()
+        .synthetic_exports
+        .insert(module.get_identity_hash().get(), values);
     module
 }
 
-fn synthetic_steps<'s>(context: v8::Local<'s, v8::Context>, module: v8::Local<'s, v8::Module>) -> Option<v8::Local<'s, v8::Value>> {
+fn synthetic_steps<'s>(
+    context: v8::Local<'s, v8::Context>,
+    module: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Value>> {
     v8::callback_scope!(unsafe scope, context);
     let st = state(scope);
-    let exports = st.modules.borrow_mut().synthetic_exports.remove(&module.get_identity_hash().get())?;
+    let exports = st
+        .modules
+        .borrow_mut()
+        .synthetic_exports
+        .remove(&module.get_identity_hash().get())?;
     for (name, value) in exports {
         let name = str(scope, &name);
         let value = v8::Local::new(scope, &value);
@@ -132,7 +167,11 @@ fn resolve_callback<'s>(
     let spec = specifier.to_rust_string_lossy(scope);
     let key = (referrer.get_identity_hash().get(), spec);
     let map = st.modules.borrow();
-    let found = map.resolutions.get(&key).and_then(|p| map.esm.get(p)).map(|m| v8::Local::new(scope, m));
+    let found = map
+        .resolutions
+        .get(&key)
+        .and_then(|p| map.esm.get(p))
+        .map(|m| v8::Local::new(scope, m));
     if found.is_none() {
         drop(map);
         throw_error(scope, &format!("Cannot resolve '{}'", key.1));
@@ -141,10 +180,16 @@ fn resolve_callback<'s>(
 }
 
 /// Loads, links and evaluates; returns the evaluation promise.
-pub fn evaluate<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) -> Load<(v8::Local<'s, v8::Module>, v8::Local<'s, v8::Value>)> {
+pub fn evaluate<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    path: &Path,
+) -> Load<(v8::Local<'s, v8::Module>, v8::Local<'s, v8::Value>)> {
     let module = load(scope, st, path)?;
     if module.get_status() == v8::ModuleStatus::Uninstantiated {
-        module.instantiate_module(scope, resolve_callback).ok_or(None)?;
+        module
+            .instantiate_module(scope, resolve_callback)
+            .ok_or(None)?;
     }
     let result = module.evaluate(scope).ok_or(None)?;
     Ok((module, result))
@@ -176,7 +221,11 @@ pub fn dynamic_import<'s>(
     let st = state(scope);
     let spec = specifier.to_rust_string_lossy(scope);
     let referrer = resource.to_rust_string_lossy(scope);
-    let referrer = if referrer.starts_with("http") { PathBuf::from(referrer) } else { file_url_to_path(&referrer) };
+    let referrer = if referrer.starts_with("http") {
+        PathBuf::from(referrer)
+    } else {
+        file_url_to_path(&referrer)
+    };
     let base = if referrer.is_absolute() || is_url(&referrer) {
         dir_of(&referrer)
     } else {
@@ -198,7 +247,9 @@ pub fn dynamic_import<'s>(
                 Ok(p) if p.state() == v8::PromiseState::Pending => {
                     // top-level await: resolve with the namespace once evaluated
                     let then = v8::Function::builder(
-                        |_: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| rv.set(args.data()),
+                        |_: &mut v8::PinScope,
+                         args: v8::FunctionCallbackArguments,
+                         mut rv: v8::ReturnValue| rv.set(args.data()),
                     )
                     .data(namespace)
                     .build(tc)?;
@@ -226,14 +277,28 @@ pub fn dynamic_import<'s>(
     Some(promise)
 }
 
-pub unsafe extern "C" fn import_meta(context: v8::Local<v8::Context>, module: v8::Local<v8::Module>, meta: v8::Local<v8::Object>) {
+pub unsafe extern "C" fn import_meta(
+    context: v8::Local<v8::Context>,
+    module: v8::Local<v8::Module>,
+    meta: v8::Local<v8::Object>,
+) {
     v8::callback_scope!(unsafe scope, context);
     let st = state(scope);
-    let Some(path) = st.modules.borrow().paths.get(&module.get_identity_hash().get()).cloned() else {
+    let Some(path) = st
+        .modules
+        .borrow()
+        .paths
+        .get(&module.get_identity_hash().get())
+        .cloned()
+    else {
         return;
     };
     let dir = dir_of(&path);
-    let url = if is_url(&path) { path.to_string_lossy().into_owned() } else { path_to_file_url(&path) };
+    let url = if is_url(&path) {
+        path.to_string_lossy().into_owned()
+    } else {
+        path_to_file_url(&path)
+    };
     for (k, v) in [
         ("url", url),
         ("filename", path.to_string_lossy().into_owned()),
@@ -244,13 +309,20 @@ pub unsafe extern "C" fn import_meta(context: v8::Local<v8::Context>, module: v8
         meta.set(scope, k.into(), v.into());
     }
     let data = str(scope, &dir.to_string_lossy());
-    if let Some(f) = v8::Function::builder(meta_resolve).data(data.into()).build(scope) {
+    if let Some(f) = v8::Function::builder(meta_resolve)
+        .data(data.into())
+        .build(scope)
+    {
         let k = str(scope, "resolve");
         meta.set(scope, k.into(), f.into());
     }
 }
 
-fn meta_resolve<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, mut rv: v8::ReturnValue<'s, v8::Value>) {
+fn meta_resolve<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
     let base = PathBuf::from(args.data().to_rust_string_lossy(scope));
     let spec = args.get(0).to_rust_string_lossy(scope);
     match resolve(&spec, &base, Kind::Import) {
@@ -262,7 +334,11 @@ fn meta_resolve<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallback
 // ---------- CommonJS ----------
 
 /// `module.exports` of the CommonJS module at `path`, loading it once.
-pub fn require_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) -> Load<v8::Local<'s, v8::Value>> {
+pub fn require_cjs<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    path: &Path,
+) -> Load<v8::Local<'s, v8::Value>> {
     let key = str(scope, "exports");
     if let Some(module) = st.modules.borrow().cjs.get(path) {
         let module = v8::Local::new(scope, module);
@@ -278,14 +354,18 @@ pub fn require_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path
         module.set(scope, k.into(), v.into());
     }
     // cached before running so cycles see the partial exports
-    st.modules.borrow_mut().cjs.insert(path.to_path_buf(), v8::Global::new(scope, module));
+    st.modules
+        .borrow_mut()
+        .cjs
+        .insert(path.to_path_buf(), v8::Global::new(scope, module));
 
     let outcome = (|| -> Load<()> {
         let source = read_source(path)?;
         let source = v8::String::new(scope, &source).ok_or(Some("module too large".to_string()))?;
         let origin = origin(scope, path, false);
         let mut source = v8::script_compiler::Source::new(source, Some(&origin));
-        let params = ["exports", "require", "module", "__filename", "__dirname"].map(|p| str(scope, p));
+        let params =
+            ["exports", "require", "module", "__filename", "__dirname"].map(|p| str(scope, p));
         let function = v8::script_compiler::compile_function(
             scope,
             &mut source,
@@ -297,7 +377,17 @@ pub fn require_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path
         .ok_or(None)?;
         let require = require_function(scope, &dir_of(path)).ok_or(None)?;
         function
-            .call(scope, exports.into(), &[exports.into(), require.into(), module.into(), filename.into(), dirname.into()])
+            .call(
+                scope,
+                exports.into(),
+                &[
+                    exports.into(),
+                    require.into(),
+                    module.into(),
+                    filename.into(),
+                    dirname.into(),
+                ],
+            )
             .ok_or(None)?;
         Ok(())
     })();
@@ -311,7 +401,11 @@ pub fn require_cjs<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path
     Ok(module.get(scope, key.into()).unwrap())
 }
 
-fn require_any<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) -> Load<v8::Local<'s, v8::Value>> {
+fn require_any<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    path: &Path,
+) -> Load<v8::Local<'s, v8::Value>> {
     match format_of(path) {
         Format::CommonJs => require_cjs(scope, st, path),
         Format::Json => {
@@ -331,7 +425,10 @@ fn require_any<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) ->
                         return Err(None);
                     }
                     v8::PromiseState::Pending => {
-                        return Err(Some(format!("require() of {} which uses top-level await, use import()", path.display())))
+                        return Err(Some(format!(
+                            "require() of {} which uses top-level await, use import()",
+                            path.display()
+                        )))
                     }
                     _ => {}
                 }
@@ -342,7 +439,11 @@ fn require_any<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, path: &Path) ->
     }
 }
 
-fn require_callback<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, mut rv: v8::ReturnValue<'s, v8::Value>) {
+fn require_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
     let st = state(scope);
     let base = PathBuf::from(args.data().to_rust_string_lossy(scope));
     let spec = args.get(0).to_rust_string_lossy(scope);
@@ -356,7 +457,11 @@ fn require_callback<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCall
     }
 }
 
-fn require_resolve<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallbackArguments<'s>, mut rv: v8::ReturnValue<'s, v8::Value>) {
+fn require_resolve<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
     let base = PathBuf::from(args.data().to_rust_string_lossy(scope));
     let spec = args.get(0).to_rust_string_lossy(scope);
     match resolve(&spec, &base, Kind::Require) {
@@ -366,10 +471,17 @@ fn require_resolve<'s>(scope: &mut v8::PinScope<'s, '_>, args: v8::FunctionCallb
 }
 
 /// `require` resolving relative to `dir`.
-pub fn require_function<'s>(scope: &mut v8::PinScope<'s, '_>, dir: &Path) -> Option<v8::Local<'s, v8::Function>> {
+pub fn require_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    dir: &Path,
+) -> Option<v8::Local<'s, v8::Function>> {
     let data = str(scope, &dir.to_string_lossy());
-    let require = v8::Function::builder(require_callback).data(data.into()).build(scope)?;
-    let resolve = v8::Function::builder(require_resolve).data(data.into()).build(scope)?;
+    let require = v8::Function::builder(require_callback)
+        .data(data.into())
+        .build(scope)?;
+    let resolve = v8::Function::builder(require_resolve)
+        .data(data.into())
+        .build(scope)?;
     let key = str(scope, "resolve");
     require.set(scope, key.into(), resolve.into());
     Some(require)
@@ -408,7 +520,12 @@ pub fn clear(st: &State) {
 /// Files of every loaded module (for watchers).
 pub fn loaded_files(st: &State) -> Vec<PathBuf> {
     let map = st.modules.borrow();
-    map.esm.keys().chain(map.cjs.keys()).filter(|p| !is_url(p)).cloned().collect()
+    map.esm
+        .keys()
+        .chain(map.cjs.keys())
+        .filter(|p| !is_url(p))
+        .cloned()
+        .collect()
 }
 
 type Args<'s> = v8::FunctionCallbackArguments<'s>;
@@ -417,8 +534,16 @@ type Rv<'s> = v8::ReturnValue<'s, v8::Value>;
 /// hmrResolve(specifier, parentPath?) -> absolute path
 fn hmr_resolve<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let spec = args.get(0).to_rust_string_lossy(scope);
-    let parent = if args.get(1).is_string() { args.get(1).to_rust_string_lossy(scope) } else { String::new() };
-    let base = if parent.is_empty() { std::env::current_dir().unwrap_or_default() } else { dir_of(Path::new(&parent)) };
+    let parent = if args.get(1).is_string() {
+        args.get(1).to_rust_string_lossy(scope)
+    } else {
+        String::new()
+    };
+    let base = if parent.is_empty() {
+        std::env::current_dir().unwrap_or_default()
+    } else {
+        dir_of(Path::new(&parent))
+    };
     match resolve(&spec, &base, Kind::Import) {
         Ok(p) => rv.set(str(scope, &p.to_string_lossy()).into()),
         Err(e) => throw_error(scope, &e),

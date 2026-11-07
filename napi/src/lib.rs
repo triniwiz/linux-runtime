@@ -16,7 +16,7 @@ pub mod state;
 pub mod structs;
 pub mod sys;
 
-pub use nativescript_metadata::MetaFile;
+pub use nativescript_metadata::{MetaFile, MetaSet};
 
 use js::{Js, JsResult, Thrown};
 use state::State;
@@ -35,7 +35,10 @@ pub fn run_script(js: Js, source: &str, name: &str) -> JsResult<napi_value> {
 }
 
 const PRELUDES: [(&str, &str); 2] = [
-    ("nativescript:prelude", include_str!("../../core/js/prelude.js")),
+    (
+        "nativescript:prelude",
+        include_str!("../../core/js/prelude.js"),
+    ),
     ("nativescript:web", include_str!("../../core/js/web.js")),
 ];
 
@@ -57,7 +60,7 @@ pub struct Runtime {
 
 impl Runtime {
     /// `engine` names the engine in `process.versions`.
-    pub fn new(metadata: Arc<MetaFile>, engine: &str) -> Result<Self, String> {
+    pub fn new(metadata: Arc<MetaSet>, engine: &str) -> Result<Self, String> {
         let mut runtime = null_mut();
         let mut env = null_mut();
         unsafe {
@@ -69,8 +72,14 @@ impl Runtime {
         state::set_current(&*state);
         let mut scope = null_mut();
         unsafe { napi_open_handle_scope(env, &mut scope) };
-        let rt = Runtime { state, runtime, env, scope };
-        rt.install(engine).map_err(|_| rt.take_error("failed to initialize the runtime"))?;
+        let rt = Runtime {
+            state,
+            runtime,
+            env,
+            scope,
+        };
+        rt.install(engine)
+            .map_err(|_| rt.take_error("failed to initialize the runtime"))?;
         event_loop::install_livesync_signal();
         Ok(rt)
     }
@@ -112,7 +121,7 @@ impl Runtime {
         self.env
     }
 
-    pub fn metadata(&self) -> &MetaFile {
+    pub fn metadata(&self) -> &MetaSet {
         &self.state.meta
     }
 
@@ -127,7 +136,11 @@ impl Runtime {
 
     /// Runs a classic script. Uncaught exceptions are printed and returned as `Err`.
     pub fn run_script(&self, source: &str, name: &str) -> Result<(), String> {
-        self.scoped(|st| run_script(st.js(), source, name).map(|_| ()).map_err(|Thrown| None))
+        self.scoped(|st| {
+            run_script(st.js(), source, name)
+                .map(|_| ())
+                .map_err(|Thrown| None)
+        })
     }
 
     /// Runs a file, or an app directory, as the entry module.
