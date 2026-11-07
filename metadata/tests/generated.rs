@@ -142,3 +142,76 @@ fn record_layouts_and_const_strings() {
     let dup = file.find("g_strdup").unwrap();
     assert_eq!(dup.signature().unwrap()[0], Type::CString);
 }
+
+fn same(a: &nativescript_metadata::Meta, b: &nativescript_metadata::Meta) {
+    assert_eq!(a.kind(), b.kind());
+    assert_eq!(a.js_name(), b.js_name());
+    assert_eq!(a.name(), b.name());
+    assert_eq!(a.demangled_name(), b.demangled_name());
+    assert_eq!(a.flags(), b.flags());
+    assert_eq!(a.module().name(), b.module().name());
+    assert_eq!(
+        a.module().libraries().map(|l| l.name()).collect::<Vec<_>>(),
+        b.module().libraries().map(|l| l.name()).collect::<Vec<_>>()
+    );
+    assert_eq!(a.signature(), b.signature(), "{}", a.js_name());
+    assert_eq!(a.var_type(), b.var_type(), "{}", a.js_name());
+    assert_eq!(a.js_code(), b.js_code());
+    assert_eq!(a.fields(), b.fields(), "{}", a.js_name());
+    assert_eq!(a.record_layout(), b.record_layout(), "{}", a.js_name());
+}
+
+#[test]
+fn unfiltered_copy_is_identical() {
+    use nativescript_metadata::filter::{filter, Filter};
+    let Some(file) = metadata() else { return };
+    let (bytes, stats) = filter(&file, &Filter::new(None, None));
+    let copy = MetaFile::from_vec(bytes).unwrap();
+    assert_eq!(stats.kept, stats.declarations);
+    assert_eq!(copy.iter().count(), file.iter().count());
+    for meta in file.iter() {
+        let found = copy.find(meta.js_name()).expect(meta.js_name());
+        // duplicate js names resolve to the first, like the source
+        same(&file.find(meta.js_name()).unwrap(), &found);
+        assert!(copy.find_native(meta.name()).is_some(), "{}", meta.name());
+    }
+}
+
+#[test]
+fn filter_keeps_referenced_records() {
+    use nativescript_metadata::filter::{filter, Filter};
+    let Some(file) = metadata() else { return };
+    if file.find("gtk_widget_snapshot_child").is_none() {
+        return;
+    }
+    let (bytes, stats) = filter(
+        &file,
+        &Filter::new(
+            Some("Gtk:gtk_widget_*\nGLib:G_PRIORITY_*"),
+            Some("Gtk:gtk_widget_show"),
+        ),
+    );
+    let small = MetaFile::from_vec(bytes).unwrap();
+    assert!(stats.kept < stats.declarations / 10);
+    assert!(stats.dependencies > 0);
+    same(
+        &file.find("gtk_widget_measure").unwrap(),
+        &small.find("gtk_widget_measure").unwrap(),
+    );
+    assert!(small.find("gtk_widget_show").is_none());
+    assert!(small.find("gtk_button_new").is_none());
+    assert_eq!(
+        small.find("G_PRIORITY_DEFAULT").and_then(|m| m.js_code()),
+        Some("0")
+    );
+    // GtkAllocation from gtk_widget_size_allocate's signature
+    for meta in small.iter() {
+        for ty in meta.signature().unwrap_or_default() {
+            if let Type::Pointer(inner) = ty {
+                if let Type::Struct(name) = *inner {
+                    assert!(small.find(&name).is_some(), "{name} missing");
+                }
+            }
+        }
+    }
+}

@@ -5,6 +5,7 @@
 //! modules: i32 count, count x i32 heap offset; then the heap (offset 0 = null)
 //! ```
 
+pub mod filter;
 mod hash;
 mod types;
 
@@ -215,6 +216,16 @@ impl MetaFile {
         self.heap_i32(offset) as u32
     }
 
+    /// Whether the NUL terminated string at `offset` is `s`, without decoding it.
+    #[inline]
+    pub(crate) fn heap_str_is(&self, offset: Offset, s: &str) -> bool {
+        let bytes = self.heap_at(offset);
+        offset != 0
+            && bytes.len() > s.len()
+            && bytes[s.len()] == 0
+            && &bytes[..s.len()] == s.as_bytes()
+    }
+
     /// NUL terminated string stored at `offset` in the heap.
     pub(crate) fn heap_str(&self, offset: Offset) -> &str {
         if offset == 0 {
@@ -243,7 +254,7 @@ impl MetaFile {
         }
     }
 
-    fn bucket(&self, table: Table, name: &str) -> OffsetArray<'_> {
+    fn bucket(&self, table: Table, hash: u32) -> OffsetArray<'_> {
         if table.len == 0 {
             return OffsetArray {
                 file: self,
@@ -251,25 +262,34 @@ impl MetaFile {
                 len: 0,
             };
         }
-        let index = string_hash(name.as_bytes()) % table.len;
+        let index = hash % table.len;
         let bucket = read_i32(self.bytes(), table.start + index as usize * 4).unwrap_or(0);
         self.heap_array(bucket as u32)
     }
 
     /// Looks up a declaration by the name exposed to JavaScript.
     pub fn find(&self, js_name: &str) -> Option<Meta<'_>> {
-        self.bucket(self.js_table, js_name)
+        self.find_hashed(js_name, string_hash(js_name.as_bytes()))
+    }
+
+    /// [`MetaFile::find`] with the name's [`string_hash`] already computed.
+    pub fn find_hashed(&self, js_name: &str, hash: u32) -> Option<Meta<'_>> {
+        self.bucket(self.js_table, hash)
             .iter()
             .map(|o| Meta {
                 file: self,
                 offset: o,
             })
-            .find(|m| m.js_name() == js_name)
+            .find(|m| self.heap_str_is(m.js_name_ptr(), js_name))
     }
 
     /// Looks up a declaration by its native (C) name.
     pub fn find_native(&self, name: &str) -> Option<Meta<'_>> {
-        self.bucket(self.native_names, name)
+        self.find_native_hashed(name, string_hash(name.as_bytes()))
+    }
+
+    pub fn find_native_hashed(&self, name: &str, hash: u32) -> Option<Meta<'_>> {
+        self.bucket(self.native_names, hash)
             .iter()
             .map(|o| Meta {
                 file: self,
@@ -335,11 +355,15 @@ impl MetaSet {
     }
 
     pub fn find(&self, js_name: &str) -> Option<Meta<'_>> {
-        self.files.iter().find_map(|f| f.find(js_name))
+        let hash = string_hash(js_name.as_bytes());
+        self.files.iter().find_map(|f| f.find_hashed(js_name, hash))
     }
 
     pub fn find_native(&self, name: &str) -> Option<Meta<'_>> {
-        self.files.iter().find_map(|f| f.find_native(name))
+        let hash = string_hash(name.as_bytes());
+        self.files
+            .iter()
+            .find_map(|f| f.find_native_hashed(name, hash))
     }
 
     /// Id of a declaration (or module) offset inside `file`, a member of this set.
@@ -516,6 +540,14 @@ impl<'a> Meta<'a> {
 
     fn has_names_array(&self) -> bool {
         self.has_flag(flags::HAS_NAME) || self.has_flag(flags::HAS_DEMANGLED_NAME)
+    }
+
+    fn js_name_ptr(&self) -> Offset {
+        if self.has_names_array() {
+            self.file.heap_ptr(self.names_offset())
+        } else {
+            self.names_offset()
+        }
     }
 
     /// Name exposed to JavaScript (may differ from [`Meta::name`] when it

@@ -114,7 +114,7 @@ public:
 
         // Serialize Meta objects to binary metadata
         if (!cla_outputBinFile.empty()) {
-            binary::MetaFile file(metaContainer.size() / 10); // Average number of hash collisions: 10 per bucket
+            binary::MetaFile file(metaContainer.size() / 2); // ~2 entries per bucket keeps lookups short
             binary::BinarySerializer serializer(&file);
             serializer.serializeContainer(metasByModules);
             file.save(cla_outputBinFile);

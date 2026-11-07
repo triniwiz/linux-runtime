@@ -11,6 +11,7 @@
 #   framework/runtime/<x64|arm64>/ns-linux, metadata-<x86_64|aarch64>.bin
 #   framework/typings/*.d.ts
 #   framework/tools/<x64|arm64>/metadata-generator, lib/clang/<version>/include
+#   framework/tools/<x64|arm64>/ns-metadata-filter   native-api-usage.json filtering
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,7 +27,7 @@ case "$RUST_ARCH" in
 esac
 [ -f "$METADATA/metadata-$RUST_ARCH.bin" ] || { echo "missing $METADATA/metadata-$RUST_ARCH.bin" >&2; exit 1; }
 
-cargo build --release -p nativescript-cli -p nativescript-quickjs
+cargo build --release -p nativescript-cli -p nativescript-quickjs -p nativescript-metadata
 
 pack() {
     local name=$1 binary=$2 engine=$3
@@ -38,6 +39,9 @@ pack() {
     strip "$out/framework/runtime/$ARCH/ns-linux"
     cp "$METADATA/metadata-$RUST_ARCH.bin" "$out/framework/runtime/$ARCH/"
     cp "$TYPINGS"/*.d.ts "$out/framework/typings/" 2>/dev/null || true
+    mkdir -p "$out/framework/tools/$ARCH"
+    install -m 755 target/release/ns-metadata-filter "$out/framework/tools/$ARCH/"
+    strip "$out/framework/tools/$ARCH/ns-metadata-filter"
     if [ -x "$MDG/metadata-generator" ]; then
         mkdir -p "$out/framework/tools/$ARCH/lib"
         install -m 755 "$MDG/metadata-generator" "$out/framework/tools/$ARCH/"
