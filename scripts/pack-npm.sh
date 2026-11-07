@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 VERSION="${1:-$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "nativescript-runtime"))')}"
 METADATA="${METADATA:-metadata-generator/tests/TestOutput}"
 TYPINGS="${TYPINGS:-$METADATA/typings}"
-MDG="${MDG:-metadata-generator/build/bin}"
+MDG="${MDG:-metadata-generator/dist/$(uname -m)/bin}"
 RUST_ARCH="$(uname -m)"
 case "$RUST_ARCH" in
     x86_64) ARCH=x64 ;;

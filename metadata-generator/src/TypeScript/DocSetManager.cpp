@@ -3,7 +3,9 @@
 //
 
 #include "DocSetManager.h"
+#ifdef NS_DOCSETS
 #include <libxml/xpath.h>
+#endif
 #include <sstream>
 #include <unistd.h>
 
@@ -30,7 +32,7 @@ std::string& rtrim(std::string& s)
 }
 
 // trim from both ends
-std::string& trim(std::string& s)
+[[maybe_unused]] std::string& trim(std::string& s)
 {
     return ltrim(rtrim(s));
 }
@@ -44,6 +46,7 @@ void findAndReplaceIn(string& str, string searchFor, string replaceBy)
     };
 }
 
+#ifdef NS_DOCSETS
 xmlNodeSetPtr all(const xmlChar* xpath, xmlDocPtr doc, xmlXPathObjectPtr& result)
 {
     xmlXPathContextPtr context = xmlXPathNewContext(doc);
@@ -83,6 +86,7 @@ vector<string> innerTextOf(xmlNodeSetPtr xmlNodes, xmlDocPtr doc)
     }
     return result;
 }
+#endif
 }
 
 namespace TypeScript {
@@ -127,6 +131,10 @@ TSComment DocSetManager::getCommentFor(Meta::Meta* meta, Meta::Meta* parent)
 
 TSComment DocSetManager::getCommentFor(std::string name, Meta::MetaType type, std::string parentName, Meta::MetaType parentType)
 {
+#ifndef NS_DOCSETS
+    // Apple docsets only (iOS builds)
+    return TSComment();
+#else
     xmlDocPtr doc = getXmlDocFileFor(name, type, parentName, parentType);
 
     TSComment comment;
@@ -179,8 +187,10 @@ TSComment DocSetManager::getCommentFor(std::string name, Meta::MetaType type, st
 
     xmlFreeDoc(doc);
     return comment;
+#endif
 }
 
+#ifdef NS_DOCSETS
 xmlDocPtr DocSetManager::getXmlDocFileFor(std::string name, Meta::MetaType type, std::string parentName, Meta::MetaType parentType)
 {
     std::string parent = (parentName == "") ? "-" : parentName;
@@ -243,4 +253,5 @@ xmlDocPtr DocSetManager::getXmlDocFileFor(std::string name, Meta::MetaType type,
     }
     return nullptr;
 }
+#endif
 }

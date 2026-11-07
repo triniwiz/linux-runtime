@@ -7,9 +7,11 @@ IF(NOT DEFINED METADATA_BINARY_ARCH)
     set(METADATA_BINARY_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
 ENDIF(NOT DEFINED METADATA_BINARY_ARCH)
 
-find_package(LibXml2)
-if (NOT LIBXML2_FOUND)
-    message(FATAL_ERROR "libXML2 not found")
+# Apple docset comments in the typings (iOS); off keeps the binary free of libxml2/ICU
+option(NS_DOCSETS "Read Apple docsets with libxml2" OFF)
+if (NS_DOCSETS)
+    find_package(LibXml2 REQUIRED)
+    add_compile_definitions(NS_DOCSETS)
 endif ()
 
 # Same LLVM (Apple's llvm-project fork) the NativeScript iOS runtime uses,
@@ -27,7 +29,13 @@ set(LLVM_PREPROCESSOR_FLAGS "-isystem ${LLVM_ROOT}/include -D__STDC_CONSTANT_MAC
 # maintain a hand-ordered list of libraries like the iOS build does.
 file(GLOB LLVM_STATIC_LIBS "${LLVM_LIBDIR}/libclang*.a" "${LLVM_LIBDIR}/libLLVM*.a")
 list(FILTER LLVM_STATIC_LIBS EXCLUDE REGEX ".*/libclang\\.a$")
-set(LLVM_LINK_LIBS -Wl,--start-group ${LLVM_STATIC_LIBS} -Wl,--end-group z m pthread dl)
+# zlib, libstdc++ and libgcc linked statically: the binary only needs glibc
+find_library(ZLIB_STATIC NAMES libz.a)
+if (NOT ZLIB_STATIC)
+    set(ZLIB_STATIC z)
+endif ()
+set(LLVM_LINK_LIBS -Wl,--start-group ${LLVM_STATIC_LIBS} -Wl,--end-group ${ZLIB_STATIC} m pthread dl)
+add_link_options(-static-libstdc++ -static-libgcc)
 
 set(CMAKE_BUILD_TYPE Release)
 
