@@ -183,6 +183,24 @@ pub fn is_url(p: &Path) -> bool {
 
 static APP_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 
+/// A Worker script path: `~/` and relative paths are in the app folder (bundled worker chunks
+/// sit next to the bundle), `file://` URLs and absolute paths as given.
+pub fn worker_script(spec: &str) -> PathBuf {
+    if let Some(p) = spec.strip_prefix("file://") {
+        return PathBuf::from(p);
+    }
+    let rest = spec.strip_prefix("~/").unwrap_or(spec);
+    if rest.starts_with('/') {
+        return PathBuf::from(rest);
+    }
+    let root = APP_ROOT
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    root.join(rest.strip_prefix("./").unwrap_or(rest))
+}
+
 /// Dev loader settings (`ns:module` `configureLoader`, sent by the Vite dev server).
 #[derive(Default)]
 struct Loader {
@@ -302,6 +320,22 @@ fn resolve_uncanonical(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, S
     if spec.starts_with("http://") || spec.starts_with("https://") || spec.starts_with("ns:") {
         return Ok(PathBuf::from(spec));
     }
+    // native libraries bundled with the app, in lib/ next to the executable (as on Android and Windows)
+    if let Some(rest) = spec.strip_prefix("system_lib://") {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let path = exe
+            .parent()
+            .map(|d| d.join("lib").join(rest))
+            .unwrap_or_else(|| PathBuf::from(rest));
+        return if path.is_file() {
+            Ok(path)
+        } else {
+            Err(format!(
+                "Cannot find module '{spec}' at '{}'",
+                path.display()
+            ))
+        };
+    }
     let bare = !(spec.starts_with('/')
         || spec.starts_with('.')
         || spec.starts_with("~/")
@@ -347,14 +381,57 @@ fn resolve_uncanonical(spec: &str, base: &Path, kind: Kind) -> Result<PathBuf, S
 }
 
 fn looks_like_esm(source: &str) -> bool {
-    source.lines().any(|l| {
-        let l = l.trim_start();
-        (l.starts_with("import ")
-            || l.starts_with("import{")
-            || l.starts_with("import*")
-            || l.starts_with("export "))
+    // only statements count: lines that start inside a comment or template literal don't
+    let (mut in_comment, mut in_template) = (false, false);
+    for line in source.lines() {
+        let l = line.trim_start();
+        if !in_comment
+            && !in_template
+            && (l.starts_with("import ")
+                || l.starts_with("import{")
+                || l.starts_with("import*")
+                || l.starts_with("export "))
             && !l.starts_with("import(")
-    })
+        {
+            return true;
+        }
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            let next = bytes.get(i + 1).copied();
+            if in_comment {
+                if c == b'*' && next == Some(b'/') {
+                    in_comment = false;
+                    i += 1;
+                }
+            } else if in_template {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == b'`' {
+                    in_template = false;
+                }
+            } else if c == b'/' && next == Some(b'/') {
+                break;
+            } else if c == b'/' && next == Some(b'*') {
+                in_comment = true;
+                i += 1;
+            } else if c == b'`' {
+                in_template = true;
+            } else if c == b'"' || c == b'\'' {
+                // a one-line string
+                i += 1;
+                while i < bytes.len() && bytes[i] != c {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            i += 1;
+        }
+    }
+    false
 }
 
 pub fn format_of(path: &Path) -> Format {
@@ -416,4 +493,21 @@ pub fn dir_of(path: &Path) -> PathBuf {
     path.parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+#[cfg(test)]
+mod esm_detection {
+    use super::looks_like_esm;
+
+    #[test]
+    fn esm_detection_skips_comments() {
+        assert!(looks_like_esm("import x from './x';"));
+        assert!(looks_like_esm("const a = 1;\nexport const b = 2;"));
+        assert!(!looks_like_esm(
+            "/*\nexport class DOMMatrix {}\n*/\nmodule.exports = 1;"
+        ));
+        assert!(!looks_like_esm("const s = `\nexport default 1\n`;"));
+        assert!(!looks_like_esm("// export const x = 1\nrequire('./x');"));
+        assert!(!looks_like_esm("import('./lazy');"));
+    }
 }

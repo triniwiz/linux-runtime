@@ -122,10 +122,7 @@ fn run_worker(
 fn spawn<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let st = state(scope);
     let spec = args.get(0).to_rust_string_lossy(scope);
-    let path = match spec.strip_prefix("file://") {
-        Some(p) => PathBuf::from(p),
-        None => std::env::current_dir().unwrap_or_default().join(&spec),
-    };
+    let path = nativescript_core::resolve::worker_script(&spec);
     if !path.is_file() {
         return throw_error(
             scope,
