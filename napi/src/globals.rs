@@ -9,6 +9,10 @@ use crate::{ffi, interop};
 use nativescript_metadata::{Meta, MetaKind, Type};
 use std::ptr::null_mut;
 
+/// `__tsEnum` of core/js/prelude.js: C enums as TypeScript style two-way maps.
+#[cfg(not(feature = "engine"))]
+const TS_ENUM: &str = "function (obj) { const r = {}; for (const k of Object.keys(obj)) { r[k] = obj[k]; r[obj[k]] = k; } return r; }";
+
 /// JS value for a declaration, and whether it can be memoized on the global.
 fn resolve(st: &State, meta: Meta) -> Result<Option<(napi_value, bool)>, String> {
     let js = st.js();
@@ -29,6 +33,9 @@ fn resolve(st: &State, meta: Meta) -> Result<Option<(napi_value, bool)>, String>
         }
         MetaKind::JsCode => {
             let code = meta.js_code().unwrap_or("undefined");
+            // an addon has no prelude: its enum helper stays local
+            #[cfg(not(feature = "engine"))]
+            let code = &format!("(function (__tsEnum) {{ return ({code}); }})({TS_ENUM})");
             (
                 crate::run_script(js, code, meta.js_name())
                     .map_err(|_| "failed to evaluate constant")?,
