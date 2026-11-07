@@ -121,6 +121,9 @@ fn require_any(st: &State, path: &Path) -> Load<napi_value> {
             parse_json(st.js(), &text)
         }
         Format::Addon => load_addon(st, path),
+        #[cfg(feature = "module_runner")]
+        Format::Esm => crate::esm::require(st, path),
+        #[cfg(not(feature = "module_runner"))]
         Format::Esm => Err(Some(format!(
             "{}: ES modules aren't supported on this engine yet",
             path.display()
@@ -182,7 +185,11 @@ pub fn require_function(js: Js, dir: &Path) -> napi_value {
 /// Runs the entry file as a CommonJS module.
 pub fn run_entry(st: &State, path: &Path) -> Load<()> {
     match format_of(path) {
-        Format::CommonJs | Format::Esm => require_any(st, path).map(|_| ()),
+        #[cfg(feature = "module_runner")]
+        Format::Esm => crate::esm::run_entry(st, path),
+        #[cfg(not(feature = "module_runner"))]
+        Format::Esm => require_any(st, path).map(|_| ()),
+        Format::CommonJs => require_any(st, path).map(|_| ()),
         _ => Err(Some(format!("{} isn't a script", path.display()))),
     }
 }

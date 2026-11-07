@@ -6,6 +6,7 @@ C APIs (libc, GLib, ...) exposed to JavaScript from generated metadata.
 - `metadata/` – Rust reader for the binary metadata.
 - `runtime/` – V8 runtime (rusty_v8) that resolves globals from metadata and calls C through libffi.
 - `cli/` – `ns-linux`, runs a script.
+- `napi/` – the same runtime written against Node-API, run on QuickJS, V8, JavaScriptCore and Hermes by `engines/` (see `engines/README.md`).
 
 ## Build
 

@@ -5,6 +5,8 @@ mod app_bundle;
 pub mod cli;
 #[cfg(feature = "compat")]
 pub mod compat;
+#[cfg(feature = "module_runner")]
+pub mod esm;
 pub mod event_loop;
 pub mod ffi;
 pub mod globals;

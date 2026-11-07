@@ -1,6 +1,28 @@
 [workspace]
 resolver = "2"
-members = ["metadata", "core", "runtime", "cli", "napi", "engines/quickjs"]
+members = [
+    "metadata",
+    "core",
+    "runtime",
+    "cli",
+    "napi",
+    "engines/quickjs",
+    "engines/buffer",
+    "engines/v8",
+    "engines/jsc",
+    "engines/hermes",
+]
+# jsc and hermes need an engine library (system JavaScriptCore, engines/hermes/build-hermes.sh)
+default-members = [
+    "metadata",
+    "core",
+    "runtime",
+    "cli",
+    "napi",
+    "engines/quickjs",
+    "engines/buffer",
+    "engines/v8",
+]
 
 [workspace.package]
 version = "0.1.0"

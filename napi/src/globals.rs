@@ -103,20 +103,38 @@ unsafe extern "C" fn lookup_get(env: napi_env, info: napi_callback_info) -> napi
     }
 }
 
+/// Whether the Proxy could go in the global's prototype chain.
 const PROXY: &str = r#"(function (has, get) {
   const g = globalThis;
-  const proto = Object.getPrototypeOf(g);
-  Object.setPrototypeOf(g, new Proxy(proto, {
-    has: (t, k) => Reflect.has(t, k) || (typeof k === 'string' && has(k)),
-    get: (t, k, r) => (typeof k !== 'string' || Reflect.has(t, k)) ? Reflect.get(t, k, r) : get(k),
-  }));
+  try {
+    Object.setPrototypeOf(g, new Proxy(Object.getPrototypeOf(g), {
+      has: (t, k) => Reflect.has(t, k) || (typeof k === 'string' && has(k)),
+      get: (t, k, r) => (typeof k !== 'string' || Reflect.has(t, k)) ? Reflect.get(t, k, r) : get(k),
+    }));
+    return true;
+  } catch (e) {
+    return false;
+  }
 })"#;
+
+/// `js_set_global_lookup(env, has, get)`: engines that forbid proxies in the
+/// global's prototype chain (JavaScriptCore) resolve unknown globals with these.
+type GlobalLookup = unsafe extern "C" fn(napi_env, napi_value, napi_value) -> napi_status;
 
 pub fn install(st: &State) -> JsResult<()> {
     let js = st.js();
     let init = crate::run_script(js, PROXY, "nativescript:globals")?;
     let has = js.function("has", Some(lookup_has), null_mut());
     let get = js.function("get", Some(lookup_get), null_mut());
-    js.call(init, js.undefined(), &[has, get])?;
-    Ok(())
+    let installed = js.call(init, js.undefined(), &[has, get])?;
+    if js.bool_of(installed) {
+        return Ok(());
+    }
+    let hook = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"js_set_global_lookup".as_ptr()) };
+    if hook.is_null() {
+        js.throw("this engine can't resolve globals from metadata");
+        return Err(Thrown);
+    }
+    let hook: GlobalLookup = unsafe { std::mem::transmute(hook) };
+    ok(unsafe { hook(js.0, has, get) })
 }
