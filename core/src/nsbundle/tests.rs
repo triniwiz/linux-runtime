@@ -365,3 +365,105 @@ fn mounted_lookups() {
     let resolved = crate::resolve::resolve("./", &root, crate::resolve::Kind::Require).unwrap();
     assert_eq!(resolved, root.join("bundle.js"));
 }
+
+fn data_offset(raw: &[u8], i: usize) -> usize {
+    let data_at = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+    let rec = &raw[HEADER_LEN + i * RECORD_LEN..];
+    (data_at + u64::from_le_bytes(rec[16..24].try_into().unwrap())) as usize
+}
+
+#[test]
+fn resealed_entry_fails_integrity() {
+    // the key is recoverable from the runtime binary: re-sealing with it must not pass
+    let (app, out) = sample("reseal");
+    let key = [5u8; 32];
+    let report = pack_dir(&app, &out, &options(Some((KeyMode::Embedded, key)))).unwrap();
+    let mut fuses = plain_fuses();
+    fuses.set(Fuse::BundleIntegrity, true);
+    fuses.integrity = Some(report.toc_hash);
+    fuses.key = Some(key);
+
+    let mut raw = fs::read(&out).unwrap();
+    let c = Container::open(&out, Some(key), false).unwrap();
+    let i = c.find("bundle.js").unwrap();
+    let rec = &raw[HEADER_LEN + i * RECORD_LEN..][..RECORD_LEN];
+    let nonce: [u8; 12] = rec[40..52].try_into().unwrap();
+    let mut evil = b"console.log('XX');".to_vec();
+    crypto::seal(&key, nonce, b"bundle.js", &mut evil);
+    let at = data_offset(&raw, i);
+    raw[at..at + evil.len()].copy_from_slice(&evil);
+    fs::write(&out, &raw).unwrap();
+
+    let c = open(&out, &fuses).unwrap();
+    let err = c.read(c.find("bundle.js").unwrap()).err().unwrap();
+    assert!(err.contains("integrity"), "{err}");
+    assert!(c.read(c.find("package.json").unwrap()).is_ok());
+    // without the fuse, GCM still opens it
+    let c = Container::open(&out, Some(key), false).unwrap();
+    assert_eq!(&*c.read(i).unwrap(), b"console.log('XX');");
+}
+
+#[test]
+fn unpacked_entries_are_checked_on_every_read() {
+    let (app, out) = sample("unpacked-recheck");
+    pack_dir(&app, &out, &options(None)).unwrap();
+    let c = Container::open(&out, None, true).unwrap();
+    let i = c.find("fonts/Ahem.ttf").unwrap();
+    assert!(c.read(i).is_ok());
+    fs::write(c.unpacked_path(i).unwrap(), b"swapped").unwrap();
+    assert!(c.read(i).is_err());
+}
+
+#[test]
+fn packed_modes_drop_special_and_write_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    let (app, out) = sample("modes");
+    let addon = app.join("native/addon.node");
+    fs::set_permissions(&addon, fs::Permissions::from_mode(0o6777)).unwrap();
+    pack_dir(&app, &out, &options(None)).unwrap();
+    let c = Container::open(&out, None, false).unwrap();
+    let i = c.find("native/addon.node").unwrap();
+    assert_eq!(c.entry(i).mode, 0o755);
+    let disk = fs::metadata(c.unpacked_path(i).unwrap()).unwrap();
+    assert_eq!(disk.permissions().mode() & 0o7777, 0o755);
+}
+
+#[test]
+fn mutated_tables_never_panic() {
+    for seal in [None, Some((KeyMode::Embedded, [6u8; 32]))] {
+        let (app, out) = sample("fuzz");
+        pack_dir(&app, &out, &options(seal)).unwrap();
+        let good = fs::read(&out).unwrap();
+        let data_at = u64::from_le_bytes(good[24..32].try_into().unwrap()) as usize;
+        let key = seal.map(|s| s.1);
+        let count = u32::from_le_bytes(good[12..16].try_into().unwrap()) as usize;
+        let mut cases: Vec<(usize, Vec<u8>)> = Vec::new();
+        for at in 0..data_at {
+            for value in [0u8, 1, 0x7f, 0x80, 0xff, good[at] ^ 0x10] {
+                cases.push((at, vec![value]));
+            }
+        }
+        // offset, stored and size fields near u64::MAX
+        for i in 0..count {
+            for field in [16, 24, 32] {
+                for v in [u64::MAX, u64::MAX - 8] {
+                    cases.push((HEADER_LEN + i * RECORD_LEN + field, v.to_le_bytes().to_vec()));
+                }
+            }
+        }
+        for (at, bytes) in cases {
+            {
+                let mut raw = good.clone();
+                raw[at..at + bytes.len()].copy_from_slice(&bytes);
+                fs::write(&out, &raw).unwrap();
+                let Ok(c) = Container::open(&out, key, true) else {
+                    continue;
+                };
+                for i in 0..c.len() {
+                    let _ = c.read(i);
+                    let _ = c.list(c.name(i));
+                }
+            }
+        }
+    }
+}

@@ -36,6 +36,7 @@ pub enum KeyMode {
 
 #[derive(Clone, Debug)]
 pub struct Entry {
+    /// range in `Container::names`
     name: (usize, usize),
     pub kind: Kind,
     pub mode: u32,
@@ -43,6 +44,7 @@ pub struct Entry {
     stored: u64,
     pub size: u64,
     nonce: [u8; 12],
+    /// of the content; of the ciphertext for sealed entries
     pub sha256: [u8; 32],
 }
 
@@ -67,6 +69,8 @@ pub struct Container {
     // private copy-on-write mapping: JS may write to zero-copy buffers without faulting
     map: memmap2::MmapMut,
     entries: Vec<Entry>,
+    // copied out: the file can change under the mapping
+    names: String,
     data_at: usize,
     pub key_mode: KeyMode,
     key: Option<[u8; 32]>,
@@ -184,11 +188,11 @@ impl Container {
                 sha256: r[56..88].try_into().unwrap(),
             };
             let expected = match kind {
-                Kind::Stored => e.size,
-                Kind::Sealed => e.size + crypto::TAG_LEN as u64,
-                Kind::Unpacked => 0,
+                Kind::Stored => Some(e.size),
+                Kind::Sealed => e.size.checked_add(crypto::TAG_LEN as u64),
+                Kind::Unpacked => Some(0),
             };
-            if e.stored != expected
+            if Some(e.stored) != expected
                 || e.offset
                     .checked_add(e.stored)
                     .is_none_or(|end| end > data_len)
@@ -197,22 +201,28 @@ impl Container {
             }
             entries.push(e);
         }
-        let name = |e: &Entry| std::str::from_utf8(&b[e.name.0..e.name.0 + e.name.1]);
-        for (i, e) in entries.iter().enumerate() {
-            let n = name(e).map_err(|_| format!("entry {i}: name isn't UTF-8"))?;
+        let mut names = String::with_capacity(names_len);
+        let mut previous = 0..0;
+        for (i, e) in entries.iter_mut().enumerate() {
+            let n = std::str::from_utf8(&b[e.name.0..e.name.0 + e.name.1])
+                .map_err(|_| format!("entry {i}: name isn't UTF-8"))?;
             if !valid_name(n) {
                 return Err(format!("entry {i}: invalid name {n:?}"));
             }
             // sorted and unique: lookups are binary searches
-            if i > 0 && name(&entries[i - 1]).unwrap().as_bytes() >= n.as_bytes() {
+            if i > 0 && names[previous.clone()].as_bytes() >= n.as_bytes() {
                 return Err("entries aren't sorted".into());
             }
+            previous = names.len()..names.len() + n.len();
+            e.name = (names.len(), n.len());
+            names.push_str(n);
         }
         let toc_hash = crypto::sha256(&b[..toc_end]);
         let verified = (0..count).map(|_| AtomicBool::new(false)).collect();
         Ok(Container {
             map,
             entries,
+            names,
             data_at,
             key_mode,
             key,
@@ -250,9 +260,7 @@ impl Container {
     }
 
     pub fn name(&self, i: usize) -> &str {
-        let (at, len) = self.entries[i].name;
-        // validated in parse()
-        unsafe { std::str::from_utf8_unchecked(&self.map[at..at + len]) }
+        self.name_of(&self.entries[i])
     }
 
     fn lower_bound(&self, key: &str) -> usize {
@@ -261,7 +269,7 @@ impl Container {
     }
 
     fn name_of(&self, e: &Entry) -> &str {
-        unsafe { std::str::from_utf8_unchecked(&self.map[e.name.0..e.name.0 + e.name.1]) }
+        &self.names[e.name.0..e.name.0 + e.name.1]
     }
 
     /// Index of the file `name` (relative, `/` separated).
@@ -322,7 +330,10 @@ impl Container {
                 self.name(i)
             ));
         }
-        self.verified[i].store(true, Ordering::Relaxed);
+        // unpacked files are read from disk again each time
+        if self.entries[i].kind != Kind::Unpacked {
+            self.verified[i].store(true, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -361,13 +372,11 @@ impl Container {
         let at = self.data_at + e.offset as usize;
         let key = self.key.as_ref().ok_or("no key")?;
         let name = self.name(i);
-        let plain = crypto::open(
-            key,
-            e.nonce,
-            name.as_bytes(),
-            &self.map[at..at + e.stored as usize],
-        )
-        .ok_or_else(|| format!("{name}: can't decrypt (tampered bundle or wrong key)"))?;
+        let sealed = &self.map[at..at + e.stored as usize];
+        // the key ships in the runtime binary, so GCM alone doesn't stop re-sealed content
+        self.check(i, sealed)?;
+        let plain = crypto::open(key, e.nonce, name.as_bytes(), sealed)
+            .ok_or_else(|| format!("{name}: can't decrypt (tampered bundle or wrong key)"))?;
         let plain = Arc::new(plain);
         let mut cache = self.cache.lock().unwrap();
         if name == "package.json" || name.ends_with("/package.json") {

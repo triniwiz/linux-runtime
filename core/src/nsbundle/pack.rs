@@ -128,22 +128,24 @@ pub fn pack_dir(input: &Path, output: &Path, options: &PackOptions) -> io::Resul
     let mut unpacked = 0;
     for (rel, path) in &files {
         let mut data = fs::read(path)?;
-        let mode = fs::metadata(path)?.permissions().mode();
+        // no setuid/setgid/sticky or group/other write in a shipped app
+        let mode = fs::metadata(path)?.permissions().mode() & 0o755;
         let size = data.len() as u64;
         let hash = crypto::sha256(&data);
         let (kind, nonce, digest) = if unpack(rel) {
             let target = unpacked_dir.join(rel);
             fs::create_dir_all(target.parent().unwrap())?;
             fs::write(&target, &data)?;
-            fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))?;
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
             unpacked += 1;
             data.clear();
             (Kind::Unpacked, [0u8; 12], hash)
         } else if let Some((_, key)) = &options.seal {
             let nonce = crypto::random::<12>();
             crypto::seal(key, nonce, rel.as_bytes(), &mut data);
-            // a plaintext hash would let anyone confirm guesses of the content
-            (Kind::Sealed, nonce, [0u8; 32])
+            // of the ciphertext: a plaintext hash would let anyone confirm guesses of the content
+            let digest = crypto::sha256(&data);
+            (Kind::Sealed, nonce, digest)
         } else {
             (Kind::Stored, [0u8; 12], hash)
         };
