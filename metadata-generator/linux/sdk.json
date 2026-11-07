@@ -270,6 +270,20 @@
       "headers": [
         "gtk/gtk.h"
       ]
+    },
+    {
+      "name": "fontconfig",
+      "umbrella": [
+        "/usr/include/fontconfig"
+      ],
+      "pkg-config": [
+        "fontconfig",
+        "pangoft2"
+      ],
+      "headers": [
+        "fontconfig/fontconfig.h",
+        "pango/pangofc-fontmap.h"
+      ]
     }
   ]
 }

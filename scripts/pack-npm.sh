@@ -40,7 +40,7 @@ pack() {
     cp "$METADATA/metadata-$RUST_ARCH.bin" "$out/framework/runtime/$ARCH/"
     cp "$TYPINGS"/*.d.ts npm/typings/linux-runtime.d.ts "$out/framework/typings/" 2>/dev/null || true
     # GUI stack only: libc / icu declarations clash with other platforms' typings
-    for m in GLib Gtk pango cairo gdk_pixbuf graphene harfbuzz; do
+    for m in GLib Gtk pango cairo gdk_pixbuf graphene harfbuzz fontconfig; do
         [ -f "$out/framework/typings/c!$m.d.ts" ] && echo "/// <reference path=\"./c!$m.d.ts\" />"
     done > "$out/framework/typings/index.d.ts"
     echo '/// <reference path="./linux-runtime.d.ts" />' >> "$out/framework/typings/index.d.ts"
