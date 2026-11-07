@@ -247,7 +247,8 @@
           children(v, (entry) => {
             const key = g_variant_get_child_value(entry, 0);
             const value = g_variant_get_child_value(entry, 1);
-            out[String(unpack(key))] = unpack(value);
+            // defined, not assigned: a "__proto__" key mustn't replace the prototype
+            Object.defineProperty(out, String(unpack(key)), { value: unpack(value), enumerable: true, writable: true, configurable: true });
             g_variant_unref(key);
             g_variant_unref(value);
           });

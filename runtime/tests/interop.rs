@@ -309,3 +309,15 @@ fn zero_copy_buffers() {
       eq(interop.handleof(js).toBigInt(), interop.handleof(view).toBigInt(), 'same address');
     "#);
 }
+
+#[test]
+fn gvariant_dict_keys_stay_data() {
+    run(r#"
+      const v = g_variant_parse(null, '{"__proto__": <{"polluted": <1>}>, "a": <2>}', null, null, null);
+      const o = g_variant_unpack(v);
+      g_variant_unref(v);
+      eq(Object.getPrototypeOf(o) === Object.prototype, true, "prototype kept");
+      eq(Object.keys(o), ["__proto__", "a"], "keys");
+      eq(o.polluted, undefined, "no inherited keys");
+    "#);
+}
