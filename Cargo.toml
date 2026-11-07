@@ -10,8 +10,9 @@ members = [
     "engines/buffer",
     "engines/v8",
     "engines/jsc",
+    "engines/hermes",
 ]
-# jsc links the system JavaScriptCore (libjavascriptcoregtk)
+# jsc and hermes need an engine library (system JavaScriptCore, engines/hermes/build-hermes.sh)
 default-members = [
     "metadata",
     "core",
