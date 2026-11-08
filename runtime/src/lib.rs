@@ -5,6 +5,7 @@ mod app_bundle;
 mod event_loop;
 mod fast;
 mod ffi;
+mod frames;
 mod globals;
 mod handles;
 mod inspector;
@@ -296,6 +297,7 @@ impl Drop for Runtime {
         }
         event_loop::set_current(None);
         self.state.timers.borrow_mut().clear();
+        frames::cancel(&self.state);
         self.state.rejections.borrow_mut().clear();
     }
 }

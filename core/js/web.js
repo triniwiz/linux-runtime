@@ -238,6 +238,35 @@
   define('EventTarget', EventTarget);
   define('reportError', reportError);
 
+  if (natives.requestFrame) {
+    let nextFrameId = 0;
+    let frameCallbacks = new Map();
+    natives.setFrameHandler((time) => {
+      // callbacks requested from these run next frame
+      const due = frameCallbacks;
+      frameCallbacks = new Map();
+      for (const callback of due.values()) {
+        try {
+          callback(time);
+        } catch (e) {
+          reportError(e);
+        }
+      }
+    });
+    define('requestAnimationFrame', (callback) => {
+      if (typeof callback !== 'function') {
+        throw new TypeError("Failed to execute 'requestAnimationFrame': parameter 1 is not a function.");
+      }
+      const id = ++nextFrameId;
+      frameCallbacks.set(id, callback);
+      natives.requestFrame();
+      return id;
+    });
+    define('cancelAnimationFrame', (id) => {
+      frameCallbacks.delete(id);
+    });
+  }
+
   class AbortSignal extends EventTarget {
     #aborted = false;
     #reason;

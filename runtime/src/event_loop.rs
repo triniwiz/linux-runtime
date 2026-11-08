@@ -43,7 +43,7 @@ pub fn set_current(st: Option<Rc<State>>) {
     CURRENT.with(|c| *c.borrow_mut() = st);
 }
 
-fn current() -> Option<Rc<State>> {
+pub(crate) fn current() -> Option<Rc<State>> {
     CURRENT.with(|c| c.borrow().clone())
 }
 
@@ -155,7 +155,10 @@ pub fn schedule_microtasks(st: &State) {
 
 /// Whether the loop has work keeping it alive.
 pub fn alive(st: &State) -> bool {
-    !st.timers.borrow().is_empty() || st.loop_refs.get() > 0 || st.microtasks_scheduled.get()
+    !st.timers.borrow().is_empty()
+        || st.loop_refs.get() > 0
+        || st.microtasks_scheduled.get()
+        || crate::frames::pending(st)
 }
 
 /// Runs the GLib main context until no timers / references are left.

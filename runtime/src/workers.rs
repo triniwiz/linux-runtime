@@ -198,6 +198,7 @@ fn stop_worker(link: &Link) {
             Box::new(|st| {
                 st.loop_refs.set(0);
                 st.timers.borrow_mut().clear();
+                crate::frames::cancel(st);
             }),
         );
     }
@@ -217,6 +218,7 @@ fn close<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, _rv: Rv<'s>) {
     let st = state(scope);
     st.loop_refs.set(0);
     st.timers.borrow_mut().clear();
+    crate::frames::cancel(&st);
 }
 
 fn set_dispatch<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {

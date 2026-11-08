@@ -33,6 +33,7 @@ pub struct State {
     /// set in worker runtimes
     pub parent: RefCell<Option<crate::workers::Parent>>,
     pub timers: RefCell<HashMap<u32, crate::event_loop::Timer>>,
+    pub frames: crate::frames::Frames,
     pub next_timer: Cell<u32>,
     pub loop_refs: Cell<i32>,
     pub microtasks_scheduled: Cell<bool>,
@@ -69,6 +70,7 @@ impl State {
             inspector: Default::default(),
             napi_addons: Default::default(),
             timers: Default::default(),
+            frames: Default::default(),
             next_timer: Cell::new(0),
             loop_refs: Cell::new(0),
             microtasks_scheduled: Cell::new(false),
