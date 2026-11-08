@@ -381,6 +381,7 @@ pub fn create<'s>(scope: &mut v8::PinScope<'s, '_>, argv: &[String]) -> v8::Loca
     set!("btoa", btoa);
     set!("atob", atob);
     set!("randomFill", random_fill);
+    set!("subtle", crate::subtle::subtle);
     set!("now", now);
     set!("hrtime", hrtime);
     set!("exit", exit);

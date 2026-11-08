@@ -326,6 +326,7 @@ pub fn create(js: Js, argv: &[String], engine: &str) -> napi_value {
         ("btoa", btoa),
         ("atob", atob),
         ("randomFill", random_fill),
+        ("subtle", crate::subtle::subtle),
         ("now", now),
         ("hrtime", hrtime),
         ("exit", exit),
