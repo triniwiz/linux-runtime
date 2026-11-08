@@ -5,6 +5,7 @@ mod app_bundle;
 mod event_loop;
 mod fast;
 mod ffi;
+mod frames;
 mod globals;
 mod handles;
 mod inspector;
@@ -170,6 +171,9 @@ impl Runtime {
             None,
         );
         let ran = v8::Script::compile(tc, source, Some(&origin)).and_then(|script| script.run(tc));
+        if tc.has_terminated() {
+            return Ok(());
+        }
         if let Some(exception) = tc.exception() {
             let message = tc.message();
             let text = report_exception(tc, exception, message);
@@ -265,6 +269,9 @@ impl Runtime {
         let scope = &mut v8::ContextScope::new(scope, context);
         v8::tc_scope!(let tc, scope);
         let outcome = modules::run_entry(tc, &self.state, &path);
+        if tc.has_terminated() {
+            return Ok(());
+        }
         if let Some(exception) = tc.exception() {
             let message = tc.message();
             return Err(report_exception(tc, exception, message));
@@ -290,6 +297,7 @@ impl Drop for Runtime {
         }
         event_loop::set_current(None);
         self.state.timers.borrow_mut().clear();
+        frames::cancel(&self.state);
         self.state.rejections.borrow_mut().clear();
     }
 }

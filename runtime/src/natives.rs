@@ -12,7 +12,7 @@ fn str<'s>(scope: &mut v8::PinScope<'s, '_>, s: &str) -> v8::Local<'s, v8::Strin
     v8::String::new(scope, s).unwrap()
 }
 
-fn start() -> Instant {
+pub(crate) fn start() -> Instant {
     static START: OnceLock<Instant> = OnceLock::new();
     *START.get_or_init(Instant::now)
 }

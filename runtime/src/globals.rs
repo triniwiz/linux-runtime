@@ -174,6 +174,7 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State) -> Result<(), S
     let natives = crate::natives::create(scope, &argv);
     crate::net::install(scope, natives);
     crate::workers::install(scope, st, natives);
+    crate::frames::install(scope, natives);
     crate::modules::install_hmr(scope, natives);
     crate::app_bundle::install(scope, natives);
     for (name, code) in PRELUDES {
