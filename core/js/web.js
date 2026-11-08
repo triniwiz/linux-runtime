@@ -396,7 +396,19 @@
     return clone(value);
   });
 
+  class CryptoKey {
+    constructor() {
+      throw new TypeError('Illegal constructor');
+    }
+  }
+  const subtle = {};
+  for (const op of ['digest', 'generateKey', 'importKey', 'exportKey', 'sign', 'verify', 'encrypt', 'decrypt', 'deriveBits', 'deriveKey', 'wrapKey', 'unwrapKey']) {
+    subtle[op] = (...args) => new Promise((resolve) => resolve(natives.subtle(op, args, CryptoKey.prototype)));
+  }
+  define('CryptoKey', CryptoKey);
+
   const crypto = {
+    subtle,
     getRandomValues: (array) => natives.randomFill(array),
     randomUUID() {
       const b = natives.randomFill(new Uint8Array(16));

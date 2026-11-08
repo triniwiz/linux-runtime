@@ -17,6 +17,7 @@ mod natives;
 mod net;
 mod state;
 mod structs;
+mod subtle;
 mod workers;
 
 pub use nativescript_metadata::{MetaFile, MetaSet};
