@@ -36,6 +36,7 @@
         invalidateModules: (urls) => natives.devInvalidate(Array.from(urls ?? [], String)),
         getLoadedModuleUrls: () => natives.devLoaded(),
         createRequire: (file) => natives.devCreateRequire(String(file?.href ?? file)),
+        setDevBootComplete: (done) => natives.devSetBootComplete(!!done),
       }),
     );
   }

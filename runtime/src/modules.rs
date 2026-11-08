@@ -682,6 +682,10 @@ fn dev_create_require<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut 
     }
 }
 
+fn dev_set_boot_complete<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    crate::net::set_dev_boot_complete(args.get(0).boolean_value(scope));
+}
+
 fn dev_set_builtin<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
     if let Ok(o) = v8::Local::<v8::Object>::try_from(args.get(0)) {
         state(scope).modules.borrow_mut().builtin = Some(v8::Global::new(scope, o));
@@ -707,4 +711,5 @@ pub fn install_hmr<'s>(scope: &mut v8::PinScope<'s, '_>, natives: v8::Local<'s, 
     set!("devLoaded", dev_loaded);
     set!("devCreateRequire", dev_create_require);
     set!("devSetBuiltin", dev_set_builtin);
+    set!("devSetBootComplete", dev_set_boot_complete);
 }
