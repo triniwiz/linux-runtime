@@ -60,6 +60,10 @@ pub fn with_js(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
     let scope = &mut v8::ContextScope::new(scope, context);
     v8::tc_scope!(let tc, scope);
     f(tc);
+    // terminate() is not an error
+    if tc.has_terminated() {
+        return;
+    }
     if let Some(exception) = tc.exception() {
         let message = tc.message();
         report_exception(tc, exception, message);

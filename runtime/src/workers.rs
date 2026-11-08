@@ -139,7 +139,10 @@ fn spawn<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     std::thread::Builder::new()
         .name(format!("worker-{id}"))
         .spawn(move || {
-            let error = run_worker(meta, path, Parent { context, id }, link).err();
+            let error = run_worker(meta, path, Parent { context, id }, link.clone())
+                .err()
+                // terminate() is not an error
+                .filter(|_| !link.terminated.load(Ordering::SeqCst));
             post(
                 context,
                 true,

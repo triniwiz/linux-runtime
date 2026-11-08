@@ -457,6 +457,9 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     }
     let function = v8::Local::new(tc, &data.function);
     let result = function.call(tc, undefined, argv);
+    if tc.has_terminated() {
+        return;
+    }
     if let Some(exception) = tc.exception() {
         let message = tc.message();
         report_exception(tc, exception, message);
