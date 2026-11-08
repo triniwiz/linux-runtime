@@ -19,6 +19,7 @@ extern "C" {
     pub fn g_main_context_push_thread_default(context: gpointer);
     pub fn g_main_context_pop_thread_default(context: gpointer);
     pub fn g_main_context_iteration(context: gpointer, may_block: gboolean) -> gboolean;
+    pub fn g_main_context_wakeup(context: gpointer);
     pub fn g_main_context_invoke_full(
         context: gpointer,
         priority: i32,

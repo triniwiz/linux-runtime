@@ -12,13 +12,16 @@
 
 use crate::js::*;
 use crate::modules::{load_addon, require_cjs, Load, CJS_IMPORT};
-use crate::state::{state, State};
+use crate::state::{current, state, State};
 use crate::sys::*;
 use nativescript_core::resolve::{
     check_remote, configure_loader, dir_of, file_url_to_path, format_of, is_url, is_volatile,
     path_to_file_url, read_source, resolve, Format, Kind,
 };
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use nativescript_core::glib::{g_main_context_iteration, g_main_context_wakeup, gpointer};
+use std::sync::mpsc::{channel, TryRecvError};
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 
@@ -149,8 +152,41 @@ fn load(st: &State, key: &str) -> Load<napi_value> {
     Ok(out)
 }
 
-/// Body of an HTTP module (dev servers, or remote modules a release app allows).
+static DEV_BOOT_COMPLETE: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static PUMPING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Until dev boot completes, fetches off-thread and keeps the loop running meanwhile.
 fn fetch(url: &str) -> Result<String, String> {
+    let st = current().filter(|_| !DEV_BOOT_COMPLETE.load(Ordering::Relaxed) && !PUMPING.get());
+    let Some(st) = st else {
+        return get(url);
+    };
+    let context = st.main_context.context;
+    let (tx, rx) = channel();
+    let owned = url.to_owned();
+    std::thread::spawn(move || {
+        let _ = tx.send(get(&owned));
+        unsafe { g_main_context_wakeup(context as gpointer) };
+    });
+    PUMPING.set(true);
+    let result = loop {
+        match rx.try_recv() {
+            Ok(r) => break r,
+            Err(TryRecvError::Empty) => unsafe {
+                g_main_context_iteration(context as gpointer, 1);
+            },
+            Err(TryRecvError::Disconnected) => break Err(format!("{url}: fetch failed")),
+        }
+    };
+    PUMPING.set(false);
+    result
+}
+
+/// Body of an HTTP module (dev servers, or remote modules a release app allows).
+fn get(url: &str) -> Result<String, String> {
     use std::sync::OnceLock;
     use std::time::Duration;
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
@@ -224,6 +260,14 @@ unsafe extern "C" fn native_is_volatile(env: napi_env, info: napi_callback_info)
     let js = Js(env);
     let (a, ..) = cb_args::<1>(env, info);
     js.boolean(is_volatile(Path::new(&js.to_string(a[0]))))
+}
+
+/// `setDevBootComplete(done)`: stops pumping the loop during URL imports.
+unsafe extern "C" fn native_set_boot_complete(env: napi_env, info: napi_callback_info) -> napi_value {
+    let js = Js(env);
+    let (a, ..) = cb_args::<1>(env, info);
+    DEV_BOOT_COMPLETE.store(js.bool_of(a[0]), Ordering::Relaxed);
+    null_mut()
 }
 
 /// `configureLoader(json)`: import map, volatile patterns, URL canonicalization.
@@ -302,6 +346,7 @@ fn runner(st: &State) -> Load<napi_value> {
         ("forget", native_forget),
         ("cjsKeys", native_cjs_keys),
         ("createRequire", native_create_require),
+        ("setBootComplete", native_set_boot_complete),
     ] {
         js.set(natives, name, js.function(name, Some(cb), null_mut()));
     }
@@ -547,7 +592,8 @@ const RUNNER_JS: &str = r#"(function (natives) {
       natives.cjsKeys().forEach(function (key) { if (!registry.has(key)) keys.push(key); });
       return keys.map(fileUrl);
     },
-    createRequire: function (file) { return natives.createRequire(String(file && file.href || file)); }
+    createRequire: function (file) { return natives.createRequire(String(file && file.href || file)); },
+    setDevBootComplete: function (done) { natives.setBootComplete(!!done); }
   }));
 
   return {

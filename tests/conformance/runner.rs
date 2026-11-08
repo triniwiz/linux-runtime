@@ -33,7 +33,15 @@ fn http_fixtures(dir: PathBuf) -> String {
         for mut stream in listener.incoming().flatten() {
             let mut line = String::new();
             let _ = BufReader::new(&stream).read_line(&mut line);
-            let path = line.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').to_owned();
+            let target = line.split_whitespace().nth(1).unwrap_or("/");
+            let path = target.split('?').next().unwrap_or("").trim_start_matches('/');
+            let path = match path.strip_prefix("slow/") {
+                Some(rest) => {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    rest.to_owned()
+                }
+                None => path.to_owned(),
+            };
             let body = (!path.contains("..")).then(|| std::fs::read(dir.join(&path)).ok()).flatten();
             let _ = match body {
                 Some(b) => write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len())

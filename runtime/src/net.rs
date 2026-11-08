@@ -3,7 +3,10 @@
 use crate::event_loop::{begin_pending, post};
 use crate::state::{state, State};
 use crate::throw_error;
+use nativescript_core::glib::{g_main_context_iteration, g_main_context_wakeup, gpointer};
+use std::cell::Cell;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender, TryRecvError};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -435,9 +438,48 @@ fn ws_set_dispatch<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv
     }
 }
 
+static DEV_BOOT_COMPLETE: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static PUMPING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `ns:module` `setDevBootComplete`: stops pumping the loop during URL imports.
+pub fn set_dev_boot_complete(done: bool) {
+    DEV_BOOT_COMPLETE.store(done, Ordering::Relaxed);
+}
+
+/// Until dev boot completes, fetches off-thread and keeps the loop running meanwhile.
+fn get_module(url: &str) -> Result<HttpResponse, String> {
+    let st = crate::event_loop::current();
+    let Some(st) = st.filter(|_| !DEV_BOOT_COMPLETE.load(Ordering::Relaxed) && !PUMPING.get())
+    else {
+        return http("GET", url, &[], None, true);
+    };
+    let context = st.main_context.context;
+    let (tx, rx) = channel();
+    let owned = url.to_owned();
+    std::thread::spawn(move || {
+        let _ = tx.send(http("GET", &owned, &[], None, true));
+        unsafe { g_main_context_wakeup(context as gpointer) };
+    });
+    PUMPING.set(true);
+    let result = loop {
+        match rx.try_recv() {
+            Ok(r) => break r,
+            Err(TryRecvError::Empty) => unsafe {
+                g_main_context_iteration(context as gpointer, 1);
+            },
+            Err(TryRecvError::Disconnected) => break Err(format!("{url}: fetch failed")),
+        }
+    };
+    PUMPING.set(false);
+    result
+}
+
 /// Blocking GET used for URL module imports.
 pub fn fetch_text(url: &str) -> Result<String, String> {
-    let r = http("GET", url, &[], None, true)?;
+    let r = get_module(url)?;
     // an https module may redirect to http
     nativescript_core::resolve::check_remote(&r.url)?;
     if r.status >= 400 {
