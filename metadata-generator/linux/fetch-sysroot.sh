@@ -26,7 +26,9 @@ declare -A MAP=([libjpeg]=libjpeg-turbo8-dev [libtiff-4]=libtiff-dev [xcb]=libxc
     [harfbuzz]=libharfbuzz-dev [pango]=libpango1.0-dev [cairo]=libcairo2-dev [gdk-pixbuf-2.0]=libgdk-pixbuf-2.0-dev
     [graphene-gobject-1.0]=libgraphene-1.0-dev [xcb-shm]=libxcb-shm0-dev [xcb-render]=libxcb-render0-dev
     [libsysprof-capture-4]=libsysprof-4-dev [mount]=libmount-dev [blkid]=libblkid-dev [libselinux]=libselinux1-dev
-    [libsepol]=libsepol-dev [expat]=libexpat1-dev [libbrotlidec]=libbrotli-dev [xrender]=libxrender-dev [xext]=libxext-dev)
+    [libsepol]=libsepol-dev [expat]=libexpat1-dev [libbrotlidec]=libbrotli-dev [xrender]=libxrender-dev [xext]=libxext-dev [libpng16]=libpng-dev
+    [wayland-client]=libwayland-dev [wayland-cursor]=libwayland-dev [wayland-egl]=libwayland-dev [wayland-server]=libwayland-dev
+    [wayland-scanner]=libwayland-bin [xkbcommon]=libxkbcommon-dev [epoxy]=libepoxy-dev [xfixes]=libxfixes-dev [xrandr]=libxrandr-dev)
 
 host_pc=$(pkg-config --variable pc_path pkg-config)
 export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
@@ -39,7 +41,10 @@ for _ in $(seq 1 60); do
         echo "sysroot ready: $SYSROOT"
         exit 0
     fi
-    deb=${MAP[$miss]:-lib$miss-dev}
+    # pkg-config name to -dev package: datrie-0.2 -> libdatrie-dev, libthai -> libthai-dev
+    base=$(echo "$miss" | sed -E "s/-[0-9.]+$//")
+    case "$base" in lib*) guess=$base-dev ;; *) guess=lib$base-dev ;; esac
+    deb=${MAP[$miss]:-$guess}
     echo "resolving $miss -> $deb"
     apt-get download "$deb"
 done
