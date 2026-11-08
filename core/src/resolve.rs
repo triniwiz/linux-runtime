@@ -333,21 +333,27 @@ pub fn canonical(path: PathBuf) -> PathBuf {
         let route = url.path();
         let normalize = l.for_prefixes.iter().any(|p| route.starts_with(p.as_str()))
             && !l.preserve_query.iter().any(|p| route.contains(p.as_str()));
-        if normalize && url.query().is_some() {
-            let mut pairs: Vec<(String, String)> = url
-                .query_pairs()
-                .filter(|(k, _)| !l.strip_params.iter().any(|s| s == k))
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect();
-            pairs.sort();
-            if pairs.is_empty() {
-                url.set_query(None);
-            } else {
-                url.query_pairs_mut().clear().extend_pairs(pairs);
+        if normalize {
+            if let Some(query) = url.query().map(str::to_owned) {
+                url.set_query(normalize_query(&query, &l.strip_params).as_deref());
             }
         }
     }
     PathBuf::from(String::from(url))
+}
+
+/// Drops `strip` params and sorts the rest, keeping each pair's text verbatim:
+/// re-encoding would turn `?raw` into `?raw=`, which the dev server doesn't match.
+fn normalize_query(query: &str, strip: &[String]) -> Option<String> {
+    let mut kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            let name = pair.split('=').next().unwrap_or_default();
+            !pair.is_empty() && !strip.iter().any(|s| s == name)
+        })
+        .collect();
+    kept.sort_unstable();
+    (!kept.is_empty()).then(|| kept.join("&"))
 }
 
 /// Builtin modules (`ns:module`), resolved by the engine.
@@ -611,6 +617,23 @@ mod esm_detection {
         assert!(!looks_like_esm("const s = `\nexport default 1\n`;"));
         assert!(!looks_like_esm("// export const x = 1\nrequire('./x');"));
         assert!(!looks_like_esm("import('./lazy');"));
+    }
+}
+
+#[cfg(test)]
+mod query {
+    use super::normalize_query;
+
+    #[test]
+    fn keeps_pairs_verbatim() {
+        let strip = ["t".to_owned(), "v".to_owned(), "import".to_owned()];
+        assert_eq!(normalize_query("raw", &strip).as_deref(), Some("raw"));
+        assert_eq!(normalize_query("t=123&raw", &strip).as_deref(), Some("raw"));
+        assert_eq!(normalize_query("import&raw", &strip).as_deref(), Some("raw"));
+        assert_eq!(normalize_query("b=2&a=1", &strip).as_deref(), Some("a=1&b=2"));
+        assert_eq!(normalize_query("x=%20y", &strip).as_deref(), Some("x=%20y"));
+        assert_eq!(normalize_query("t=1&v=2&import", &strip), None);
+        assert_eq!(normalize_query("", &strip), None);
     }
 }
 
