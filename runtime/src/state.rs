@@ -11,14 +11,21 @@ pub struct State {
     pub native: Native,
     pub isolate: Cell<*mut v8::Isolate>,
     pub context: RefCell<Option<v8::Global<v8::Context>>>,
+    /// handle slot of `context`
+    context_slot: Cell<*const v8::Context>,
     pub thread: std::thread::ThreadId,
     pub functions: RefCell<HashMap<MetaId, Rc<CFunction>>>,
     struct_arena: RefCell<Option<(v8::Global<v8::ArrayBuffer>, usize, usize)>>,
     /// libffi closures handed to C, kept alive for the lifetime of the runtime
     pub closures: RefCell<Vec<Box<ClosureData>>>,
+    /// bumped when closures are released (invalidates cached closure lookups)
+    pub closure_generation: Cell<u64>,
+    pub keys: crate::interop::keys::Keys,
     pub pointers: RefCell<Option<crate::handles::Factory>>,
     /// struct views, keyed by type index
     pub struct_views: RefCell<HashMap<u32, Rc<crate::handles::Factory>>>,
+    /// accessor data of struct view fields
+    pub fields: RefCell<Vec<Box<crate::structs::FieldAccess>>>,
     pub main_context: crate::event_loop::MainContext,
     pub modules: RefCell<crate::modules::ModuleMap>,
     pub next_request: Cell<u32>,
@@ -43,6 +50,8 @@ pub struct State {
     /// Set while a resolved global is being defined on the global object:
     /// defining a property consults the interceptor again, which must not recurse.
     pub memoizing: Cell<bool>,
+    /// V8 value layout, when the probe at startup matched
+    tagged: std::cell::OnceCell<crate::tagged::Layout>,
 }
 
 impl State {
@@ -51,12 +60,16 @@ impl State {
             native: Native::new(meta),
             isolate: Cell::new(std::ptr::null_mut()),
             context: RefCell::new(None),
+            context_slot: Cell::new(std::ptr::null()),
             thread: std::thread::current().id(),
             functions: Default::default(),
             struct_arena: Default::default(),
             closures: Default::default(),
+            closure_generation: Cell::new(0),
+            keys: Default::default(),
             pointers: Default::default(),
             struct_views: Default::default(),
+            fields: Default::default(),
             main_context: crate::event_loop::MainContext::for_current_thread(),
             modules: Default::default(),
             next_request: Cell::new(0),
@@ -77,6 +90,45 @@ impl State {
             rejections: Default::default(),
             uncaught: Cell::new(0),
             memoizing: Cell::new(false),
+            tagged: Default::default(),
+        }
+    }
+
+    pub fn set_context(&self, context: v8::Global<v8::Context>) {
+        // SAFETY: the Global belongs to this isolate and lives in `self.context`
+        let slot = unsafe { v8::Handle::get_unchecked(&context) as *const v8::Context };
+        *self.context.borrow_mut() = Some(context);
+        self.context_slot.set(slot);
+    }
+
+    /// The context, read through its Global's slot (no new handle).
+    #[inline]
+    pub fn context_local<'s>(&self) -> Option<v8::Local<'s, v8::Context>> {
+        let slot = self.context_slot.get();
+        // SAFETY: a Local is a pointer to a handle slot
+        (!slot.is_null()).then(|| unsafe {
+            std::mem::transmute::<*const v8::Context, v8::Local<'s, v8::Context>>(slot)
+        })
+    }
+
+    #[inline(always)]
+    pub fn tagged(&self) -> Option<&crate::tagged::Layout> {
+        self.tagged.get()
+    }
+
+    /// Probes the V8 value layout once `interop` is installed.
+    pub fn probe_layout(&self, scope: &mut v8::PinScope) {
+        let pointers = self.pointers.borrow();
+        let Some(factory) = pointers.as_ref() else {
+            return;
+        };
+        let layout =
+            crate::tagged::Layout::probe(scope, factory.prototype_slot(), |scope, addr| {
+                factory.make(scope, addr, None)
+            });
+        if let Some(layout) = layout {
+            factory.set_raw_fields(true);
+            let _ = self.tagged.set(layout);
         }
     }
 

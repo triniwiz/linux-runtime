@@ -12,49 +12,107 @@ use std::ffi::{c_void, CStr};
 /// V8 private symbols used to tag interop objects (invisible to JS).
 pub mod keys {
     use nativescript_metadata::Type;
+    use std::cell::{OnceCell, RefCell};
+    use std::collections::HashMap;
+
+    /// Private symbols, created once per isolate.
+    #[derive(Default)]
+    pub struct Keys {
+        fixed: [OnceCell<v8::Global<v8::Private>>; 6],
+        closures: RefCell<HashMap<Vec<Type>, v8::Global<v8::Private>>>,
+        fields: RefCell<HashMap<String, v8::Global<v8::Private>>>,
+    }
 
     fn key<'s>(scope: &v8::PinScope<'s, '_, ()>, name: &str) -> v8::Local<'s, v8::Private> {
         let name = v8::String::new(scope, name).unwrap();
         v8::Private::for_api(scope, Some(name))
     }
 
+    fn keys<'a>(scope: &'a v8::PinScope<'_, '_, ()>) -> Option<&'a Keys> {
+        scope
+            .get_slot::<std::rc::Rc<crate::state::State>>()
+            .map(|st| &st.keys)
+    }
+
+    fn fixed<'s>(
+        scope: &v8::PinScope<'s, '_, ()>,
+        index: usize,
+        name: &str,
+    ) -> v8::Local<'s, v8::Private> {
+        let Some(cell) = keys(scope).map(|k| &k.fixed[index]) else {
+            return key(scope, name);
+        };
+        if let Some(g) = cell.get() {
+            return v8::Local::new(scope, g);
+        }
+        let k = key(scope, name);
+        let _ = cell.set(v8::Global::new(scope, k));
+        k
+    }
+
+    fn named<'s, K: std::hash::Hash + Eq + ?Sized + ToOwned>(
+        scope: &v8::PinScope<'s, '_, ()>,
+        map: impl Fn(&Keys) -> &RefCell<HashMap<K::Owned, v8::Global<v8::Private>>>,
+        id: &K,
+        name: impl FnOnce() -> String,
+    ) -> v8::Local<'s, v8::Private>
+    where
+        K::Owned: std::hash::Hash + Eq + std::borrow::Borrow<K>,
+    {
+        let Some(map) = keys(scope).map(map) else {
+            return key(scope, &name());
+        };
+        if let Some(g) = map.borrow().get(id) {
+            return v8::Local::new(scope, g);
+        }
+        let k = key(scope, &name());
+        map.borrow_mut()
+            .insert(id.to_owned(), v8::Global::new(scope, k));
+        k
+    }
+
     /// Keeps memory backing a Pointer / Reference alive (ArrayBuffer)
     pub fn owner<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#owner")
+        fixed(scope, 0, "ns#owner")
     }
     /// Integer index into `State::types` (type descriptors, struct constructors, struct values)
     pub fn type_tag<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#type")
+        fixed(scope, 1, "ns#type")
     }
     /// Value of a Reference that has no storage yet
     pub fn pending<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#pending")
+        fixed(scope, 2, "ns#pending")
     }
     /// Extra memory kept alive by a Reference (e.g. a C string it points to)
     pub fn keep<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#keep")
+        fixed(scope, 3, "ns#keep")
     }
     /// Memory for a string stored in a struct field
     pub fn keep_field<'s>(
         scope: &v8::PinScope<'s, '_, ()>,
         field: &str,
     ) -> v8::Local<'s, v8::Private> {
-        key(scope, &format!("ns#keep:{field}"))
+        named(scope, |k| &k.fields, field, || format!("ns#keep:{field}"))
     }
     /// BigInt address of a native function
     pub fn function_address<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#fnaddr")
+        fixed(scope, 4, "ns#fnaddr")
     }
     /// Metadata offset of a C function wrapper
     pub fn function_meta<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
-        key(scope, "ns#fnmeta")
+        fixed(scope, 5, "ns#fnmeta")
     }
-    /// BigInt address of the libffi closure created for a JS function and signature
+    /// BigInt address of the closure state created for a JS function and signature
     pub fn closure<'s>(
         scope: &v8::PinScope<'s, '_, ()>,
         signature: &[Type],
     ) -> v8::Local<'s, v8::Private> {
-        key(scope, &format!("ns#closure:{signature:?}"))
+        named(
+            scope,
+            |k| &k.closures,
+            signature,
+            || format!("ns#closure:{signature:?}"),
+        )
     }
 }
 
@@ -772,7 +830,13 @@ pub fn install<'s>(
     let pointer_tmpl = pointer_template(scope, st);
     let pointer = pointer_tmpl.get_function(scope).unwrap();
     let instances = pointer_tmpl.instance_template(scope);
-    *st.pointers.borrow_mut() = Some(handles::Factory::new(scope, instances, Kind::Pointer, None));
+    *st.pointers.borrow_mut() = Some(handles::Factory::new(
+        scope,
+        instances,
+        Kind::Pointer,
+        None,
+        false,
+    ));
     let key = v8::String::new(scope, "Pointer").unwrap();
     interop.set(scope, key.into(), pointer.into());
 

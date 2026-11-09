@@ -4,6 +4,7 @@ use nativescript_metadata::{Meta, MetaId, MetaKind, MetaSet, RecordLayout as Cla
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_void, CString};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
@@ -28,15 +29,69 @@ fn library_path(name: &str) -> CString {
     .unwrap_or_default()
 }
 
+/// Multiply-rotate hash (rustc's FxHasher): `Type` keys hash struct names, which
+/// SipHash makes a hot spot.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher(u64);
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for c in chunks {
+            self.add(u64::from_le_bytes(*c));
+        }
+        for &b in rest {
+            self.add(b as u64);
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
+
 /// Engine independent runtime state (one per JS thread).
 pub struct Native {
     pub meta: Arc<MetaSet>,
     /// dlopen handles per module
     libraries: RefCell<HashMap<MetaId, Vec<usize>>>,
-    records: RefCell<HashMap<Type, Rc<RecordLayout>>>,
+    records: RefCell<HashMap<Type, Rc<RecordLayout>, FxBuildHasher>>,
     /// Types referenced from JS (interop.types.*, struct constructors, references)
     pub types: RefCell<Vec<Type>>,
-    type_index: RefCell<HashMap<Type, u32>>,
+    type_index: RefCell<HashMap<Type, u32, FxBuildHasher>>,
+    /// record layouts by type index (struct views)
+    records_at: RefCell<Vec<Option<Rc<RecordLayout>>>>,
 }
 
 impl Native {
@@ -47,7 +102,27 @@ impl Native {
             records: Default::default(),
             types: Default::default(),
             type_index: Default::default(),
+            records_at: Default::default(),
         }
+    }
+
+    /// Record layout of the registered type `index`, without hashing the type.
+    #[inline]
+    pub fn record_at(&self, index: u32) -> Result<Rc<RecordLayout>, String> {
+        if let Some(Some(r)) = self.records_at.borrow().get(index as usize) {
+            return Ok(r.clone());
+        }
+        let record = {
+            let types = self.types.borrow();
+            let ty = types.get(index as usize).ok_or("unknown type")?;
+            self.record(ty)?
+        };
+        let mut at = self.records_at.borrow_mut();
+        if at.len() <= index as usize {
+            at.resize(index as usize + 1, None);
+        }
+        at[index as usize] = Some(record.clone());
+        Ok(record)
     }
 
     pub fn register_type(&self, ty: &Type) -> u32 {

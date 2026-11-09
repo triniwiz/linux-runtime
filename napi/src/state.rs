@@ -21,6 +21,8 @@ pub struct State {
     pub thread: std::thread::ThreadId,
     pub functions: RefCell<HashMap<MetaId, Rc<CFunction>>>,
     pub closures: RefCell<Vec<Box<ClosureData>>>,
+    /// bumped when closures are released (invalidates cached closure lookups)
+    pub closure_generation: std::cell::Cell<u64>,
     /// constructors: Pointer, Reference
     pub pointer_ctor: Cell<napi_ref>,
     pub reference_ctor: Cell<napi_ref>,
@@ -60,6 +62,7 @@ impl State {
             thread: std::thread::current().id(),
             functions: Default::default(),
             closures: Default::default(),
+            closure_generation: Default::default(),
             pointer_ctor: Cell::new(std::ptr::null_mut()),
             reference_ctor: Cell::new(std::ptr::null_mut()),
             struct_classes: Default::default(),

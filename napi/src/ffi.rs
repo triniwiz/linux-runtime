@@ -5,9 +5,14 @@ use crate::marshal::{self, CallCx, Mem};
 use crate::state::{state, State};
 use crate::sys::*;
 use libffi::raw;
-use nativescript_core::call::{CallDesc, FastCall};
+use nativescript_core::call::{
+    CallDesc, FastCall, FloatRegs, IntRegs, ValueKind, FLOAT_REGS, INT_REGS,
+};
 use nativescript_core::closure::Closure;
+#[cfg(target_arch = "x86_64")]
+use nativescript_core::closure::{RegisterClosure, Registers};
 use nativescript_metadata::{MetaId, Type};
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::rc::Rc;
@@ -16,6 +21,10 @@ use std::rc::Rc;
 pub struct CFunction {
     desc: CallDesc,
     state: *const State,
+    /// register return of variadic calls
+    variadic_ret: Option<FastCall>,
+    /// last closure passed per callback argument, with `State::closure_generation`
+    callbacks: Box<[Cell<(*const ClosureData, u64)>]>,
 }
 
 impl std::ops::Deref for CFunction {
@@ -33,10 +42,62 @@ impl CFunction {
         signature: Vec<Type>,
         variadic: bool,
     ) -> Result<Self, String> {
+        let desc = CallDesc::new(st, name, address, signature, variadic)?;
+        let variadic_ret = if variadic {
+            desc.variadic_ret(st)
+        } else {
+            None
+        };
+        let callbacks = desc
+            .args
+            .iter()
+            .map(|_| Cell::new((std::ptr::null(), 0)))
+            .collect();
         Ok(CFunction {
-            desc: CallDesc::new(st, name, address, signature, variadic)?,
+            desc,
             state: st,
+            variadic_ret,
+            callbacks,
         })
+    }
+
+    /// Writes argument `i`: JS functions passed as callbacks reuse the closure of the
+    /// previous call without a lookup.
+    fn write_arg(
+        &self,
+        st: &State,
+        i: usize,
+        ty: &Type,
+        v: napi_value,
+        dst: *mut u8,
+        cx: &mut CallCx,
+    ) -> Result<(), String> {
+        if let (Some(ValueKind::Callback), Type::FunctionPointer(sig) | Type::Block(sig)) =
+            (self.args.get(i), ty)
+        {
+            let js = st.js();
+            if js.type_of(v) == FUNCTION {
+                let (data, generation) = self.callbacks[i].get();
+                let data = if !data.is_null()
+                    && generation == st.closure_generation.get()
+                    && js.strict_equals(js.deref(unsafe { (*data).function }), v)
+                {
+                    data
+                } else if let Some(addr) = crate::interop::native_function_address(st, v) {
+                    unsafe { (dst as *mut usize).write_unaligned(addr) };
+                    return Ok(());
+                } else {
+                    let data = closure_data_for(st, v, sig)
+                        .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+                    self.callbacks[i].set((data, st.closure_generation.get()));
+                    data
+                };
+                unsafe { (dst as *mut usize).write_unaligned((*data).code()) };
+                return Ok(());
+            }
+        }
+        unsafe { marshal::write(st, ty, v, dst, cx) }
+            .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))
     }
 
     fn vararg_type(js: Js, v: napi_value) -> Result<Type, String> {
@@ -82,6 +143,9 @@ impl CFunction {
             for v in &args[fixed..] {
                 sig.push(Self::vararg_type(js, *v)?);
             }
+            if let Some(result) = self.call_variadic(st, args, &sig)? {
+                return Ok(result);
+            }
             variadic_sig = sig;
             variadic_cif = CallDesc::prep(st, &variadic_sig, Some(fixed))?;
             (&variadic_sig[..], &variadic_cif)
@@ -103,8 +167,7 @@ impl CFunction {
                 None => st.layout(ty)?.size.max(8),
             };
             let slot = cx.scratch(size);
-            unsafe { marshal::write(st, ty, args[i], slot, &mut cx) }
-                .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+            self.write_arg(st, i, ty, args[i], slot, &mut cx)?;
             argv[i] = slot as *mut c_void;
         }
         let ret_ty = &signature[0];
@@ -119,6 +182,59 @@ impl CFunction {
         Ok(result)
     }
 
+    /// Variadic call in registers when the promoted arguments fit; `None` otherwise.
+    fn call_variadic(
+        &self,
+        st: &State,
+        args: &[napi_value],
+        signature: &[Type],
+    ) -> Result<Option<napi_value>, String> {
+        let Some(ret_class) = &self.variadic_ret else {
+            return Ok(None);
+        };
+        let kinds: Vec<ValueKind> = signature[1..].iter().map(ValueKind::of_arg).collect();
+        let floats_used = kinds.iter().filter(|k| k.is_float()).count();
+        if kinds.contains(&ValueKind::Other)
+            || kinds.len() - floats_used > INT_REGS
+            || floats_used > FLOAT_REGS
+        {
+            return Ok(None);
+        }
+        let mut cx = CallCx::default();
+        let mut ints: IntRegs = [0; INT_REGS];
+        let mut floats: FloatRegs = [0.0; FLOAT_REGS];
+        let (mut ni, mut nf) = (0, 0);
+        for (i, ty) in signature[1..].iter().enumerate() {
+            let mut slot = 0u128;
+            self.write_arg(
+                st,
+                i,
+                ty,
+                args[i],
+                &mut slot as *mut u128 as *mut u8,
+                &mut cx,
+            )?;
+            if kinds[i].is_float() {
+                floats[nf] = f64::from_bits(slot as u64);
+                nf += 1;
+            } else {
+                ints[ni] = kinds[i].extend(slot as u64 as i64);
+                ni += 1;
+            }
+        }
+        let ret = unsafe { self.desc.call_variadic(ret_class, &ints, &floats) };
+        let result = unsafe {
+            marshal::read(
+                st,
+                &self.signature[0],
+                &ret as *const u128 as *const u8,
+                Mem::Temp,
+            )?
+        };
+        cx.finish(st)?;
+        Ok(Some(result))
+    }
+
     fn call_fast(
         &self,
         st: &State,
@@ -126,22 +242,33 @@ impl CFunction {
         fast: &FastCall,
     ) -> Result<napi_value, String> {
         let mut cx = CallCx::default();
-        let mut ints = [0i64; 8];
-        let mut floats = [0f64; 8];
+        let mut ints: IntRegs = [0; INT_REGS];
+        let mut floats: FloatRegs = [0.0; FLOAT_REGS];
         let (mut ni, mut nf) = (0, 0);
         for (i, ty) in self.signature[1..].iter().enumerate() {
             let mut slot = 0u128;
-            unsafe { marshal::write(st, ty, args[i], &mut slot as *mut u128 as *mut u8, &mut cx) }
-                .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+            self.write_arg(
+                st,
+                i,
+                ty,
+                args[i],
+                &mut slot as *mut u128 as *mut u8,
+                &mut cx,
+            )?;
             if fast.float_args[i] {
                 floats[nf] = f64::from_bits(slot as u64);
                 nf += 1;
             } else {
-                ints[ni] = slot as u64 as i64;
+                // C callers extend 8 and 16-bit integers
+                ints[ni] = self.args[i].extend(slot as u64 as i64);
                 ni += 1;
             }
         }
-        let ret = unsafe { self.desc.call_fast(fast, ints, floats) };
+        let ret = if nf == 0 {
+            unsafe { self.desc.call_ints(fast, &ints) }
+        } else {
+            unsafe { self.desc.call_fast(fast, &ints, &floats) }
+        };
         let result = unsafe {
             marshal::read(
                 st,
@@ -253,17 +380,44 @@ pub fn function_from_pointer(
     Ok(f)
 }
 
-/// State of a libffi closure that calls into JS.
+/// State of a closure that calls into JS.
 pub struct ClosureData {
     function: napi_ref,
     main_context: usize,
     signature: Vec<Type>,
+    ret_size: usize,
+    /// per argument: (float register, register index), for register closures
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    slots: Vec<(bool, u8)>,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    ret_float: bool,
     state: *const State,
-    closure: Option<Closure>,
+    closure: Option<ClosureCode>,
 }
 
-/// C function pointer calling `function`, cached per (function, signature).
-pub fn closure_for(st: &State, function: napi_value, signature: &[Type]) -> Result<usize, String> {
+enum ClosureCode {
+    Ffi(Closure),
+    #[cfg(target_arch = "x86_64")]
+    Registers(RegisterClosure),
+}
+
+impl ClosureData {
+    fn code(&self) -> usize {
+        match &self.closure {
+            Some(ClosureCode::Ffi(c)) => c.code as usize,
+            #[cfg(target_arch = "x86_64")]
+            Some(ClosureCode::Registers(c)) => c.code as usize,
+            None => 0,
+        }
+    }
+}
+
+/// Closure state calling `function`, cached per (function, signature).
+fn closure_data_for(
+    st: &State,
+    function: napi_value,
+    signature: &[Type],
+) -> Result<*const ClosureData, String> {
     let js = st.js();
     if let Some(existing) = st
         .closures
@@ -271,25 +425,50 @@ pub fn closure_for(st: &State, function: napi_value, signature: &[Type]) -> Resu
         .iter()
         .find(|c| c.signature == signature && js.strict_equals(js.deref(c.function), function))
     {
-        return Ok(existing.closure.as_ref().unwrap().code as usize);
+        return Ok(&**existing as *const ClosureData);
+    }
+    // signatures that fit in registers skip libffi's per-call argument classification
+    let registers = CallDesc::new(st, "", 0, signature.to_vec(), false)?.fast;
+    let mut slots = Vec::new();
+    if let Some(fast) = &registers {
+        let (mut ni, mut nf) = (0u8, 0u8);
+        for float in &fast.float_args {
+            slots.push(if *float { (true, nf) } else { (false, ni) });
+            if *float {
+                nf += 1;
+            } else {
+                ni += 1;
+            }
+        }
     }
     let mut data = Box::new(ClosureData {
         function: js.reference(function, 1),
         main_context: st.main_context.context,
         signature: signature.to_vec(),
+        ret_size: st.layout(&signature[0])?.size,
+        slots,
+        ret_float: ValueKind::of_arg(&signature[0]).is_float(),
         state: st,
         closure: None,
     });
-    let closure = Closure::new(
-        st,
-        signature,
-        closure_trampoline,
-        &mut *data as *mut ClosureData as *mut c_void,
-    )?;
-    let address = closure.code as usize;
-    data.closure = Some(closure);
+    let userdata = &mut *data as *mut ClosureData as *mut c_void;
+    #[cfg(target_arch = "x86_64")]
+    if registers.is_some() {
+        data.closure =
+            RegisterClosure::new(register_trampoline, userdata).map(ClosureCode::Registers);
+    }
+    if data.closure.is_none() {
+        let closure = Closure::new(st, signature, closure_trampoline, userdata)?;
+        data.closure = Some(ClosureCode::Ffi(closure));
+    }
+    let ptr = &*data as *const ClosureData;
     st.closures.borrow_mut().push(data);
-    Ok(address)
+    Ok(ptr)
+}
+
+/// C function pointer calling `function`, cached per (function, signature).
+pub fn closure_for(st: &State, function: napi_value, signature: &[Type]) -> Result<usize, String> {
+    closure_data_for(st, function, signature).map(|d| unsafe { (*d).code() })
 }
 
 /// Frees the closures made for `function` (`interop.release`).
@@ -304,7 +483,38 @@ pub fn release_closures(st: &State, function: napi_value) -> usize {
         }
         keep
     });
-    before - closures.len()
+    let released = before - closures.len();
+    if released > 0 {
+        st.closure_generation.set(st.closure_generation.get() + 1);
+    }
+    released
+}
+
+/// Register closure entry: points libffi-style argument pointers at the saved registers.
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn register_trampoline(
+    userdata: *mut c_void,
+    regs: *mut Registers,
+    _stack: *const u64,
+) {
+    let data = &*(userdata as *const ClosureData);
+    let regs = &mut *regs;
+    regs.ret = [0; 2];
+    regs.fret = [0.0; 2];
+    let mut args = [null_mut::<c_void>(); 14];
+    for (i, &(float, k)) in data.slots.iter().enumerate() {
+        args[i] = if float {
+            &mut regs.floats[k as usize] as *mut f64 as *mut c_void
+        } else {
+            &mut regs.ints[k as usize] as *mut u64 as *mut c_void
+        };
+    }
+    let ret = if data.ret_float {
+        regs.fret.as_mut_ptr() as *mut c_void
+    } else {
+        regs.ret.as_mut_ptr() as *mut c_void
+    };
+    closure_trampoline(null_mut(), ret, args.as_mut_ptr(), userdata);
 }
 
 unsafe extern "C" fn closure_trampoline(
@@ -347,11 +557,10 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     let st = &*data.state;
     let js = st.js();
     let ret_ty = &data.signature[0];
-    let ret_size = st.layout(ret_ty).map(|l| l.size).unwrap_or(0);
     std::ptr::write_bytes(
         ret as *mut u8,
         0,
-        ret_size.max(std::mem::size_of::<usize>()),
+        data.ret_size.max(std::mem::size_of::<usize>()),
     );
     let mut scope = null_mut();
     napi_open_handle_scope(js.0, &mut scope);

@@ -105,8 +105,17 @@ fn clone<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     o: v8::Local<'s, v8::Object>,
 ) -> Option<v8::Local<'s, v8::Object>> {
+    unsafe { clone_slot(scope, &*o) }
+}
+
+/// [`clone`] of the object in a handle slot (a Local's or a Global's).
+#[inline]
+unsafe fn clone_slot<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    slot: *const v8::Object,
+) -> Option<v8::Local<'s, v8::Object>> {
     unsafe {
-        let p = v8_object_clone(&*o, scope.as_raw_isolate_ptr());
+        let p = v8_object_clone(slot, scope.as_raw_isolate_ptr());
         std::mem::transmute::<*const v8::Object, Option<v8::Local<'s, v8::Object>>>(p)
     }
 }
@@ -115,7 +124,11 @@ fn clone<'s>(
 /// cheaper than `ObjectTemplate::NewInstance`.
 pub struct Factory {
     template: v8::Global<v8::ObjectTemplate>,
-    prototype: Option<v8::Global<v8::Object>>,
+    _prototype: Option<v8::Global<v8::Object>>,
+    /// handle slot of `_prototype`, stable while it lives
+    proto_slot: *const v8::Object,
+    /// address field written in place (layout checked by `tagged::Layout::probe`)
+    raw_fields: std::cell::Cell<bool>,
     kind: Kind,
     type_index: Option<u32>,
 }
@@ -126,6 +139,7 @@ impl Factory {
         template: v8::Local<'s, v8::ObjectTemplate>,
         kind: Kind,
         type_index: Option<u32>,
+        raw_fields: bool,
     ) -> Self {
         let prototype = template.new_instance(scope).and_then(|o| {
             init(scope, o, kind, 0, type_index, None);
@@ -135,12 +149,46 @@ impl Factory {
             (address(o) == 0 && address(copy) == 1 && of(copy.into()).map(|c| c.1) == Some(kind))
                 .then(|| v8::Global::new(scope, o))
         });
+        let proto_slot = prototype.as_ref().map_or(std::ptr::null(), |p| {
+            // SAFETY: the Global belongs to this isolate and lives as long as the factory
+            unsafe { v8::Handle::get_unchecked(p) as *const v8::Object }
+        });
         Factory {
             template: v8::Global::new(scope, template),
-            prototype,
+            _prototype: prototype,
+            proto_slot,
+            raw_fields: std::cell::Cell::new(raw_fields),
             kind,
             type_index,
         }
+    }
+
+    /// Handle slot of the prototype instance (null without one).
+    pub fn prototype_slot(&self) -> *const usize {
+        self.proto_slot as *const usize
+    }
+
+    pub fn set_raw_fields(&self, on: bool) {
+        self.raw_fields.set(on && !self.proto_slot.is_null());
+    }
+
+    /// [`Self::make`] without a scope, for API callbacks: a handle in the callback's
+    /// handle scope, or `None` without a prototype instance or raw field writes.
+    #[inline]
+    pub unsafe fn make_in_callback(
+        &self,
+        isolate: v8::UnsafeRawIsolatePtr,
+        address: usize,
+    ) -> Option<*const v8::Object> {
+        if self.proto_slot.is_null() || !self.raw_fields.get() {
+            return None;
+        }
+        let o = unsafe { v8_object_clone(self.proto_slot, isolate) };
+        if o.is_null() {
+            return None;
+        }
+        unsafe { crate::tagged::set_object_field(&*o, 1, address) };
+        Some(o)
     }
 
     #[inline]
@@ -150,10 +198,13 @@ impl Factory {
         address: usize,
         owner: Option<v8::Local<'s, v8::Value>>,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        if let Some(p) = &self.prototype {
-            let p = v8::Local::new(scope, p);
-            let o = clone(scope, p)?;
-            set_address(o, address);
+        if !self.proto_slot.is_null() {
+            let o = unsafe { clone_slot(scope, self.proto_slot) }?;
+            if self.raw_fields.get() {
+                unsafe { crate::tagged::set_object_field(&o, 1, address) };
+            } else {
+                set_address(o, address);
+            }
             if let Some(owner) = owner {
                 set_owner(o, owner);
             }
