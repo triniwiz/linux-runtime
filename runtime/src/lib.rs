@@ -18,6 +18,7 @@ mod net;
 mod state;
 mod structs;
 mod subtle;
+mod tasks;
 mod workers;
 
 pub use nativescript_metadata::{MetaFile, MetaSet};
@@ -26,23 +27,9 @@ use state::State;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
 static V8_INIT: Once = Once::new();
-static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
-
-/// Runs V8's pending tasks for this isolate (FinalizationRegistry cleanup, GC steps): the
-/// default platform only queues them. True if any ran.
-pub(crate) fn pump_platform(isolate: &v8::Isolate) -> bool {
-    let Some(platform) = PLATFORM.get() else {
-        return false;
-    };
-    let mut ran = false;
-    while v8::Platform::pump_message_loop(platform, isolate, false) {
-        ran = true;
-    }
-    ran
-}
 
 /// V8 flags (e.g. `linux.v8Flags`); only before the first runtime starts V8.
 pub fn set_v8_flags(flags: &str) -> Result<(), String> {
@@ -60,6 +47,8 @@ pub struct Runtime {
     context: v8::Global<v8::Context>,
     state: Rc<State>,
     isolate: Box<v8::OwnedIsolate>,
+    // after `isolate`: tasks posted while it is disposed still find a live context
+    _tasks: tasks::Registration,
 }
 
 impl Runtime {
@@ -81,9 +70,8 @@ impl Runtime {
 
     fn build(metadata: Arc<MetaSet>, parent: Option<workers::Parent>) -> Result<Self, String> {
         V8_INIT.call_once(|| {
-            let platform = v8::new_default_platform(0, false).make_shared();
-            v8::V8::initialize_platform(platform.clone());
-            let _ = PLATFORM.set(platform);
+            let platform = v8::new_custom_platform(0, false, false, tasks::Platform).make_shared();
+            v8::V8::initialize_platform(platform);
             v8::V8::initialize();
         });
 
@@ -98,6 +86,7 @@ impl Runtime {
         let state = Rc::new(State::new(metadata));
         *state.parent.borrow_mut() = parent;
         state.isolate.set(&mut **isolate as *mut v8::Isolate);
+        let tasks = tasks::register(&isolate, state.main_context.context);
         isolate.set_slot(state.clone());
 
         let context = {
@@ -140,6 +129,7 @@ impl Runtime {
             context,
             state,
             isolate,
+            _tasks: tasks,
         })
     }
 
