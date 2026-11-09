@@ -96,7 +96,6 @@ pack() {
   "license": "Apache-2.0",
   "repository": "github:NativeScript/linux",
   "keywords": ["NativeScript", "Linux", "GTK"],
-  "os": ["linux"],
   "files": ["framework"],
   "nativescript": { "runtime": "linux", "engine": "$id" }
 }

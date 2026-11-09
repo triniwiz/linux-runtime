@@ -15,13 +15,6 @@
     "typings",
     "typings-gtk3"
   ],
-  "os": [
-    "linux"
-  ],
-  "cpu": [
-    "x64",
-    "arm64"
-  ],
   "engines": {
     "node": ">= 18"
   },
