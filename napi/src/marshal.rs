@@ -65,9 +65,12 @@ impl CallCx {
         Ok(p)
     }
 
-    pub fn finish(self, st: &State) -> Result<(), String> {
+    pub fn finish(&mut self, st: &State) -> Result<(), String> {
+        if self.copy_back.is_empty() {
+            return Ok(());
+        }
         let js = st.js();
-        for (object, ty, ptr) in self.copy_back {
+        for (object, ty, ptr) in std::mem::take(&mut self.copy_back) {
             let record = st.record(&ty)?;
             for field in record.fields.iter().filter(|f| !f.name.is_empty()) {
                 let v = unsafe { read_field(st, field, ptr, Mem::Temp)? };

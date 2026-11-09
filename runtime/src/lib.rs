@@ -18,6 +18,7 @@ mod net;
 mod state;
 mod structs;
 mod subtle;
+mod tagged;
 mod tasks;
 mod workers;
 
@@ -103,6 +104,7 @@ impl Runtime {
             let scope = &mut v8::ContextScope::new(scope, context);
             let global = context.global(scope);
             interop::install(scope, &state, global);
+            state.probe_layout(scope);
             event_loop::install(scope, global);
             // resolved from the app folder once the entry runs, not the working directory
             if let Some(require) = modules::require_function(scope, std::path::Path::new("")) {
@@ -119,7 +121,7 @@ impl Runtime {
             }
             v8::Global::new(tc, context)
         };
-        *state.context.borrow_mut() = Some(context.clone());
+        state.set_context(context.clone());
         event_loop::set_current(Some(state.clone()));
         if state.parent.borrow().is_none() {
             event_loop::install_livesync_signal();

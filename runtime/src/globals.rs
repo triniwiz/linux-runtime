@@ -101,7 +101,8 @@ fn resolve<'s>(
                 scope,
                 std::rc::Rc::as_ptr(&function) as *mut std::ffi::c_void,
             );
-            let builder = v8::FunctionTemplate::builder(ffi::c_function_callback).data(data.into());
+            let builder =
+                v8::FunctionTemplate::builder_raw(ffi::c_function_callback).data(data.into());
             let template = match crate::fast::overload(&function) {
                 Some(fast) => builder.build_fast(scope, &[fast]),
                 None => builder.build(scope),

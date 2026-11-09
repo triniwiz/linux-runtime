@@ -1,310 +1,394 @@
-//! V8 fast API overloads for C functions: optimized code calls a per-arity trampoline
-//! instead of the API callback. Args arrive untyped so every JS value takes this path.
+//! V8 fast API overloads for C functions: optimized code calls a trampoline instead
+//! of the API callback. `double` / `float` params are typed (V8 converts numbers and
+//! deopts on anything else), the rest arrive as values and convert here.
 
 use crate::ffi::CFunction;
 use crate::handles::{self, Kind};
-use crate::marshal;
+use crate::marshal::{self, CallCx};
+use crate::tagged::{self, Layout, Value};
 use crate::throw_error;
-use nativescript_metadata::Type;
+use nativescript_core::call::{FloatRegs, IntRegs, ValueKind, FLOAT_REGS, INT_REGS};
+use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::mem::MaybeUninit;
+use std::sync::{Mutex, OnceLock};
 use v8::fast_api::{
     CFunction as FastFunction, CFunctionInfo, CTypeInfo, FastApiCallbackOptions,
     Int64Representation, Type as CType,
 };
 
-pub const MAX_ARGS: usize = 8;
-
 /// Return kinds V8 can box without our help (64-bit ints, pointers and records can't
 /// match the slow path's BigInt / Pointer results).
-#[derive(Clone, Copy)]
-enum Ret {
-    Void,
-    Bool,
-    I32,
-    U32,
-    F64,
-}
-
-const RETS: [Ret; 5] = [Ret::Void, Ret::Bool, Ret::I32, Ret::U32, Ret::F64];
-
-fn ret_kind(ty: &Type) -> Option<Ret> {
-    Some(match ty {
-        Type::Void => Ret::Void,
-        Type::Bool => Ret::Bool,
-        Type::Char | Type::UChar | Type::Short | Type::UShort | Type::Unichar | Type::Int => {
-            Ret::I32
+fn ret_type(kind: ValueKind) -> Option<CType> {
+    Some(match kind {
+        ValueKind::Void => CType::Void,
+        ValueKind::Bool => CType::Bool,
+        ValueKind::I8 | ValueKind::U8 | ValueKind::I16 | ValueKind::U16 | ValueKind::I32 => {
+            CType::Int32
         }
-        Type::UInt => Ret::U32,
-        Type::Float | Type::Double => Ret::F64,
+        ValueKind::U32 => CType::Uint32,
+        ValueKind::F32 | ValueKind::F64 => CType::Float64,
         _ => return None,
     })
 }
 
-struct Infos(Vec<CFunctionInfo>);
-// written once, then only read by V8
-unsafe impl Send for Infos {}
-unsafe impl Sync for Infos {}
+fn arg_type(kind: ValueKind) -> CType {
+    match kind {
+        ValueKind::F64 => CType::Float64,
+        ValueKind::F32 => CType::Float32,
+        _ => CType::V8Value,
+    }
+}
 
-fn info(argc: usize, ret: Ret) -> &'static CFunctionInfo {
-    static INFOS: OnceLock<Infos> = OnceLock::new();
-    let infos = INFOS.get_or_init(|| {
-        let mut infos = Vec::with_capacity((MAX_ARGS + 1) * RETS.len());
-        for n in 0..=MAX_ARGS {
+struct Info(&'static CFunctionInfo);
+// written once, then only read by V8
+unsafe impl Send for Info {}
+unsafe impl Sync for Info {}
+
+/// One leaked `CFunctionInfo` per distinct signature.
+pub fn info(args: &[ValueKind], ret: CType) -> &'static CFunctionInfo {
+    static INFOS: OnceLock<Mutex<HashMap<Vec<u8>, Info>>> = OnceLock::new();
+    let mut key: Vec<u8> = args.iter().map(|k| arg_type(*k) as u8).collect();
+    key.push(ret as u8);
+    let mut infos = INFOS.get_or_init(Default::default).lock().unwrap();
+    infos
+        .entry(key)
+        .or_insert_with(|| {
             // receiver, args, options
-            let mut args = vec![CType::V8Value.as_info(); n + 1];
-            args.push(CType::CallbackOptions.as_info());
-            let args: &'static [CTypeInfo] = Box::leak(args.into_boxed_slice());
-            for ret in RETS {
-                let r = match ret {
-                    Ret::Void => CType::Void,
-                    Ret::Bool => CType::Bool,
-                    Ret::I32 => CType::Int32,
-                    Ret::U32 => CType::Uint32,
-                    Ret::F64 => CType::Float64,
-                };
-                infos.push(CFunctionInfo::new(
-                    r.as_info(),
-                    args,
-                    Int64Representation::Number,
-                ));
-            }
-        }
-        Infos(infos)
-    });
-    &infos.0[argc * RETS.len() + ret as usize]
+            let mut types = vec![CType::V8Value.as_info()];
+            types.extend(args.iter().map(|k| arg_type(*k).as_info()));
+            types.push(CType::CallbackOptions.as_info());
+            let types: &'static [CTypeInfo] = Box::leak(types.into_boxed_slice());
+            Info(Box::leak(Box::new(CFunctionInfo::new(
+                ret.as_info(),
+                types,
+                Int64Representation::Number,
+            ))))
+        })
+        .0
 }
 
 /// Fast overload for `function`, if its signature has one.
 pub fn overload(function: &CFunction) -> Option<FastFunction> {
     function.fast.as_ref()?;
-    let argc = function.signature.len() - 1;
     // callback params mean JS functions (full marshalling) and C calling back into JS,
     // which costs more from inside a fast call
-    let callbacks = function.signature[1..]
+    if function
+        .args
         .iter()
-        .any(|t| matches!(t, Type::FunctionPointer(_) | Type::Block(_)));
-    if argc > MAX_ARGS || callbacks {
+        .any(|k| matches!(k, ValueKind::Other | ValueKind::Callback))
+    {
         return None;
     }
-    let ret = ret_kind(&function.signature[0])?;
-    let address = if matches!(ret, Ret::F64) {
-        FLOAT_TRAMPOLINES[argc]
-    } else {
-        INT_TRAMPOLINES[argc]
+    let ret = ret_type(function.ret)?;
+    let ints = function.int_args.len();
+    let address = match (ints == function.args.len(), function.ret.is_float()) {
+        (true, false) => INTS_INT_TRAMPOLINES[ints],
+        (true, true) => INTS_FLOAT_TRAMPOLINES[ints],
+        (false, false) => INT_TRAMPOLINES[ints],
+        (false, true) => FLOAT_TRAMPOLINES[ints],
     };
-    Some(FastFunction::new(address, info(argc, ret)))
+    Some(FastFunction::new(address, info(&function.args, ret)))
 }
 
 const STRINGS: usize = 1024;
 
-/// NUL terminated copies of string args, on the trampoline's stack.
-struct Strings<'a> {
-    isolate: &'a v8::Isolate,
-    buf: [std::mem::MaybeUninit<u8>; STRINGS],
+/// NUL terminated copies of string args, on the caller's stack.
+pub struct Strings {
+    buf: [MaybeUninit<u8>; STRINGS],
     used: usize,
 }
 
-impl Strings<'_> {
-    fn push(&mut self, s: v8::Local<v8::String>) -> Option<usize> {
+impl Strings {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Strings {
+            buf: [MaybeUninit::uninit(); STRINGS],
+            used: 0,
+        }
+    }
+
+    /// UTF-8 copy of Latin-1 characters, `None` if it doesn't fit.
+    #[inline]
+    fn push_latin1(&mut self, chars: &[u8]) -> Option<u64> {
+        let n = chars.len();
+        if self.used + 2 * n + 1 > STRINGS {
+            return None;
+        }
+        let start = unsafe { self.buf.as_mut_ptr().add(self.used) as *mut u8 };
+        let mut len = n;
+        if chars.is_ascii() {
+            unsafe { std::ptr::copy_nonoverlapping(chars.as_ptr(), start, n) };
+        } else {
+            len = 0;
+            for &c in chars {
+                if c < 0x80 {
+                    unsafe { *start.add(len) = c };
+                    len += 1;
+                } else {
+                    unsafe {
+                        *start.add(len) = 0xc0 | (c >> 6);
+                        *start.add(len + 1) = 0x80 | (c & 0x3f);
+                    }
+                    len += 2;
+                }
+            }
+        }
+        unsafe { *start.add(len) = 0 };
+        self.used += len + 1;
+        Some(start as u64)
+    }
+
+    /// Copy of a flat string (no handles created), `None` if it doesn't fit.
+    #[inline]
+    fn push(&mut self, isolate: &v8::Isolate, v: v8::Local<v8::Value>) -> Option<u64> {
+        let s: v8::Local<v8::String> = unsafe { v8::Local::cast_unchecked(v) };
         // UTF-8 needs at most 3 bytes per UTF-16 unit
         let max = s.length() * 3;
         if self.used + max + 1 > STRINGS {
             return None;
         }
-        let start = self.used;
         let out = unsafe {
-            std::slice::from_raw_parts_mut(self.buf.as_mut_ptr().add(start) as *mut u8, max + 1)
+            std::slice::from_raw_parts_mut(self.buf.as_mut_ptr().add(self.used) as *mut u8, max + 1)
         };
         let n = s.write_utf8_v2(
-            self.isolate,
+            isolate,
             &mut out[..max],
             v8::WriteFlags::kReplaceInvalidUtf8,
             None,
         );
         out[n] = 0;
         self.used += n + 1;
-        Some(out.as_ptr() as usize)
+        Some(out.as_ptr() as u64)
     }
 }
 
-/// `char*` / `void*` params take JS strings, as in `marshal::write`.
-fn takes_string(ty: &Type) -> bool {
-    match ty {
-        Type::CString | Type::ConstCString => true,
-        Type::Pointer(inner) | Type::IncompleteArray(inner) => {
-            matches!(**inner, Type::Char | Type::UChar | Type::Void)
-        }
-        _ => false,
+/// [`tagged::Value`] through the V8 API (no layout): strings always need the full path.
+fn classify_api(v: v8::Local<v8::Value>) -> Value {
+    if let Ok(n) = v8::Local::<v8::Number>::try_from(v) {
+        Value::Number(n.value())
+    } else if v.is_boolean() {
+        Value::Bool(v.is_true())
+    } else if v.is_null() {
+        Value::Null
+    } else if v.is_undefined() {
+        Value::Undefined
+    } else if let Some(o) = handles::is(v, Kind::Pointer) {
+        Value::Pointer(handles::address(o))
+    } else {
+        Value::Other
     }
 }
 
-/// Register value for `v` as a `ty` argument without a scope, mirroring `marshal::write`.
-/// `None`: needs the full marshalling (callbacks, plain objects, References...).
+/// Pointer-like values the layout doesn't recognize: struct views and buffers whose
+/// memory is off the V8 heap.
 #[inline]
-fn simple_arg(ty: &Type, v: v8::Local<v8::Value>, strings: &mut Strings) -> Option<u128> {
-    let mut slot = 0u128;
-    let dst = &mut slot as *mut u128 as *mut u8;
-    macro_rules! put {
-        ($t:ty, $v:expr) => {
-            unsafe { (dst as *mut $t).write_unaligned($v as $t) }
-        };
+fn other_address(v: v8::Local<v8::Value>) -> Option<u64> {
+    if !v.is_object() {
+        return None;
     }
-    match ty {
-        Type::Bool => {
-            if !v.is_boolean() {
-                return None;
-            }
-            put!(u8, v.is_true() as u8);
-        }
-        Type::Float | Type::Double => {
-            let n = if let Ok(n) = v8::Local::<v8::Number>::try_from(v) {
-                n.value()
-            } else if let Ok(b) = v8::Local::<v8::BigInt>::try_from(v) {
-                b.i64_value().0 as f64
-            } else if v.is_boolean() {
-                v.is_true() as u8 as f64
-            } else if v.is_null() {
-                0.0
-            } else if v.is_undefined() {
-                f64::NAN
-            } else {
-                return None;
-            };
-            if matches!(ty, Type::Float) {
-                put!(f32, n);
-            } else {
-                put!(f64, n);
-            }
-        }
-        Type::Char
-        | Type::UChar
-        | Type::Short
-        | Type::UShort
-        | Type::Unichar
-        | Type::Int
-        | Type::UInt
-        | Type::Long
-        | Type::LongLong
-        | Type::ULong
-        | Type::ULongLong => {
-            let n: i64 = if let Ok(n) = v8::Local::<v8::Number>::try_from(v) {
-                let n = n.value();
-                if n.is_finite() {
-                    n as i64
-                } else {
-                    0
-                }
-            } else if let Ok(b) = v8::Local::<v8::BigInt>::try_from(v) {
-                if matches!(ty, Type::ULong | Type::ULongLong) {
-                    b.u64_value().0 as i64
-                } else {
-                    b.i64_value().0
-                }
-            } else if v.is_boolean() {
-                v.is_true() as i64
-            } else if v.is_null_or_undefined() {
-                0
-            } else {
-                handles::is(v, Kind::Pointer).map(handles::address)? as i64
-            };
-            match ty {
-                Type::Char => put!(i8, n),
-                Type::UChar => put!(u8, n),
-                Type::Short => put!(i16, n),
-                Type::UShort | Type::Unichar => put!(u16, n),
-                Type::Int => put!(i32, n),
-                Type::UInt => put!(u32, n),
-                _ => put!(i64, n),
-            }
-        }
-        Type::ObjC(_) => return None,
-        t if t.is_pointer_like() => {
-            let addr = if v.is_null_or_undefined() {
-                0
-            } else if let Some(addr) = marshal::buffer_address(v) {
-                addr
-            } else if let Ok(s) = v8::Local::<v8::String>::try_from(v) {
-                if !takes_string(ty) {
-                    return None;
-                }
-                strings.push(s)?
-            } else {
-                match handles::of(v)? {
-                    (o, Kind::Pointer | Kind::Struct) => handles::address(o),
-                    _ => return None,
-                }
-            };
-            put!(usize, addr);
-        }
-        _ => return None,
+    if let Some(addr) = marshal::buffer_address_in_place(v) {
+        return addr.map(|a| a as u64);
     }
-    Some(slot)
+    match handles::of(v)? {
+        (o, Kind::Pointer | Kind::Struct) => Some(handles::address(o) as u64),
+        _ => None,
+    }
+}
+
+/// Register value of `v` as a `kind` argument, mirroring `marshal::write`, without
+/// allocating, running JS or creating handles. `None`: needs the full conversion.
+#[inline(always)]
+pub fn simple_arg(
+    layout: Option<&Layout>,
+    isolate: impl FnOnce() -> *const v8::Isolate,
+    kind: ValueKind,
+    v: v8::Local<v8::Value>,
+    strings: &mut Strings,
+) -> Option<u64> {
+    if let Some(l) = layout {
+        if kind.is_integer() {
+            if let Some(n) = Layout::int(v) {
+                return Some(kind.extend(n as i64) as u64);
+            }
+        } else if matches!(kind, ValueKind::Pointer | ValueKind::CString) {
+            if let Some(a) = l.pointer(v) {
+                return Some(a as u64);
+            }
+        }
+    }
+    simple_arg_general(layout, isolate(), kind, v, strings)
+}
+
+#[inline(never)]
+fn simple_arg_general(
+    layout: Option<&Layout>,
+    isolate: *const v8::Isolate,
+    kind: ValueKind,
+    v: v8::Local<v8::Value>,
+    strings: &mut Strings,
+) -> Option<u64> {
+    let class = match layout {
+        Some(l) => l.classify(v),
+        None => classify_api(v),
+    };
+    match kind {
+        ValueKind::Bool => match class {
+            Value::Bool(b) => Some(b as u64),
+            Value::Int(n) => Some((n != 0) as u64),
+            Value::Number(n) => Some((n != 0.0 && !n.is_nan()) as u64),
+            Value::Null | Value::Undefined => Some(0),
+            Value::Pointer(_) => Some(1),
+            _ => None,
+        },
+        ValueKind::I8
+        | ValueKind::U8
+        | ValueKind::I16
+        | ValueKind::U16
+        | ValueKind::I32
+        | ValueKind::U32
+        | ValueKind::I64
+        | ValueKind::U64 => {
+            let n = match class {
+                Value::Int(n) => n as i64,
+                Value::Number(n) if n.is_finite() => n as i64,
+                Value::Number(_) | Value::Null | Value::Undefined => 0,
+                Value::Bool(b) => b as i64,
+                Value::Pointer(a) => a as i64,
+                Value::FlatString => return None,
+                Value::Other => {
+                    let b = v8::Local::<v8::BigInt>::try_from(v).ok()?;
+                    if kind == ValueKind::U64 {
+                        b.u64_value().0 as i64
+                    } else {
+                        b.i64_value().0
+                    }
+                }
+            };
+            Some(kind.extend(n) as u64)
+        }
+        ValueKind::F32 | ValueKind::F64 => {
+            let n = match class {
+                Value::Int(n) => n as f64,
+                Value::Number(n) => n,
+                Value::Bool(b) => b as u8 as f64,
+                Value::Null => 0.0,
+                Value::Undefined => f64::NAN,
+                Value::Other => v8::Local::<v8::BigInt>::try_from(v).ok()?.i64_value().0 as f64,
+                _ => return None,
+            };
+            Some(if kind == ValueKind::F32 {
+                (n as f32).to_bits() as u64
+            } else {
+                n.to_bits()
+            })
+        }
+        ValueKind::Pointer | ValueKind::CString => match class {
+            Value::Null | Value::Undefined => Some(0),
+            Value::Pointer(a) => Some(a as u64),
+            Value::FlatString if kind == ValueKind::CString => {
+                match layout.and_then(|l| l.latin1(v)) {
+                    Some(chars) => strings.push_latin1(chars),
+                    None => strings.push(unsafe { &*isolate }, v),
+                }
+            }
+            Value::Other => other_address(v),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Return register as the fast return type's bits (`f64` bits for float returns).
-#[inline]
-fn fast_ret(ty: &Type, ret: u128) -> u64 {
-    match ty {
-        Type::Bool => (ret as u8 != 0) as u64,
-        Type::Char => ret as u8 as i8 as i32 as u32 as u64,
-        Type::UChar => ret as u8 as u64,
-        Type::Short => ret as u16 as i16 as i32 as u32 as u64,
-        Type::UShort | Type::Unichar => ret as u16 as u64,
-        Type::Int | Type::UInt => ret as u32 as u64,
-        Type::Float => (f32::from_bits(ret as u32) as f64).to_bits(),
-        Type::Double => ret as u64,
+#[inline(always)]
+pub fn fast_ret(kind: ValueKind, ret: u128) -> u64 {
+    match kind {
+        ValueKind::Bool => (ret as u8 != 0) as u64,
+        ValueKind::I8 => ret as u8 as i8 as i32 as u32 as u64,
+        ValueKind::U8 => ret as u8 as u64,
+        ValueKind::I16 => ret as u16 as i16 as i32 as u32 as u64,
+        ValueKind::U16 => ret as u16 as u64,
+        ValueKind::I32 | ValueKind::U32 => ret as u32 as u64,
+        ValueKind::F32 => (f32::from_bits(ret as u32) as f64).to_bits(),
+        ValueKind::F64 => ret as u64,
         _ => 0,
     }
 }
 
-#[inline]
-unsafe fn invoke(opts: *mut FastApiCallbackOptions, args: &[v8::Local<v8::Value>]) -> u64 {
-    let opts = &*opts;
-    let ext: v8::Local<v8::External> = v8::Local::cast_unchecked(opts.data);
-    let function = &*(ext.value() as *const CFunction);
-    let fast = function.fast.as_ref().unwrap_unchecked();
-    let mut ints = [0i64; 8];
-    let mut floats = [0f64; 8];
-    let (mut ni, mut nf) = (0, 0);
-    let mut strings = Strings {
-        isolate: opts.isolate_unchecked(),
-        buf: [std::mem::MaybeUninit::uninit(); STRINGS],
-        used: 0,
-    };
-    let mut simple = true;
-    for (i, ty) in function.signature[1..].iter().enumerate() {
-        let Some(slot) = simple_arg(ty, args[i], &mut strings) else {
-            simple = false;
-            break;
-        };
-        if fast.float_args[i] {
-            floats[nf] = f64::from_bits(slot as u64);
-            nf += 1;
-        } else {
-            ints[ni] = slot as u64 as i64;
-            ni += 1;
-        }
-    }
-    let ret = if simple {
-        (**function).call_fast(fast, ints, floats)
-    } else {
-        v8::callback_scope!(unsafe scope, opts);
-        // into this scope's handles before anything allocates
-        let locals: Vec<v8::Local<v8::Value>> =
-            args.iter().map(|a| v8::Local::new(scope, *a)).collect();
-        let st = &*function.state;
-        match function.call_fast_raw(scope, st, fast, |i| locals[i]) {
-            Ok(ret) => ret,
-            Err(e) => {
-                throw_error(scope, &e);
-                0
+/// `floats`: the typed float params, `None` when the signature has none.
+#[inline(always)]
+unsafe fn invoke(
+    opts: *mut FastApiCallbackOptions,
+    args: &[v8::Local<v8::Value>],
+    floats: Option<FloatRegs>,
+) -> u64 {
+    let opts = unsafe { &*opts };
+    let function = unsafe { &*(tagged::external_value(opts.data) as *const CFunction) };
+    let st = unsafe { &*function.state };
+    let layout = st.tagged();
+    let mut ints: IntRegs = [0; INT_REGS];
+    let mut strings = Strings::new();
+    for (k, &(_, kind)) in function.int_args.iter().enumerate() {
+        let isolate = || unsafe { opts.isolate_unchecked() } as *const v8::Isolate;
+        match simple_arg(layout, isolate, kind, args[k], &mut strings) {
+            Some(v) => ints[k] = v as i64,
+            None => {
+                let floats = floats.unwrap_or([0.0; FLOAT_REGS]);
+                return unsafe { invoke_full(opts, function, args, floats) };
             }
         }
+    }
+    let fast = unsafe { function.fast.as_ref().unwrap_unchecked() };
+    let ret = match &floats {
+        Some(floats) => unsafe { function.call_fast(fast, &ints, floats) },
+        None => unsafe { function.call_ints(fast, &ints) },
     };
-    fast_ret(&function.signature[0], ret)
+    fast_ret(function.ret, ret)
 }
 
+/// Full conversion inside the fast call: References, plain objects for struct
+/// pointers, strings to flatten, errors.
+#[cold]
+#[inline(never)]
+unsafe fn invoke_full(
+    opts: &FastApiCallbackOptions,
+    function: &CFunction,
+    args: &[v8::Local<v8::Value>],
+    floats: FloatRegs,
+) -> u64 {
+    v8::callback_scope!(unsafe scope, opts);
+    // into this scope's handles before anything allocates
+    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+    let mut locals = [undefined; INT_REGS];
+    for (k, a) in args.iter().enumerate() {
+        locals[k] = v8::Local::new(scope, *a);
+    }
+    let st = unsafe { &*function.state };
+    let mut cx = CallCx::default();
+    let mut ints: IntRegs = [0; INT_REGS];
+    for (k, &(index, kind)) in function.int_args.iter().enumerate() {
+        let mut slot = 0u128;
+        let ty = &function.signature[index + 1];
+        let dst = &mut slot as *mut u128 as *mut u8;
+        if let Err(e) = unsafe { marshal::write(scope, st, ty, locals[k], dst, &mut cx) } {
+            throw_error(
+                scope,
+                &format!("{}() argument {}: {e}", function.name, index + 1),
+            );
+            return 0;
+        }
+        ints[k] = kind.extend(slot as u64 as i64);
+    }
+    let fast = unsafe { function.fast.as_ref().unwrap_unchecked() };
+    let ret = unsafe { function.call_fast(fast, &ints, &floats) };
+    if let Err(e) = cx.finish(scope, st) {
+        throw_error(scope, &e);
+    }
+    fast_ret(function.ret, ret)
+}
+
+// receiver, the integer-register params as values, options, then the typed float
+// params, which V8 passes in float registers whatever their position
 macro_rules! trampolines {
     ($($n:literal => $int:ident, $float:ident ($($a:ident),*);)*) => {
         $(
@@ -312,20 +396,60 @@ macro_rules! trampolines {
                 _recv: v8::Local<v8::Value>,
                 $($a: v8::Local<v8::Value>,)*
                 opts: *mut FastApiCallbackOptions,
+                f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64,
             ) -> u64 {
-                unsafe { invoke(opts, &[$($a),*]) }
+                unsafe { invoke(opts, &[$($a),*], Some([f0, f1, f2, f3, f4, f5, f6, f7])) }
+            }
+            unsafe extern "C" fn $float(
+                _recv: v8::Local<v8::Value>,
+                $($a: v8::Local<v8::Value>,)*
+                opts: *mut FastApiCallbackOptions,
+                f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64,
+            ) -> f64 {
+                f64::from_bits(unsafe {
+                    invoke(opts, &[$($a),*], Some([f0, f1, f2, f3, f4, f5, f6, f7]))
+                })
+            }
+        )*
+        const INT_TRAMPOLINES: [*const c_void; 9] = [$($int as *const c_void),*];
+        const FLOAT_TRAMPOLINES: [*const c_void; 9] = [$($float as *const c_void),*];
+    };
+}
+
+// signatures without float params
+macro_rules! int_trampolines {
+    ($($n:literal => $int:ident, $float:ident ($($a:ident),*);)*) => {
+        $(
+            unsafe extern "C" fn $int(
+                _recv: v8::Local<v8::Value>,
+                $($a: v8::Local<v8::Value>,)*
+                opts: *mut FastApiCallbackOptions,
+            ) -> u64 {
+                unsafe { invoke(opts, &[$($a),*], None) }
             }
             unsafe extern "C" fn $float(
                 _recv: v8::Local<v8::Value>,
                 $($a: v8::Local<v8::Value>,)*
                 opts: *mut FastApiCallbackOptions,
             ) -> f64 {
-                f64::from_bits(unsafe { invoke(opts, &[$($a),*]) })
+                f64::from_bits(unsafe { invoke(opts, &[$($a),*], None) })
             }
         )*
-        const INT_TRAMPOLINES: [*const c_void; MAX_ARGS + 1] = [$($int as *const c_void),*];
-        const FLOAT_TRAMPOLINES: [*const c_void; MAX_ARGS + 1] = [$($float as *const c_void),*];
+        const INTS_INT_TRAMPOLINES: [*const c_void; 9] = [$($int as *const c_void),*];
+        const INTS_FLOAT_TRAMPOLINES: [*const c_void; 9] = [$($float as *const c_void),*];
     };
+}
+
+int_trampolines! {
+    0 => ints_int0, ints_float0 ();
+    1 => ints_int1, ints_float1 (a);
+    2 => ints_int2, ints_float2 (a, b);
+    3 => ints_int3, ints_float3 (a, b, c);
+    4 => ints_int4, ints_float4 (a, b, c, d);
+    5 => ints_int5, ints_float5 (a, b, c, d, e);
+    6 => ints_int6, ints_float6 (a, b, c, d, e, f);
+    7 => ints_int7, ints_float7 (a, b, c, d, e, f, g);
+    8 => ints_int8, ints_float8 (a, b, c, d, e, f, g, h);
 }
 
 trampolines! {
@@ -400,14 +524,14 @@ unsafe extern "C" fn pointer_to_number(
     recv: v8::Local<v8::Value>,
     opts: *mut FastApiCallbackOptions,
 ) -> f64 {
-    this_pointer(recv, opts).map_or(0.0, |a| a as f64)
+    unsafe { this_pointer(recv, opts) }.map_or(0.0, |a| a as f64)
 }
 
 unsafe extern "C" fn pointer_to_bigint(
     recv: v8::Local<v8::Value>,
     opts: *mut FastApiCallbackOptions,
 ) -> u64 {
-    this_pointer(recv, opts).map_or(0, |a| a as u64)
+    unsafe { this_pointer(recv, opts) }.map_or(0, |a| a as u64)
 }
 
 unsafe extern "C" fn pointer_equals(
@@ -415,7 +539,7 @@ unsafe extern "C" fn pointer_equals(
     other: v8::Local<v8::Value>,
     opts: *mut FastApiCallbackOptions,
 ) -> bool {
-    this_pointer(recv, opts).is_some_and(|a| address_of(other) == Some(a))
+    unsafe { this_pointer(recv, opts) }.is_some_and(|a| address_of(other) == Some(a))
 }
 
 /// Fast overload of an `interop.Pointer` method, by name.

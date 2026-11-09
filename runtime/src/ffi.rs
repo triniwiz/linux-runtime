@@ -1,24 +1,39 @@
-//! Calling C functions through libffi, and libffi closures for JS callbacks.
+//! Calling C functions (in registers or through libffi), and libffi closures for JS
+//! callbacks.
 
+use crate::fast::{self, Strings};
 use crate::interop::keys;
 use crate::marshal::{self, CallCx, Mem};
-use crate::state::{state, State};
+use crate::state::State;
 use crate::structs;
+use crate::tagged::{self, info, Layout};
 use crate::{report_exception, throw_error};
 use libffi::raw;
-use nativescript_core::call::{CallDesc, FastCall};
+use nativescript_core::call::{
+    CallDesc, FastCall, FloatRegs, IntRegs, ValueKind, FLOAT_REGS, INT_REGS,
+};
 use nativescript_core::closure::Closure;
+#[cfg(target_arch = "x86_64")]
+use nativescript_core::closure::{RegisterClosure, Registers};
 use nativescript_metadata::{MetaId, Type};
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::LazyLock;
 
 /// A C function bound to a runtime.
 pub struct CFunction {
     desc: CallDesc,
     /// owning runtime, avoids the isolate slot lookup per call
     pub(crate) state: *const State,
+    /// integer-register arguments: (argument index, kind)
+    pub(crate) int_args: Vec<(usize, ValueKind)>,
+    /// register return of variadic calls
+    variadic_ret: Option<FastCall>,
     /// view class of a record return
     ret_record: std::cell::OnceCell<structs::RecordClass>,
+    /// last closure passed per callback argument, with `State::closure_generation`
+    callbacks: Box<[Cell<(*const ClosureData, u64)>]>,
 }
 
 impl std::ops::Deref for CFunction {
@@ -28,6 +43,18 @@ impl std::ops::Deref for CFunction {
     }
 }
 
+/// Default argument promotions of a variadic argument, by JS value.
+static VARARG_TYPES: LazyLock<[Type; 6]> = LazyLock::new(|| {
+    [
+        Type::Int,
+        Type::UInt,
+        Type::LongLong,
+        Type::Double,
+        Type::CString,
+        Type::Pointer(Box::new(Type::Void)),
+    ]
+});
+
 impl CFunction {
     pub fn new(
         st: &State,
@@ -36,43 +63,248 @@ impl CFunction {
         signature: Vec<Type>,
         variadic: bool,
     ) -> Result<Self, String> {
+        let desc = CallDesc::new(st, name, address, signature, variadic)?;
+        let int_args = desc
+            .args
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, k)| !k.is_float())
+            .collect();
+        let variadic_ret = if variadic {
+            desc.variadic_ret(st)
+        } else {
+            None
+        };
+        let callbacks = desc
+            .args
+            .iter()
+            .map(|_| Cell::new((std::ptr::null(), 0)))
+            .collect();
         Ok(CFunction {
-            desc: CallDesc::new(st, name, address, signature, variadic)?,
+            desc,
             state: st,
+            int_args,
+            variadic_ret,
             ret_record: Default::default(),
+            callbacks,
         })
     }
 
-    /// C type used for a variadic argument, inferred from the JS value
-    /// (default argument promotions: int / double / pointer).
-    fn vararg_type(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<Type, String> {
+    /// C function pointer for a JS function passed as callback argument `i`; the
+    /// closure of the previous call is reused without a lookup. `None`: not a function.
+    fn callback_arg<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        i: usize,
+        ty: &Type,
+        v: v8::Local<'s, v8::Value>,
+    ) -> Result<Option<u64>, String> {
+        let (Type::FunctionPointer(sig) | Type::Block(sig)) = ty else {
+            return Ok(None);
+        };
+        let (data, generation) = self.callbacks[i].get();
+        if !data.is_null() && generation == st.closure_generation.get() && unsafe { (*data).is(v) }
+        {
+            return Ok(Some(unsafe { (*data).code() } as u64));
+        }
+        let Ok(f) = v8::Local::<v8::Function>::try_from(v) else {
+            return Ok(None);
+        };
+        if let Some(addr) = crate::interop::native_function_address(scope, st, f) {
+            return Ok(Some(addr as u64));
+        }
+        let data = closure_data_for(scope, st, f, sig)
+            .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+        self.callbacks[i].set((data, st.closure_generation.get()));
+        Ok(Some(unsafe { (*data).code() } as u64))
+    }
+
+    /// C type used for a variadic argument, inferred from the JS value.
+    fn vararg_type(value: v8::Local<v8::Value>) -> Result<(ValueKind, &'static Type), String> {
+        let types = &*VARARG_TYPES;
         if value.is_int32() || value.is_boolean() {
-            return Ok(Type::Int);
+            return Ok((ValueKind::I32, &types[0]));
         }
         if value.is_uint32() {
-            return Ok(Type::UInt);
+            return Ok((ValueKind::U32, &types[1]));
         }
-        if value.is_number() {
-            let n = value.number_value(scope).unwrap_or(0.0);
+        if let Ok(n) = v8::Local::<v8::Number>::try_from(value) {
+            let n = n.value();
             return Ok(if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
-                Type::LongLong
+                (ValueKind::I64, &types[2])
             } else {
-                Type::Double
+                (ValueKind::F64, &types[3])
             });
         }
         if value.is_big_int() {
-            return Ok(Type::LongLong);
+            return Ok((ValueKind::I64, &types[2]));
         }
         if value.is_string() {
-            return Ok(Type::CString);
+            return Ok((ValueKind::CString, &types[4]));
         }
         if value.is_function() {
             return Err("functions can't be passed as variadic arguments".into());
         }
         if value.is_null_or_undefined() || value.is_object() {
-            return Ok(Type::Pointer(Box::new(Type::Void)));
+            return Ok((ValueKind::CString, &types[5]));
         }
         Err("unsupported variadic argument".into())
+    }
+
+    /// Slow API callback body.
+    unsafe fn invoke(
+        &self,
+        info: *const v8::FunctionCallbackInfo,
+        args: &v8::FunctionCallbackArguments,
+    ) {
+        let st = unsafe { &*self.state };
+        if let Some(layout) = st.tagged().filter(|l| l.callback_info()) {
+            let done = if self.variadic {
+                unsafe { self.invoke_variadic_registers(info, layout) }
+            } else {
+                unsafe { self.invoke_registers(info, layout) }
+            };
+            if done {
+                return;
+            }
+        }
+        v8::callback_scope!(unsafe scope, unsafe { &*info });
+        let mut rv = v8::ReturnValue::from_function_callback_info(unsafe { &*info });
+        match self.call(scope, st, args) {
+            Ok(v) => rv.set(v),
+            Err(e) => throw_error(scope, &e),
+        }
+    }
+
+    /// Register call without a scope when every argument converts in place;
+    /// `false` leaves the call to [`Self::call`].
+    #[inline]
+    unsafe fn invoke_registers(
+        &self,
+        info: *const v8::FunctionCallbackInfo,
+        layout: &Layout,
+    ) -> bool {
+        let Some(fast) = &self.fast else {
+            return false;
+        };
+        if unsafe { info::argc(info) } != self.args.len() {
+            return false;
+        }
+        let mut ints: IntRegs = [0; INT_REGS];
+        let mut floats: FloatRegs = [0.0; FLOAT_REGS];
+        let (mut ni, mut nf) = (0, 0);
+        let mut strings = Strings::new();
+        for (i, &kind) in self.args.iter().enumerate() {
+            let v = unsafe { info::arg(info, i) };
+            let isolate = || unsafe { info::isolate(info) };
+            let Some(bits) = fast::simple_arg(Some(layout), isolate, kind, v, &mut strings) else {
+                return false;
+            };
+            if kind.is_float() {
+                floats[nf] = f64::from_bits(bits);
+                nf += 1;
+            } else {
+                ints[ni] = bits as i64;
+                ni += 1;
+            }
+        }
+        let ret = if nf == 0 {
+            unsafe { self.desc.call_ints(fast, &ints) }
+        } else {
+            unsafe { self.desc.call_fast(fast, &ints, &floats) }
+        };
+        unsafe { self.set_return(info, layout, ret) };
+        true
+    }
+
+    /// [`Self::invoke_registers`] for variadic functions: variadic arguments are
+    /// classified like [`Self::vararg_type`].
+    #[inline]
+    unsafe fn invoke_variadic_registers(
+        &self,
+        info: *const v8::FunctionCallbackInfo,
+        layout: &Layout,
+    ) -> bool {
+        let Some(ret_class) = &self.variadic_ret else {
+            return false;
+        };
+        let argc = unsafe { info::argc(info) };
+        let fixed = self.args.len();
+        if argc < fixed {
+            return false;
+        }
+        let mut ints: IntRegs = [0; INT_REGS];
+        let mut floats: FloatRegs = [0.0; FLOAT_REGS];
+        let (mut ni, mut nf) = (0, 0);
+        let mut strings = Strings::new();
+        for i in 0..argc {
+            let v = unsafe { info::arg(info, i) };
+            let kind = match self.args.get(i) {
+                Some(&k) => k,
+                None => match vararg_kind(layout, v) {
+                    Some(k) => k,
+                    None => return false,
+                },
+            };
+            if kind.is_float() && nf == FLOAT_REGS || !kind.is_float() && ni == INT_REGS {
+                return false;
+            }
+            let isolate = || unsafe { info::isolate(info) };
+            let Some(bits) = fast::simple_arg(Some(layout), isolate, kind, v, &mut strings) else {
+                return false;
+            };
+            if kind.is_float() {
+                floats[nf] = f64::from_bits(bits);
+                nf += 1;
+            } else {
+                ints[ni] = bits as i64;
+                ni += 1;
+            }
+        }
+        let ret = unsafe { self.desc.call_variadic(ret_class, &ints, &floats) };
+        unsafe { self.set_return(info, layout, ret) };
+        true
+    }
+
+    /// Return value of a register call; numbers that fit a Smi, booleans and NULL are
+    /// written in place.
+    #[inline]
+    unsafe fn set_return(&self, info: *const v8::FunctionCallbackInfo, layout: &Layout, ret: u128) {
+        if unsafe { set_scalar_return(info, layout, self.ret, ret) } {
+            return;
+        }
+        if self.ret == ValueKind::Pointer
+            && unsafe { self.return_pointer(info, ret as u64 as usize) }
+        {
+            return;
+        }
+        v8::callback_scope!(unsafe scope, unsafe { &*info });
+        let mut rv = v8::ReturnValue::from_function_callback_info(unsafe { &*info });
+        let st = unsafe { &*self.state };
+        let ret = &ret as *const u128 as *const u8;
+        match unsafe { self.read_ret(scope, st, &self.signature[0], ret) } {
+            Ok(v) => rv.set(v),
+            Err(e) => throw_error(scope, &e),
+        }
+    }
+
+    /// Pointer result made without a scope; `false` if the factory can't.
+    #[inline]
+    unsafe fn return_pointer(&self, info: *const v8::FunctionCallbackInfo, address: usize) -> bool {
+        let st = unsafe { &*self.state };
+        let pointers = st.pointers.borrow();
+        let made = pointers
+            .as_ref()
+            .and_then(|f| unsafe { f.make_in_callback(info::raw_isolate(info), address) });
+        match made {
+            Some(o) => {
+                unsafe { info::set_return_handle(info, o) };
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn call<'s>(
@@ -81,7 +313,7 @@ impl CFunction {
         st: &State,
         args: &v8::FunctionCallbackArguments<'s>,
     ) -> Result<v8::Local<'s, v8::Value>, String> {
-        let fixed = self.signature.len() - 1;
+        let fixed = self.args.len();
         let argc = args.length() as usize;
         if argc < fixed || (!self.variadic && argc > fixed) {
             return Err(format!(
@@ -92,55 +324,225 @@ impl CFunction {
                 argc
             ));
         }
-
-        if let Some(fast) = &self.fast {
-            return self.call_registers(scope, st, args, fast);
+        if self.variadic {
+            return self.call_variadic(scope, st, args);
         }
-
-        let variadic_sig;
-        let variadic_cif;
-        let (signature, cif) = if self.variadic {
-            let mut sig = self.signature.clone();
-            for i in fixed..argc {
-                sig.push(Self::vararg_type(scope, args.get(i as i32))?);
-            }
-            variadic_sig = sig;
-            variadic_cif = CallDesc::prep(st, &variadic_sig, Some(fixed))?;
-            (&variadic_sig[..], &variadic_cif)
-        } else {
-            (&self.signature[..], self.cif().unwrap())
-        };
-
         let mut cx = CallCx::default();
-        let mut argv_inline = [std::ptr::null_mut::<c_void>(); 16];
-        let mut argv_heap = Vec::new();
-        let argv: &mut [*mut c_void] = if argc <= 16 {
-            &mut argv_inline[..argc]
+        let mut strings = Strings::new();
+        let ret = if let Some(fast) = &self.fast {
+            let mut ints: IntRegs = [0; INT_REGS];
+            let mut floats: FloatRegs = [0.0; FLOAT_REGS];
+            let (mut ni, mut nf) = (0, 0);
+            for (i, &kind) in self.args.iter().enumerate() {
+                let bits = self.convert(
+                    scope,
+                    st,
+                    i,
+                    kind,
+                    &self.signature[i + 1],
+                    args.get(i as i32),
+                    &mut cx,
+                    &mut strings,
+                )?;
+                if kind.is_float() {
+                    floats[nf] = f64::from_bits(bits);
+                    nf += 1;
+                } else {
+                    ints[ni] = bits as i64;
+                    ni += 1;
+                }
+            }
+            unsafe { self.desc.call_fast(fast, &ints, &floats) }
         } else {
-            argv_heap.resize(argc, std::ptr::null_mut());
-            &mut argv_heap
-        };
-        for (i, ty) in signature[1..].iter().enumerate() {
-            let size = match self.slots.get(i) {
-                Some(s) => *s,
-                None => st.layout(ty)?.size.max(8),
+            let mut argv = [std::ptr::null_mut::<c_void>(); 32];
+            let mut argv_heap = Vec::new();
+            let argv: &mut [*mut c_void] = if fixed <= argv.len() {
+                &mut argv[..fixed]
+            } else {
+                argv_heap.resize(fixed, std::ptr::null_mut());
+                &mut argv_heap
             };
-            let slot = cx.scratch(size);
-            unsafe { marshal::write(scope, st, ty, args.get(i as i32), slot, &mut cx) }
-                .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+            for (i, &kind) in self.args.iter().enumerate() {
+                let slot = cx.scratch(self.slots[i]);
+                let ty = &self.signature[i + 1];
+                self.write(
+                    scope,
+                    st,
+                    i,
+                    kind,
+                    ty,
+                    args.get(i as i32),
+                    slot,
+                    &mut cx,
+                    &mut strings,
+                )?;
+                argv[i] = slot as *mut c_void;
+            }
+            let ret = cx.scratch(self.ret_size);
+            unsafe { self.desc.call(self.cif().unwrap(), argv, ret) };
+            let result = unsafe { self.read_ret(scope, st, &self.signature[0], ret) }?;
+            cx.finish(scope, st)?;
+            return Ok(result);
+        };
+        let result = unsafe {
+            self.read_ret(
+                scope,
+                st,
+                &self.signature[0],
+                &ret as *const u128 as *const u8,
+            )?
+        };
+        cx.finish(scope, st)?;
+        Ok(result)
+    }
+
+    /// Argument `i` as register bits: cheap conversions first, then `marshal::write`.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn convert<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        i: usize,
+        kind: ValueKind,
+        ty: &Type,
+        v: v8::Local<'s, v8::Value>,
+        cx: &mut CallCx<'s>,
+        strings: &mut Strings,
+    ) -> Result<u64, String> {
+        if kind == ValueKind::Callback {
+            if let Some(addr) = self.callback_arg(scope, st, i, ty, v)? {
+                return Ok(addr);
+            }
+        }
+        let isolate: *const v8::Isolate = {
+            let i: &v8::Isolate = scope;
+            i
+        };
+        if let Some(bits) = fast::simple_arg(st.tagged(), || isolate, kind, v, strings) {
+            return Ok(bits);
+        }
+        let mut slot = 0u128;
+        let dst = &mut slot as *mut u128 as *mut u8;
+        unsafe { marshal::write(scope, st, ty, v, dst, cx) }
+            .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
+        Ok(if kind.is_float() {
+            slot as u64
+        } else {
+            kind.extend(slot as u64 as i64) as u64
+        })
+    }
+
+    /// Argument `i` into a libffi slot (at least 8 bytes).
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn write<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        i: usize,
+        kind: ValueKind,
+        ty: &Type,
+        v: v8::Local<'s, v8::Value>,
+        slot: *mut u8,
+        cx: &mut CallCx<'s>,
+        strings: &mut Strings,
+    ) -> Result<(), String> {
+        if kind == ValueKind::Callback {
+            if let Some(addr) = self.callback_arg(scope, st, i, ty, v)? {
+                unsafe { (slot as *mut u64).write_unaligned(addr) };
+                return Ok(());
+            }
+        }
+        let isolate: *const v8::Isolate = {
+            let i: &v8::Isolate = scope;
+            i
+        };
+        if let Some(bits) = fast::simple_arg(st.tagged(), || isolate, kind, v, strings) {
+            unsafe { (slot as *mut u64).write_unaligned(bits) };
+            return Ok(());
+        }
+        unsafe { marshal::write(scope, st, ty, v, slot, cx) }
+            .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))
+    }
+
+    fn call_variadic<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        st: &State,
+        args: &v8::FunctionCallbackArguments<'s>,
+    ) -> Result<v8::Local<'s, v8::Value>, String> {
+        let fixed = self.args.len();
+        let argc = args.length() as usize;
+        let mut types: Vec<(ValueKind, &Type)> = Vec::with_capacity(argc);
+        for i in 0..argc {
+            types.push(if i < fixed {
+                (self.args[i], &self.signature[i + 1])
+            } else {
+                Self::vararg_type(args.get(i as i32))
+                    .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?
+            });
+        }
+        let floats_used = types.iter().filter(|(k, _)| k.is_float()).count();
+        let registers = self.variadic_ret.as_ref().filter(|_| {
+            !types.iter().any(|(k, _)| *k == ValueKind::Other)
+                && argc - floats_used <= INT_REGS
+                && floats_used <= FLOAT_REGS
+        });
+        let mut cx = CallCx::default();
+        let mut strings = Strings::new();
+        if let Some(ret_class) = registers {
+            let mut ints: IntRegs = [0; INT_REGS];
+            let mut floats: FloatRegs = [0.0; FLOAT_REGS];
+            let (mut ni, mut nf) = (0, 0);
+            for (i, &(kind, ty)) in types.iter().enumerate() {
+                let bits = self.convert(
+                    scope,
+                    st,
+                    i,
+                    kind,
+                    ty,
+                    args.get(i as i32),
+                    &mut cx,
+                    &mut strings,
+                )?;
+                if kind.is_float() {
+                    floats[nf] = f64::from_bits(bits);
+                    nf += 1;
+                } else {
+                    ints[ni] = bits as i64;
+                    ni += 1;
+                }
+            }
+            let ret = unsafe { self.desc.call_variadic(ret_class, &ints, &floats) };
+            let ret = &ret as *const u128 as *const u8;
+            let result = unsafe { self.read_ret(scope, st, &self.signature[0], ret)? };
+            cx.finish(scope, st)?;
+            return Ok(result);
+        }
+        let signature: Vec<Type> = std::iter::once(self.signature[0].clone())
+            .chain(types.iter().map(|(_, t)| (*t).clone()))
+            .collect();
+        let cif = CallDesc::prep(st, &signature, Some(fixed))?;
+        let mut argv = vec![std::ptr::null_mut::<c_void>(); argc];
+        for (i, &(kind, ty)) in types.iter().enumerate() {
+            let slot = cx.scratch(st.layout(ty)?.size.max(8));
+            self.write(
+                scope,
+                st,
+                i,
+                kind,
+                ty,
+                args.get(i as i32),
+                slot,
+                &mut cx,
+                &mut strings,
+            )?;
             argv[i] = slot as *mut c_void;
         }
-
-        let ret_ty = &signature[0];
-        let ret = cx.scratch(if self.variadic {
-            st.layout(ret_ty)?.size.max(16)
-        } else {
-            self.ret_size
-        });
-
-        unsafe { self.desc.call(cif, argv, ret) };
-
-        let result = unsafe { self.read_ret(scope, st, ret_ty, ret)? };
+        let ret = cx.scratch(st.layout(&self.signature[0])?.size.max(16));
+        unsafe { self.desc.call(&cif, &mut argv, ret) };
+        let result = unsafe { self.read_ret(scope, st, &self.signature[0], ret)? };
         cx.finish(scope, st)?;
         Ok(result)
     }
@@ -154,7 +556,7 @@ impl CFunction {
         ret: *const u8,
     ) -> Result<v8::Local<'s, v8::Value>, String> {
         if !matches!(ty, Type::Struct(_) | Type::Union(_)) {
-            return marshal::read(scope, st, ty, ret, Mem::Temp);
+            return unsafe { marshal::read(scope, st, ty, ret, Mem::Temp) };
         }
         let class = match self.ret_record.get() {
             Some(c) => c,
@@ -167,81 +569,78 @@ impl CFunction {
     }
 }
 
-impl CFunction {
-    fn call_registers<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        st: &State,
-        args: &v8::FunctionCallbackArguments<'s>,
-        fast: &FastCall,
-    ) -> Result<v8::Local<'s, v8::Value>, String> {
-        let ret = self.call_fast_raw(scope, st, fast, |i| args.get(i as i32))?;
-        unsafe {
-            self.read_ret(
-                scope,
-                st,
-                &self.signature[0],
-                &ret as *const u128 as *const u8,
-            )
-        }
-    }
-
-    /// Register call with full marshalling; returns the raw return register.
-    pub(crate) fn call_fast_raw<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        st: &State,
-        fast: &FastCall,
-        arg: impl Fn(usize) -> v8::Local<'s, v8::Value>,
-    ) -> Result<u128, String> {
-        let mut cx = CallCx::default();
-        let mut ints = [0i64; 8];
-        let mut floats = [0f64; 8];
-        let (mut ni, mut nf) = (0, 0);
-        for (i, ty) in self.signature[1..].iter().enumerate() {
-            let mut slot = 0u128;
-            unsafe {
-                marshal::write(
-                    scope,
-                    st,
-                    ty,
-                    arg(i),
-                    &mut slot as *mut u128 as *mut u8,
-                    &mut cx,
-                )
-            }
-            .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?;
-            if fast.float_args[i] {
-                // a float sits in the low 32 bits of the register
-                floats[nf] = f64::from_bits(slot as u64);
-                nf += 1;
-            } else {
-                ints[ni] = slot as u64 as i64;
-                ni += 1;
+/// Sets a scalar result without a scope (Smis, booleans and NULL in place); `false`
+/// for kinds that need one (BigInts, objects, strings).
+#[inline]
+pub(crate) unsafe fn set_scalar_return(
+    info: *const v8::FunctionCallbackInfo,
+    layout: &Layout,
+    kind: ValueKind,
+    ret: u128,
+) -> bool {
+    let mut rv = v8::ReturnValue::from_function_callback_info(unsafe { &*info });
+    match kind {
+        ValueKind::Void => {}
+        ValueKind::Bool => unsafe { info::set_return_word(info, layout.bool_word(ret as u8 != 0)) },
+        ValueKind::I8 | ValueKind::U8 | ValueKind::I16 | ValueKind::U16 | ValueKind::I32 => unsafe {
+            info::set_return_int32(info, fast::fast_ret(kind, ret) as u32 as i32)
+        },
+        ValueKind::U32 => match i32::try_from(ret as u32) {
+            Ok(v) => unsafe { info::set_return_int32(info, v) },
+            Err(_) => rv.set_uint32(ret as u32),
+        },
+        ValueKind::I64 if (ret as u64 as i64).unsigned_abs() <= 1 << 53 => {
+            match i32::try_from(ret as u64 as i64) {
+                Ok(v) => unsafe { info::set_return_int32(info, v) },
+                Err(_) => rv.set_double(ret as u64 as i64 as f64),
             }
         }
-        let ret = unsafe { self.desc.call_fast(fast, ints, floats) };
-        cx.finish(scope, st)?;
-        Ok(ret)
+        ValueKind::U64 if ret as u64 <= 1 << 53 => match i32::try_from(ret as u64) {
+            Ok(v) => unsafe { info::set_return_int32(info, v) },
+            Err(_) => rv.set_double(ret as u64 as f64),
+        },
+        ValueKind::F32 => rv.set_double(f32::from_bits(ret as u32) as f64),
+        ValueKind::F64 => rv.set_double(f64::from_bits(ret as u64)),
+        ValueKind::Pointer if ret as u64 == 0 => unsafe {
+            info::set_return_word(info, layout.null_word())
+        },
+        _ => return false,
     }
+    true
 }
 
-/// JS callback for C functions: `args.data()` points at the `CFunction`
-/// (kept alive by `State::functions`).
-pub fn c_function_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'s, v8::Value>,
-) {
-    let Ok(ext) = v8::Local::<v8::External>::try_from(args.data()) else {
-        return;
-    };
-    let function = unsafe { &*(ext.value() as *const CFunction) };
-    let st = unsafe { &*function.state };
-    match function.call(scope, st, &args) {
-        Ok(v) => rv.set(v),
-        Err(e) => throw_error(scope, &e),
-    }
+/// [`CFunction::vararg_type`] from the value's layout; `None` for values that need the
+/// API (bigints, objects, functions, strings to flatten).
+#[inline]
+fn vararg_kind(layout: &Layout, v: v8::Local<v8::Value>) -> Option<ValueKind> {
+    Some(match layout.classify(v) {
+        tagged::Value::Int(_) | tagged::Value::Bool(_) => ValueKind::I32,
+        tagged::Value::Number(n) => {
+            let integral = n.fract() == 0.0 && !(n == 0.0 && n.is_sign_negative());
+            if integral && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
+                ValueKind::I32
+            } else if integral && n >= 0.0 && n <= u32::MAX as f64 {
+                ValueKind::U32
+            } else if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
+                ValueKind::I64
+            } else {
+                ValueKind::F64
+            }
+        }
+        tagged::Value::Null
+        | tagged::Value::Undefined
+        | tagged::Value::Pointer(_)
+        | tagged::Value::FlatString => ValueKind::CString,
+        tagged::Value::Other => return None,
+    })
+}
+
+/// API callback of C functions: `data` is an External with the `CFunction` (kept
+/// alive by `State::functions`, or by the JS function for function pointers).
+pub unsafe extern "C" fn c_function_callback(info: *const v8::FunctionCallbackInfo) {
+    let args = v8::FunctionCallbackArguments::from_function_callback_info(unsafe { &*info });
+    let function = unsafe { &*(tagged::external_value(args.data()) as *const CFunction) };
+    unsafe { function.invoke(info, &args) }
 }
 
 /// Cached [`CFunction`] for the function declaration `id`.
@@ -277,7 +676,7 @@ pub fn function_from_pointer<'s>(
     // function: when the function is garbage collected the deleter frees it.
     let raw = Box::into_raw(Box::new(function));
     unsafe extern "C" fn drop_function(data: *mut c_void, _: usize, _: *mut c_void) {
-        drop(Box::from_raw(data as *mut CFunction));
+        drop(unsafe { Box::from_raw(data as *mut CFunction) });
     }
     let store = unsafe {
         v8::ArrayBuffer::new_backing_store_from_ptr(
@@ -290,7 +689,7 @@ pub fn function_from_pointer<'s>(
     .make_shared();
     let owner = v8::ArrayBuffer::with_backing_store(scope, &store);
     let data = v8::External::new(scope, raw as *mut c_void);
-    let f = v8::Function::builder(function_pointer_callback)
+    let f = v8::Function::builder_raw(c_function_callback)
         .data(data.into())
         .build(scope)
         .ok_or("failed to create function")?;
@@ -302,30 +701,112 @@ pub fn function_from_pointer<'s>(
     Ok(f.into())
 }
 
-fn function_pointer_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'s, v8::Value>,
-) {
-    let st = state(scope);
-    let Ok(ext) = v8::Local::<v8::External>::try_from(args.data()) else {
-        return;
-    };
-    let function = unsafe { &*(ext.value() as *const CFunction) };
-    match function.call(scope, &st, &args) {
-        Ok(v) => rv.set(v),
-        Err(e) => throw_error(scope, &e),
-    }
-}
-
 /// State of a libffi closure that calls into JS.
 pub struct ClosureData {
     function: v8::Global<v8::Function>,
+    /// handle slot of `function`
+    function_slot: *const v8::Function,
     /// GMainContext of the JS thread, read from foreign threads
     main_context: usize,
     signature: Vec<Type>,
+    /// kinds of the arguments read from C
+    args: Vec<ValueKind>,
+    /// kind of the value returned to C
+    ret: ValueKind,
+    ret_size: usize,
+    /// per argument: (float register, register index), for register closures
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    slots: Vec<(bool, u8)>,
     state: *const State,
-    closure: Option<Closure>,
+    closure: Option<ClosureCode>,
+}
+
+enum ClosureCode {
+    Ffi(Closure),
+    #[cfg(target_arch = "x86_64")]
+    Registers(RegisterClosure),
+}
+
+impl ClosureData {
+    #[inline]
+    fn code(&self) -> usize {
+        match &self.closure {
+            Some(ClosureCode::Ffi(c)) => c.code as usize,
+            #[cfg(target_arch = "x86_64")]
+            Some(ClosureCode::Registers(c)) => c.code as usize,
+            None => 0,
+        }
+    }
+
+    /// Whether `v` is this closure's function.
+    #[inline]
+    fn is(&self, v: v8::Local<v8::Value>) -> bool {
+        tagged::word(v) == unsafe { *(self.function_slot as *const usize) }
+    }
+}
+
+/// Closure state calling `function`: cached per signature, freed by `interop.release`.
+fn closure_data_for<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    function: v8::Local<'s, v8::Function>,
+    signature: &[Type],
+) -> Result<*const ClosureData, String> {
+    let key = keys::closure(scope, signature);
+    if let Some(existing) = function.get_private(scope, key) {
+        if let Ok(b) = v8::Local::<v8::BigInt>::try_from(existing) {
+            return Ok(b.u64_value().0 as usize as *const ClosureData);
+        }
+    }
+    let global = v8::Global::new(scope, function);
+    // SAFETY: the Global belongs to this isolate and lives in the ClosureData
+    let function_slot = unsafe { v8::Handle::get_unchecked(&global) as *const v8::Function };
+    let ret = match ValueKind::of_arg(&signature[0]) {
+        // strings returned to C would dangle: only the full conversion takes them
+        ValueKind::CString => ValueKind::Pointer,
+        k => k,
+    };
+    // signatures that fit in registers skip libffi's per-call argument classification
+    let registers = CallDesc::new(st, "", 0, signature.to_vec(), false)?.fast;
+    let mut slots = Vec::new();
+    if let Some(fast) = &registers {
+        let (mut ni, mut nf) = (0u8, 0u8);
+        for float in &fast.float_args {
+            slots.push(if *float { (true, nf) } else { (false, ni) });
+            if *float {
+                nf += 1;
+            } else {
+                ni += 1;
+            }
+        }
+    }
+    let mut data = Box::new(ClosureData {
+        function: global,
+        function_slot,
+        main_context: st.main_context.context,
+        signature: signature.to_vec(),
+        args: signature[1..].iter().map(ValueKind::of_ret).collect(),
+        ret,
+        ret_size: st.layout(&signature[0])?.size,
+        slots,
+        state: st as *const State,
+        closure: None,
+    });
+    let userdata = &mut *data as *mut ClosureData as *mut c_void;
+    #[cfg(target_arch = "x86_64")]
+    if registers.is_some() {
+        data.closure =
+            RegisterClosure::new(register_trampoline, userdata).map(ClosureCode::Registers);
+    }
+    if data.closure.is_none() {
+        let closure = Closure::new(st, signature, closure_trampoline, userdata)?;
+        data.closure = Some(ClosureCode::Ffi(closure));
+    }
+    let ptr = &*data as *const ClosureData;
+    st.closures.borrow_mut().push(data);
+    let value = v8::BigInt::new_from_u64(scope, ptr as usize as u64);
+    function.set_private(scope, key, value.into());
+    Ok(ptr)
 }
 
 /// C function pointer calling `function`; cached per signature, freed by `interop.release`.
@@ -335,31 +816,7 @@ pub fn closure_for<'s>(
     function: v8::Local<'s, v8::Function>,
     signature: &[Type],
 ) -> Result<usize, String> {
-    let key = keys::closure(scope, signature);
-    if let Some(existing) = function.get_private(scope, key) {
-        if let Ok(b) = v8::Local::<v8::BigInt>::try_from(existing) {
-            return Ok(b.u64_value().0 as usize);
-        }
-    }
-    let mut data = Box::new(ClosureData {
-        function: v8::Global::new(scope, function),
-        main_context: st.main_context.context,
-        signature: signature.to_vec(),
-        state: st as *const State,
-        closure: None,
-    });
-    let closure = Closure::new(
-        st,
-        signature,
-        closure_trampoline,
-        &mut *data as *mut ClosureData as *mut c_void,
-    )?;
-    let address = closure.code as usize;
-    data.closure = Some(closure);
-    st.closures.borrow_mut().push(data);
-    let value = v8::BigInt::new_from_u64(scope, address as u64);
-    function.set_private(scope, key, value.into());
-    Ok(address)
+    closure_data_for(scope, st, function, signature).map(|d| unsafe { (*d).code() })
 }
 
 /// Frees the libffi closures created for `function` (`interop.release`).
@@ -386,6 +843,9 @@ pub fn release_closures<'s>(
         let undefined = v8::undefined(scope);
         function.set_private(scope, key, undefined.into());
     }
+    if !released.is_empty() {
+        st.closure_generation.set(st.closure_generation.get() + 1);
+    }
     released.len()
 }
 
@@ -395,8 +855,8 @@ unsafe extern "C" fn closure_trampoline(
     args: *mut *mut c_void,
     userdata: *mut c_void,
 ) {
-    let data = &*(userdata as *const ClosureData);
-    let st = &*data.state;
+    let data = unsafe { &*(userdata as *const ClosureData) };
+    let st = unsafe { &*data.state };
     thread_local!(static THREAD: std::thread::ThreadId = std::thread::current().id());
     if THREAD.with(|t| *t) != st.thread {
         // called by C on another thread: run on the JS thread and wait
@@ -409,31 +869,55 @@ unsafe extern "C" fn closure_trampoline(
         );
         return;
     }
-    invoke_js(data, ret, args);
+    unsafe { invoke_js(data, ret, args) };
     crate::event_loop::schedule_microtasks(st);
 }
 
+/// Register closure entry: points libffi-style argument pointers at the saved registers.
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn register_trampoline(
+    userdata: *mut c_void,
+    regs: *mut Registers,
+    _stack: *const u64,
+) {
+    let data = unsafe { &*(userdata as *const ClosureData) };
+    let regs = unsafe { &mut *regs };
+    regs.ret = [0; 2];
+    regs.fret = [0.0; 2];
+    let mut args = [std::ptr::null_mut::<c_void>(); 14];
+    for (i, &(float, k)) in data.slots.iter().enumerate() {
+        args[i] = if float {
+            &mut regs.floats[k as usize] as *mut f64 as *mut c_void
+        } else {
+            &mut regs.ints[k as usize] as *mut u64 as *mut c_void
+        };
+    }
+    let ret = if data.ret.is_float() {
+        regs.fret.as_mut_ptr() as *mut c_void
+    } else {
+        regs.ret.as_mut_ptr() as *mut c_void
+    };
+    unsafe { closure_trampoline(std::ptr::null_mut(), ret, args.as_mut_ptr(), userdata) };
+}
+
 unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void) {
-    let st = &*data.state;
-    let ret_ty = &data.signature[0];
-    let ret_size = st.layout(ret_ty).map(|l| l.size).unwrap_or(0);
+    let st = unsafe { &*data.state };
     // libffi expects integral returns widened to ffi_arg
-    std::ptr::write_bytes(
-        ret as *mut u8,
-        0,
-        ret_size.max(std::mem::size_of::<usize>()),
-    );
-    let isolate = &mut *st.isolate.get();
-    v8::scope!(let scope, isolate);
-    let Some(context) = st
-        .context
-        .borrow()
-        .as_ref()
-        .map(|c| v8::Local::new(scope, c))
-    else {
+    unsafe {
+        std::ptr::write_bytes(
+            ret as *mut u8,
+            0,
+            data.ret_size.max(std::mem::size_of::<usize>()),
+        )
+    };
+    let Some(context) = st.context_local() else {
         return;
     };
-    let scope = &mut v8::ContextScope::new(scope, context);
+    let isolate = unsafe { &mut *st.isolate.get() };
+    v8::scope!(let _handles, isolate);
+    // C usually calls back from inside a JS call, with the context entered;
+    // Function::Call enters it when it isn't
+    v8::callback_scope!(unsafe scope, context);
     v8::tc_scope!(let tc, scope);
 
     let undefined: v8::Local<v8::Value> = v8::undefined(tc).into();
@@ -447,44 +931,69 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
         &mut heap[..]
     };
     for (i, ty) in data.signature[1..].iter().enumerate() {
-        match marshal::read(tc, st, ty, *args.add(i) as *const u8, Mem::Temp) {
-            Ok(v) => argv[i] = v,
-            Err(e) => {
-                eprintln!("[nativescript] callback argument {}: {e}", i + 1);
-                return;
+        let src = unsafe { *args.add(i) } as *const u8;
+        argv[i] = match data.args[i] {
+            ValueKind::Pointer => match unsafe { (src as *const usize).read_unaligned() } {
+                0 => v8::null(tc).into(),
+                a => crate::interop::new_pointer(tc, st, a, None).into(),
+            },
+            ValueKind::I32 => {
+                v8::Integer::new(tc, unsafe { (src as *const i32).read_unaligned() }).into()
+            }
+            _ => match unsafe { marshal::read(tc, st, ty, src, Mem::Temp) } {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[nativescript] callback argument {}: {e}", i + 1);
+                    return;
+                }
+            },
+        };
+    }
+    let function = unsafe { &*data.function_slot };
+    // an empty result means an exception or termination
+    let Some(result) = function.call(tc, undefined, argv) else {
+        if !tc.has_terminated() {
+            if let Some(exception) = tc.exception() {
+                let message = tc.message();
+                report_exception(tc, exception, message);
+                st.uncaught.set(st.uncaught.get() + 1);
             }
         }
-    }
-    let function = v8::Local::new(tc, &data.function);
-    let result = function.call(tc, undefined, argv);
-    if tc.has_terminated() {
+        return;
+    };
+    if data.ret == ValueKind::Void {
         return;
     }
-    if let Some(exception) = tc.exception() {
-        let message = tc.message();
-        report_exception(tc, exception, message);
-        st.uncaught.set(st.uncaught.get() + 1);
+    let isolate: *const v8::Isolate = {
+        let i: &v8::Isolate = tc;
+        i
+    };
+    let mut strings = Strings::new();
+    // integers as full width ffi_arg values
+    if let Some(bits) = fast::simple_arg(st.tagged(), || isolate, data.ret, result, &mut strings) {
+        let ret = ret as *mut u8;
+        unsafe {
+            match data.ret {
+                ValueKind::F32 => (ret as *mut u32).write_unaligned(bits as u32),
+                _ => (ret as *mut u64).write_unaligned(bits),
+            }
+        }
         return;
     }
-    let Some(result) = result else { return };
-    if ret_ty.is_void() {
-        return;
-    }
+    let ret_ty = &data.signature[0];
     let mut cx = CallCx::default();
-    let res = match ret_ty {
-        // write integers as full width ffi_arg values
-        Type::Bool | Type::Char | Type::Short | Type::Int | Type::Long | Type::LongLong => {
-            marshal::to_i64(tc, result, ret_ty).map(|v| (ret as *mut i64).write_unaligned(v))
+    let res = match data.ret {
+        ValueKind::I8 | ValueKind::I16 | ValueKind::I32 | ValueKind::I64 | ValueKind::Bool => {
+            marshal::to_i64(tc, result, ret_ty)
+                .map(|v| unsafe { (ret as *mut i64).write_unaligned(data.ret.extend(v)) })
         }
-        Type::UChar | Type::UShort | Type::Unichar | Type::UInt => {
-            marshal::to_i64(tc, result, ret_ty).map(|v| (ret as *mut u64).write_unaligned(v as u64))
-        }
-        _ => marshal::write(tc, st, ret_ty, result, ret as *mut u8, &mut cx),
+        ValueKind::U8 | ValueKind::U16 | ValueKind::U32 => marshal::to_i64(tc, result, ret_ty)
+            .map(|v| unsafe { (ret as *mut u64).write_unaligned(data.ret.extend(v) as u64) }),
+        _ => unsafe { marshal::write(tc, st, ret_ty, result, ret as *mut u8, &mut cx) },
     };
     if let Err(e) = res {
         eprintln!("[nativescript] callback return value: {e}");
     }
     // NOTE: temporaries (e.g. strings) returned to C would dangle; callbacks
     // returning char* must return memory that outlives the call (interop.cstring).
-    drop(cx);
 }

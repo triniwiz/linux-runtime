@@ -65,6 +65,55 @@ fn variadic_functions() {
       const n = snprintf(buf, 64, "%s|%d|%.2f|%lld|%c", "x", -7, 0.5, 1234567890123, 65);
       eq(interop.stringFromCString(buf), "x|-7|0.50|1234567890123|A", "snprintf");
       eq(n, 25, "snprintf result");
+      // more integer arguments than registers: libffi
+      snprintf(buf, 64, "%d %d %d %d %d %d %d", 1, 2, 3, 4, 5, 6, 7);
+      eq(interop.stringFromCString(buf), "1 2 3 4 5 6 7", "stack arguments");
+      for (let i = 0; i < 20000; i++) {
+        snprintf(buf, 64, "%s %u %.1f %p %d", "caf\u00e9", 4000000000, i + 0.5, null, true);
+        if (i % 5000 === 0) {
+          eq(interop.stringFromCString(buf), `caf\u00e9 4000000000 ${i}.5 (nil) 1`, "mixed variadic arguments");
+        }
+      }
+    "#);
+}
+
+/// Struct field accessors once optimized: unboxed reads and writes, same results and errors.
+#[test]
+fn optimized_struct_fields() {
+    run(r#"
+      const m = new cairo_matrix_t();
+      const p = new _graphene_point_t();
+      const l = new lconv();
+      const t = new tm();
+      const year = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(t), "tm_year").get;
+      function hot(i) {
+        m.xx = i + 0.5;
+        eq(m.xx, i + 0.5, "double field");
+        m.x0 = i;
+        eq(m.x0, i, "double field set from an int");
+        p.x = i + 0.25;
+        eq(p.x, i + 0.25, "float field");
+        l.int_frac_digits = (i % 200) - 100;
+        eq(l.int_frac_digits, (i % 200) - 100, "char field");
+        l.int_frac_digits = 300;
+        eq(l.int_frac_digits, 44, "char fields wrap");
+        t.tm_gmtoff = 2 ** 40 + i;
+        eq(t.tm_gmtoff, 2 ** 40 + i, "long field");
+        t.tm_year = true;
+        eq(t.tm_year, 1, "bool into an int field");
+        t.tm_year = 7n;
+        eq(t.tm_year, 7, "bigint into an int field");
+        let threw = false;
+        try { year.call(m); } catch (e) { threw = /not a view of this struct/.test(e.message); }
+        eq(threw, true, "getter of another struct throws");
+        threw = false;
+        try { year.call({}); } catch (e) { threw = /not a struct/.test(e.message); }
+        eq(threw, true, "getter on a plain object throws");
+        threw = false;
+        try { t.tm_year = "x"; } catch (e) { threw = /number or bigint/.test(e.message); }
+        eq(threw, true, "bad values throw");
+      }
+      for (let i = 0; i < 30000; i++) hot(i % 1000);
     "#);
 }
 

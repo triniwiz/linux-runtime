@@ -75,11 +75,12 @@ impl<'s> CallCx<'s> {
     }
 
     /// Writes structs that were passed by pointer back into their JS objects.
-    pub fn finish(self, scope: &mut v8::PinScope<'s, '_>, st: &State) -> Result<(), String> {
+    #[inline]
+    pub fn finish(&mut self, scope: &mut v8::PinScope<'s, '_>, st: &State) -> Result<(), String> {
         if self.copy_back.is_empty() {
             return Ok(());
         }
-        for (object, ty, ptr) in self.copy_back {
+        for (object, ty, ptr) in std::mem::take(&mut self.copy_back) {
             let record = st.record(&ty)?;
             for field in record.fields.iter().filter(|f| !f.name.is_empty()) {
                 let v = unsafe { read_field(scope, st, field, ptr, Mem::Temp)? };
@@ -136,15 +137,40 @@ fn to_f64<'s>(
     Err(type_error("a number", ty))
 }
 
-/// Address of memory backing an ArrayBuffer / typed array / DataView.
-pub fn buffer_address(v: v8::Local<v8::Value>) -> Option<usize> {
+/// Address of an ArrayBuffer / typed array / DataView without creating handles:
+/// `Some(None)` for a typed array whose memory is still on the V8 heap.
+#[inline]
+pub fn buffer_address_in_place(v: v8::Local<v8::Value>) -> Option<Option<usize>> {
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(v) {
-        return Some(view.data() as usize);
+        if !view.has_buffer() {
+            return Some(None);
+        }
+        // off-heap contents are returned in place, `storage` is never written
+        let (data, _) = unsafe { view.get_contents_raw_parts(&mut []) };
+        return Some(Some(data as usize));
     }
     if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(v) {
-        return Some(buffer.data().map(|p| p.as_ptr() as usize).unwrap_or(0));
+        return Some(Some(
+            buffer.data().map(|p| p.as_ptr() as usize).unwrap_or(0),
+        ));
     }
     None
+}
+
+/// Address of memory backing an ArrayBuffer / typed array / DataView; moves typed
+/// array contents off the V8 heap so the address stays valid.
+pub fn buffer_address<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    v: v8::Local<'s, v8::Value>,
+) -> Option<usize> {
+    match buffer_address_in_place(v)? {
+        Some(addr) => Some(addr),
+        None => {
+            let view = v8::Local::<v8::ArrayBufferView>::try_from(v).ok()?;
+            view.buffer(scope)?;
+            buffer_address_in_place(v).flatten()
+        }
+    }
 }
 
 fn is_signed(ty: &Type) -> bool {
@@ -308,7 +334,7 @@ pub unsafe fn write<'s>(
             if let Some(src) = structs::address(scope, value)
                 .or_else(|| interop::pointer_address(scope, value))
                 .or_else(|| interop::reference_storage(scope, value))
-                .or_else(|| buffer_address(value))
+                .or_else(|| buffer_address(scope, value))
             {
                 if src != 0 && src != dst as usize {
                     std::ptr::copy(src as *const u8, dst, record.size);
@@ -341,7 +367,7 @@ pub unsafe fn write<'s>(
                     let v = array.get_index(scope, i).unwrap();
                     write(scope, st, inner, v, dst.add(i as usize * elem.size), cx)?;
                 }
-            } else if let Some(src) = buffer_address(value) {
+            } else if let Some(src) = buffer_address(scope, value) {
                 std::ptr::copy_nonoverlapping(src as *const u8, dst, elem.size * *n as usize);
             } else if value.is_string() && matches!(**inner, Type::Char | Type::UChar) {
                 let s = value.to_rust_string_lossy(scope);
@@ -376,7 +402,7 @@ fn pointer_like<'s>(
     if value.is_null_or_undefined() {
         return Some(0);
     }
-    if let Some(addr) = buffer_address(value) {
+    if let Some(addr) = buffer_address(scope, value) {
         return Some(addr);
     }
     match crate::handles::of(value) {
