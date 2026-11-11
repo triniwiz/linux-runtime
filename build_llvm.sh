@@ -43,6 +43,13 @@ if command -v ld.lld >/dev/null; then
     LINKER_ARGS=(-DLLVM_USE_LINKER=lld)
 fi
 
+# GCC 14 on aarch64 predefines __arm_streaming as [[arm::streaming]], which breaks clang 17's
+# generated keyword list (tok::kw___arm_streaming)
+CXX_FLAGS=()
+case "$ARCH" in
+    aarch64|arm64) CXX_FLAGS=(-DCMAKE_CXX_FLAGS="-U__arm_streaming") ;;
+esac
+
 checkpoint "Configuring llvm $LLVM_VERSION for $ARCH..."
 cmake -S "$SRC_DIR/llvm" -B "$BUILD_DIR" -G "$GENERATOR" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -70,7 +77,7 @@ cmake -S "$SRC_DIR/llvm" -B "$BUILD_DIR" -G "$GENERATOR" \
     -DCLANG_ENABLE_ARCMT=OFF \
     -DCLANG_ENABLE_STATIC_ANALYZER=ON \
     -DLLVM_PARALLEL_LINK_JOBS=4 \
-    "${LINKER_ARGS[@]}"
+    "${LINKER_ARGS[@]}" "${CXX_FLAGS[@]}"
 
 checkpoint "Building llvm $LLVM_VERSION for $ARCH ($NUMJOBS jobs)..."
 cmake --build "$BUILD_DIR" -j "$NUMJOBS"

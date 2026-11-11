@@ -24,6 +24,10 @@ if (NOT EXISTS "${LLVM_LIBDIR}")
 endif ()
 
 set(LLVM_PREPROCESSOR_FLAGS "-isystem ${LLVM_ROOT}/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS")
+# GCC 14 on aarch64 predefines __arm_streaming, breaking clang 17's tok::kw___arm_streaming
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    string(APPEND LLVM_PREPROCESSOR_FLAGS " -U__arm_streaming")
+endif ()
 
 # Link every static clang/LLVM archive inside a group so we don't have to
 # maintain a hand-ordered list of libraries like the iOS build does.

@@ -70,7 +70,8 @@ pub struct MainContext {
 impl MainContext {
     pub fn for_current_thread() -> Self {
         unsafe {
-            let is_main = libc::getpid() == libc::gettid();
+            // the syscall, not gettid(): that wrapper needs glibc 2.30 and releases target 2.28
+            let is_main = libc::getpid() as libc::c_long == libc::syscall(libc::SYS_gettid);
             let existing = g_main_context_get_thread_default();
             if !existing.is_null() {
                 return MainContext {
