@@ -65,6 +65,7 @@ pub fn with_js(st: &State, f: impl FnOnce(Js)) {
 pub fn checkpoint(st: &State) {
     let js = st.js();
     st.jobs_scheduled.set(false);
+    crate::state::drain_adopted(st);
     // a Node-API host drains its own microtasks
     #[cfg(not(feature = "engine"))]
     let _ = js;

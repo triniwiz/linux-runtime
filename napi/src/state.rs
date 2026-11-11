@@ -44,6 +44,8 @@ pub struct State {
     pub module_file: RefCell<std::ffi::CString>,
     /// where resolved metadata globals are memoized (null: the global object)
     pub globals_target: Cell<napi_ref>,
+    /// (free function, address) of collected adopted pointers, freed at the next checkpoint
+    pub adopted: RefCell<Vec<(usize, usize)>>,
 }
 
 impl std::ops::Deref for State {
@@ -77,6 +79,7 @@ impl State {
             cleanup_hooks: Default::default(),
             module_file: Default::default(),
             globals_target: Cell::new(std::ptr::null_mut()),
+            adopted: Default::default(),
         }
     }
 
@@ -117,6 +120,8 @@ pub struct Handle {
     pub pending: napi_ref,
     /// strings stored in struct fields / references
     pub keep: Vec<napi_ref>,
+    /// interop.adopt: native function freeing `address` when the handle is collected
+    pub free: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,11 +158,43 @@ unsafe extern "C" fn finalize_handle(env: napi_env, data: *mut c_void, _: *mut c
         st.handles.borrow_mut().remove(&(data as usize));
     }
     let h = Box::from_raw(data as *mut Handle);
+    if h.free != 0 {
+        free_adopted(h.free, h.address);
+    }
     let js = Js(env);
     js.delete_ref(h.owner);
     js.delete_ref(h.pending);
     for r in h.keep {
         js.delete_ref(r);
+    }
+}
+
+/// Frees an adopted pointer whose handle was collected. Engines may finalize during
+/// GC, where C code calling back into JS (`g_object_unref` running dispose) isn't
+/// safe: queued for the next checkpoint. Node runs finalizers outside GC.
+fn free_adopted(free: usize, address: usize) {
+    #[cfg(feature = "engine")]
+    if let Some(st) = current() {
+        st.adopted.borrow_mut().push((free, address));
+        return;
+    }
+    // SAFETY: a native function taking the pointer, as passed to interop.adopt
+    let free: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(free) };
+    unsafe { free(address as *mut c_void) };
+}
+
+/// Frees the adopted pointers queued by [`free_adopted`].
+pub fn drain_adopted(st: &State) {
+    loop {
+        let queued = std::mem::take(&mut *st.adopted.borrow_mut());
+        if queued.is_empty() {
+            return;
+        }
+        for (free, address) in queued {
+            // SAFETY: as in free_adopted
+            let free: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(free) };
+            unsafe { free(address as *mut c_void) };
+        }
     }
 }
 
@@ -207,6 +244,7 @@ impl Handle {
             owner,
             pending: std::ptr::null_mut(),
             keep: Vec::new(),
+            free: 0,
         }
     }
 }

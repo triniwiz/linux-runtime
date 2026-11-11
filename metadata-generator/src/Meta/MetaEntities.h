@@ -139,6 +139,14 @@ public:
         return this->type == type;
     }
 
+    /// A struct, union or enum from a header outside the module map (e.g. GTK
+    /// types used by an app's own library). Types reference it by name, the
+    /// runtime finds its definition in another metadata file; it isn't emitted.
+    bool isExternal() const
+    {
+        return module == nullptr && (is(MetaType::Struct) || is(MetaType::Union) || is(MetaType::Enum));
+    }
+
     bool getFlags(MetaFlags flags) const
     {
         return (this->flags & flags) == flags;
@@ -252,6 +260,8 @@ class RecordMeta : public Meta {
 public:
     std::vector<RecordField> fields;
     RecordLayout layout;
+    /// jsName is a typedef of the record, `name` its struct tag
+    bool namedByTypedef = false;
 };
 
 class StructMeta : public RecordMeta {

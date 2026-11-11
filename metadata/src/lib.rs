@@ -298,6 +298,14 @@ impl MetaFile {
             .find(|m| m.name() == name || m.demangled_name() == Some(name))
     }
 
+    /// [`MetaFile::find`], then a struct or union by its C name, see [`MetaSet::find_global`].
+    pub fn find_global(&self, name: &str) -> Option<Meta<'_>> {
+        self.find(name).or_else(|| {
+            self.find_native(name)
+                .filter(|m| matches!(m.kind(), MetaKind::Struct | MetaKind::Union))
+        })
+    }
+
     /// Declaration at `offset`, as returned by [`Meta::offset`]. The offset
     /// must come from this file.
     pub fn meta_at(&self, offset: Offset) -> Meta<'_> {
@@ -364,6 +372,16 @@ impl MetaSet {
         self.files
             .iter()
             .find_map(|f| f.find_native_hashed(name, hash))
+    }
+
+    /// [`MetaSet::find`], then a struct or union by its C name: a record named
+    /// after its typedef (`GdkRGBA`) is also reachable by its tag (`_GdkRGBA`).
+    /// The returned [`Meta::js_name`] is the canonical name.
+    pub fn find_global(&self, name: &str) -> Option<Meta<'_>> {
+        self.find(name).or_else(|| {
+            self.find_native(name)
+                .filter(|m| matches!(m.kind(), MetaKind::Struct | MetaKind::Union))
+        })
     }
 
     /// Id of a declaration (or module) offset inside `file`, a member of this set.

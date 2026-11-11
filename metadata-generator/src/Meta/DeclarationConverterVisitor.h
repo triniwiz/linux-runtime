@@ -23,6 +23,7 @@ public:
 
     std::list<Meta*>& generateMetadata(clang::TranslationUnitDecl* translationUnit)
     {
+        this->_metaFactory.collectRecordTypedefs(*translationUnit);
         this->TraverseDecl(translationUnit);
         return _metaContainer;
     }
@@ -73,6 +74,10 @@ private:
             // if accessed at runtime.
 
             Meta* meta = this->_metaFactory.create(*decl, /*resetCached*/ true);
+            if (meta->isExternal()) {
+                // declared outside the module map: only referenced by name
+                return true;
+            }
             std::string whitelistRule, blacklistRule;
             // Never blacklist NSObject - it's special and always needed by both the {N} runtime and the MDG
             if (meta->name != "NSObject" && meta->module && _modulesBlacklist.shouldBlacklist(meta->module->getFullModuleName(), meta->name.empty() ? meta->jsName : meta->name, /*r*/whitelistRule, /*r*/blacklistRule)) {

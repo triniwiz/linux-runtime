@@ -2,30 +2,13 @@ mod watch;
 
 use nativescript_core::nsbundle::{self, fuses, Fuse};
 use nativescript_runtime::Runtime;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: ns-linux [--metadata <metadata.bin>] [--inspect[-brk][=port]] [--watch] <script.js> | -e <code>");
+    eprintln!("usage: ns-linux [--metadata <metadata.bin[:more.bin...]>] [--inspect[-brk][=port]] [--watch] <script.js> | -e <code>");
     ExitCode::from(2)
-}
-
-/// `--metadata`, then `$NS_METADATA`, then `metadata-<arch>.bin` next to the
-/// executable or in the working directory. Release builds (envOverrides fuse off)
-/// only use the one next to the executable.
-fn find_metadata(explicit: Option<PathBuf>, overrides: bool) -> Option<PathBuf> {
-    let file = format!("metadata-{}.bin", std::env::consts::ARCH);
-    let next_to_exe = || {
-        let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-        Some(exe_dir.join(&file)).filter(|p| p.exists())
-    };
-    if !overrides {
-        return next_to_exe();
-    }
-    explicit
-        .or_else(|| std::env::var_os("NS_METADATA").map(PathBuf::from))
-        .or_else(next_to_exe)
-        .or_else(|| Some(PathBuf::from(&file)).filter(|p| p.exists()))
 }
 
 fn main() -> ExitCode {
@@ -42,7 +25,7 @@ fn main() -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             _ if !overrides || script.is_some() || eval.is_some() => rest.push(arg),
-            "--metadata" => metadata = args.next().map(PathBuf::from),
+            "--metadata" => metadata = args.next().map(OsString::from),
             a if a.starts_with("--inspect") => {
                 let port = a
                     .split_once('=')
@@ -107,7 +90,7 @@ fn main() -> ExitCode {
     if let Err(e) = nativescript_runtime::set_v8_flags(&flags) {
         eprintln!("ns-linux: {e}");
     }
-    let Some(metadata) = find_metadata(metadata, overrides) else {
+    let Some(metadata) = nativescript_core::bundle::find_metadata(metadata, overrides) else {
         eprintln!("ns-linux: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);
     };

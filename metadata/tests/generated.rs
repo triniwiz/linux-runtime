@@ -82,7 +82,7 @@ fn functions() {
 #[test]
 fn records() {
     let Some(file) = metadata() else { return };
-    let gvalue = file.find("_GValue").unwrap();
+    let gvalue = file.find_global("_GValue").unwrap();
     assert_eq!(gvalue.kind(), MetaKind::Struct);
     let fields = gvalue.fields().unwrap();
     assert_eq!(fields[0].0, "g_type");
@@ -99,6 +99,30 @@ fn records() {
     let tm = file.find("tm").unwrap();
     assert_eq!(tm.kind(), MetaKind::Struct);
     assert_eq!(tm.fields().unwrap()[0], ("tm_sec".into(), Type::Int));
+}
+
+#[test]
+fn records_take_their_typedef_name() {
+    let Some(file) = metadata() else { return };
+    // typedef struct _GdkRGBA GdkRGBA; ... struct _GdkRGBA { ... };
+    for (typedef, tag) in [
+        ("GdkRGBA", "_GdkRGBA"),
+        ("graphene_rect_t", "_graphene_rect_t"),
+        ("GValue", "_GValue"),
+    ] {
+        let Some(meta) = file.find(typedef) else {
+            panic!("{typedef} not found by its typedef name");
+        };
+        assert_eq!(meta.kind(), MetaKind::Struct);
+        assert_eq!(meta.name(), tag);
+        assert!(file.find(tag).is_none(), "{tag} is not a js name");
+        let by_tag = file.find_global(tag).expect(tag);
+        assert_eq!(by_tag.js_name(), typedef);
+    }
+    // a typedef next to its definition was already the name
+    assert_eq!(file.find("div_t").unwrap().kind(), MetaKind::Struct);
+    // no typedef: the tag
+    assert_eq!(file.find("tm").unwrap().name(), "tm");
 }
 
 #[test]
@@ -125,7 +149,7 @@ fn record_layouts_and_const_strings() {
     assert_eq!(tm.fields[9].offset_bits, 320); // tm_gmtoff after tm_isdst + padding
 
     // struct _GList { gpointer data; GList *next; GList *prev; }
-    let list = file.find("_GList").unwrap().record_layout().unwrap();
+    let list = file.find_global("_GList").unwrap().record_layout().unwrap();
     assert_eq!(list.size, 24);
 
     // GTK uses bitfields, e.g. struct _GdkRGBA has none but _GtkBorder has none either:

@@ -5,6 +5,21 @@
  */
 declare module interop {
 	/**
+	 * A Pointer to the same memory that the garbage collector frees once the returned
+	 * Pointer is collected, by calling `free` with it: a native function such as `g_free`
+	 * or `g_object_unref` (default: libc `free`). The call runs after the GC, from the
+	 * event loop. Use it for memory or references C hands over to the caller
+	 * (`transfer full`), and keep the returned Pointer, not `ptr`.
+	 * `interop.free` on it does nothing; adopting it again throws.
+	 *
+	 * ```js
+	 * const buffer = interop.adopt(g_malloc0(64), g_free);
+	 * const label = interop.adopt(g_object_ref_sink(gtk_label_new('hi')), g_object_unref);
+	 * ```
+	 */
+	function adopt(ptr: Pointer, free?: Function): Pointer;
+
+	/**
 	 * Zero-copy view of native memory. `free` (e.g. `g_free`) runs when the buffer is collected.
 	 */
 	function bufferFromData(data: Pointer, length: number, free?: Function): ArrayBuffer;

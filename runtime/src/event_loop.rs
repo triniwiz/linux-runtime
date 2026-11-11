@@ -78,6 +78,7 @@ pub fn checkpoint(scope: &mut v8::PinScope<'_, '_>, st: &State) {
     st.microtasks_scheduled.set(false);
     scope.perform_microtask_checkpoint();
     crate::napi::drain_finalizers(st);
+    crate::interop::drain_adopted(st);
     let rejections = std::mem::take(&mut *st.rejections.borrow_mut());
     for (_, value) in rejections {
         let value = v8::Local::new(scope, &value);
