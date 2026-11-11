@@ -5,6 +5,8 @@
 #   HERMES_REV   hermes-windows commit (default: pinned below)
 #   HERMES_SRC   existing checkout to build instead of downloading
 #   JOBS         parallel jobs (default: nproc)
+#   ICU_ROOT     a static ICU install to link instead of the system one; its archives go beside
+#                libhermes.a so the runtime doesn't depend on the build distro's ICU soname
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE="$PWD"
@@ -14,6 +16,8 @@ WORK="${WORK:-$HERE/target-hermes}"
 OUT="$HERE/vendor/$ARCH"
 JOBS="${JOBS:-$(nproc)}"
 WEAK=""
+ICU_ARGS=()
+[ -n "${ICU_ROOT:-}" ] && ICU_ARGS=(-DHERMES_USE_STATIC_ICU=ON)
 mkdir -p "$WORK" "$OUT"
 
 SRC="${HERMES_SRC:-$WORK/hermes-windows-$HERMES_REV}"
@@ -34,9 +38,10 @@ cp csrc/CMakeLists.txt csrc/hermes_jsr.cpp "$SRC/API/hermes_ns/"
 grep -q hermes_ns "$SRC/API/CMakeLists.txt" || echo 'add_subdirectory(hermes_ns)' >> "$SRC/API/CMakeLists.txt"
 
 BUILD="$WORK/build-$ARCH"
-cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
+# PIC: ns-linux is PIE, and not every toolchain (manylinux's gcc-toolset) defaults to it
+cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DHERMES_ENABLE_DEBUGGER=OFF -DHERMES_ENABLE_INTL=OFF \
-    -DHERMES_ENABLE_TEST_SUITE=OFF -DHERMES_BUILD_APPLE_FRAMEWORK=OFF
+    -DHERMES_ENABLE_TEST_SUITE=OFF -DHERMES_BUILD_APPLE_FRAMEWORK=OFF "${ICU_ARGS[@]}"
 cmake --build "$BUILD" --target hermes_ns hermesc -j "$JOBS"
 
 # one archive for build.rs
@@ -58,6 +63,8 @@ done
 objcopy $WEAK "$LIB"
 strip --strip-debug "$LIB"
 install -m 755 "$BUILD/bin/hermesc" "$OUT/hermesc"
+rm -f "$OUT"/libicu*.a
+[ -n "${ICU_ROOT:-}" ] && cp "$ICU_ROOT"/lib/libicu{i18n,uc,data}.a "$OUT/"
 strip "$OUT/hermesc"
 echo "$HERMES_REV" > "$OUT/REVISION"
 ls -la "$OUT"

@@ -17,7 +17,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", dir.display());
     // napi_* must stay in the binary for addons
     println!("cargo:rustc-link-lib=static:+whole-archive=hermes");
-    for lib in ["icui18n", "icuuc", "stdc++", "m"] {
+    for lib in ["icui18n", "icuuc", "icudata", "stdc++", "m"] {
         println!("cargo:rustc-link-lib={lib}");
     }
     println!("cargo:rustc-link-arg-bins=-rdynamic");
