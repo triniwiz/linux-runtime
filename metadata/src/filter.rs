@@ -88,11 +88,19 @@ impl Filter {
     }
 
     pub fn allows(&self, module: &str, symbol: &str) -> bool {
-        let listed = self
-            .whitelist
-            .as_ref()
-            .is_none_or(|w| w.iter().any(|r| r.matches(module, symbol)));
-        listed && !self.blacklist.iter().any(|r| r.matches(module, symbol))
+        self.allows_any(module, &[symbol])
+    }
+
+    /// [`Filter::allows`] for a declaration known by several names (a struct's
+    /// typedef and tag): listed if any name is, blacklisted if any name is.
+    pub fn allows_any(&self, module: &str, symbols: &[&str]) -> bool {
+        let matches = |rules: &[Rule]| {
+            rules
+                .iter()
+                .any(|r| symbols.iter().any(|s| r.matches(module, s)))
+        };
+        let listed = self.whitelist.as_deref().is_none_or(matches);
+        listed && !matches(&self.blacklist)
     }
 }
 
@@ -110,8 +118,10 @@ pub fn filter(file: &MetaFile, filter: &Filter) -> (Vec<u8>, FilterStats) {
     let mut keep: Vec<Meta> = Vec::new();
     let mut seen: HashSet<Offset> = HashSet::new();
     for meta in &all {
-        let needed = RUNTIME_SYMBOLS.contains(&meta.js_name())
-            || filter.allows(meta.module().name(), meta.name());
+        // records named after their typedef match by either name
+        let names = [meta.name(), meta.js_name()];
+        let needed = names.iter().any(|n| RUNTIME_SYMBOLS.contains(n))
+            || filter.allows_any(meta.module().name(), &names);
         if needed && seen.insert(meta.offset) {
             keep.push(*meta);
         }
@@ -140,7 +150,7 @@ pub fn filter(file: &MetaFile, filter: &Filter) -> (Vec<u8>, FilterStats) {
         }
         for name in names {
             if let Some(dep) = file
-                .find(&name)
+                .find_global(&name)
                 .filter(|m| matches!(m.kind(), MetaKind::Struct | MetaKind::Union))
             {
                 if seen.insert(dep.offset) {

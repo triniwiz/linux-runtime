@@ -2,26 +2,10 @@
 
 use crate::Runtime;
 use nativescript_core::nsbundle::{self, fuses, Fuse};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-
-/// `--metadata`, then `$NS_METADATA`, then `metadata-<arch>.bin` next to the
-/// executable or in the working directory (release builds: only next to the executable).
-fn find_metadata(explicit: Option<PathBuf>, overrides: bool) -> Option<PathBuf> {
-    let file = format!("metadata-{}.bin", std::env::consts::ARCH);
-    let next_to_exe = || {
-        let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-        Some(exe_dir.join(&file)).filter(|p| p.exists())
-    };
-    if !overrides {
-        return next_to_exe();
-    }
-    explicit
-        .or_else(|| std::env::var_os("NS_METADATA").map(PathBuf::from))
-        .or_else(next_to_exe)
-        .or_else(|| Some(PathBuf::from(&file)).filter(|p| p.exists()))
-}
 
 pub fn main(engine: &str) -> ExitCode {
     main_with_flags(engine, |_| {})
@@ -33,7 +17,7 @@ pub fn main_with_flags(engine: &str, set_flags: fn(&str)) -> ExitCode {
     crate::compat::keep();
     let bin = format!("ns-linux-{engine}");
     let usage = || {
-        eprintln!("usage: {bin} [--metadata <metadata.bin>] <script.js> | -e <code>");
+        eprintln!("usage: {bin} [--metadata <metadata.bin[:more.bin...]>] <script.js> | -e <code>");
         ExitCode::from(2)
     };
     // release builds (envOverrides fuse off): every argument belongs to the app
@@ -43,7 +27,7 @@ pub fn main_with_flags(engine: &str, set_flags: fn(&str)) -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             _ if !overrides || script.is_some() || eval.is_some() => rest.push(arg),
-            "--metadata" => metadata = args.next().map(PathBuf::from),
+            "--metadata" => metadata = args.next().map(OsString::from),
             "-e" | "--eval" => eval = args.next(),
             "-h" | "--help" => return usage(),
             _ => script = Some(PathBuf::from(arg)),
@@ -68,7 +52,7 @@ pub fn main_with_flags(engine: &str, set_flags: fn(&str)) -> ExitCode {
         return usage();
     }
     set_flags(&nativescript_core::config::v8_flags(script.as_deref()));
-    let Some(metadata) = find_metadata(metadata, overrides) else {
+    let Some(metadata) = nativescript_core::bundle::find_metadata(metadata, overrides) else {
         eprintln!("{bin}: metadata not found, pass --metadata or set NS_METADATA");
         return ExitCode::from(2);
     };

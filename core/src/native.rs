@@ -17,16 +17,73 @@ pub fn set_library_dirs(dirs: Vec<PathBuf>) {
     let _ = LIBRARY_DIRS.set(dirs);
 }
 
-fn library_path(name: &str) -> CString {
-    let bundled = (!name.contains('/'))
-        .then(|| LIBRARY_DIRS.get())
-        .flatten()
-        .and_then(|dirs| dirs.iter().map(|d| d.join(name)).find(|p| p.exists()));
-    match bundled {
-        Some(path) => CString::new(path.into_os_string().into_encoded_bytes()),
-        None => CString::new(name),
+/// What to `dlopen` for a module map `link` name, in order: the name as a
+/// soname or file in the bundle's `lib/`, then for a `-l` style name (`mason_c`)
+/// `libmason_c.so` and `libmason_c.so.<version>` in `lib/`, then `libmason_c.so`
+/// from the system paths.
+fn library_candidates(name: &str) -> Vec<PathBuf> {
+    if name.contains('/') {
+        return vec![PathBuf::from(name)];
     }
-    .unwrap_or_default()
+    let dirs = LIBRARY_DIRS.get().map(Vec::as_slice).unwrap_or_default();
+    let bundled = |file: &str| dirs.iter().map(|d| d.join(file)).find(|p| p.exists());
+    let mut out = vec![bundled(name).unwrap_or_else(|| PathBuf::from(name))];
+    if !name.contains(".so") {
+        let file = if name.starts_with("lib") {
+            format!("{name}.so")
+        } else {
+            format!("lib{name}.so")
+        };
+        let versioned = || {
+            let prefix = format!("{file}.");
+            dirs.iter().find_map(|d| {
+                let mut found: Vec<PathBuf> = std::fs::read_dir(d)
+                    .ok()?
+                    .filter_map(|e| Some(e.ok()?.path()))
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(&prefix))
+                    })
+                    .collect();
+                // the shortest is the soname (libfoo.so.1 over libfoo.so.1.2.3)
+                found.sort_by_key(|p| p.as_os_str().len());
+                found.into_iter().next()
+            })
+        };
+        out.extend(bundled(&file).or_else(versioned));
+        out.push(PathBuf::from(file));
+    }
+    out.dedup();
+    out
+}
+
+/// `dlopen`s a module's `link` name, see [`library_candidates`].
+fn open_library(name: &str) -> Result<*mut c_void, String> {
+    let candidates = library_candidates(name);
+    let mut first_error = None;
+    for path in &candidates {
+        let Ok(c) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+            continue;
+        };
+        // SAFETY: plain dlopen of a library named by the metadata
+        let handle = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
+        if !handle.is_null() {
+            return Ok(handle);
+        }
+        first_error.get_or_insert_with(dlerror);
+    }
+    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+    let lib = LIBRARY_DIRS
+        .get()
+        .and_then(|d| d.first())
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "lib/ next to the executable".into());
+    Err(format!(
+        "{} (tried {}). A module map `link` is a soname (libfoo.so.1), a file in {lib} or a -l style name (foo)",
+        first_error.unwrap_or_default(),
+        tried.join(", ")
+    ))
 }
 
 /// Multiply-rotate hash (rustc's FxHasher): `Type` keys hash struct names, which
@@ -150,22 +207,15 @@ impl Native {
                 .or_insert_with(|| {
                     module
                         .libraries()
-                        .filter_map(|lib| {
-                            let name = library_path(lib.name());
-                            // SAFETY: plain dlopen of a soname from the metadata
-                            let handle = unsafe {
-                                libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL)
-                            };
-                            if handle.is_null() {
+                        .filter_map(|lib| match open_library(lib.name()) {
+                            Ok(handle) => Some(handle as usize),
+                            Err(e) => {
                                 eprintln!(
-                                    "[nativescript] failed to load {} for module {}: {}",
+                                    "[nativescript] failed to load {} for module {}: {e}",
                                     lib.name(),
                                     module.name(),
-                                    dlerror()
                                 );
                                 None
-                            } else {
-                                Some(handle as usize)
                             }
                         })
                         .collect()
@@ -223,7 +273,7 @@ impl Native {
         };
         let meta = self
             .meta
-            .find(name)
+            .find_global(name)
             .filter(|m| matches!(m.kind(), MetaKind::Struct | MetaKind::Union))
             .ok_or_else(|| {
                 format!("'{name}' is an opaque or unknown record, its layout is not available")
@@ -450,5 +500,28 @@ pub fn dlerror() -> String {
         } else {
             std::ffi::CStr::from_ptr(e).to_string_lossy().into_owned()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::library_candidates;
+
+    fn names(link: &str) -> Vec<String> {
+        library_candidates(link)
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn link_names() {
+        // sonames and paths are used as they are
+        assert_eq!(names("libgtk-4.so.1"), ["libgtk-4.so.1"]);
+        assert_eq!(names("libmason_c.so"), ["libmason_c.so"]);
+        assert_eq!(names("/opt/x/libx.so"), ["/opt/x/libx.so"]);
+        // -l style names
+        assert_eq!(names("mason_c"), ["mason_c", "libmason_c.so"]);
+        assert_eq!(names("libfoo"), ["libfoo", "libfoo.so"]);
     }
 }

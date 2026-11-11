@@ -22,10 +22,21 @@ pub fn install_interceptor(template: &v8::Local<v8::ObjectTemplate>) {
                         return v8::Intercepted::kNo;
                     }
                     let name = key.to_rust_string_lossy(scope);
-                    let Some(meta) = st.meta.find(&name) else {
+                    let Some(meta) = st.meta.find_global(&name) else {
                         return v8::Intercepted::kNo;
                     };
-                    match resolve(scope, &st, meta) {
+                    // a struct tag (`_GdkRGBA`): the same constructor as its typedef name
+                    let resolved = if meta.js_name() != name {
+                        let canonical = v8::String::new(scope, meta.js_name()).unwrap();
+                        let global = scope.get_current_context().global(scope);
+                        global
+                            .get(scope, canonical.into())
+                            .map(|v| Some((v, true)))
+                            .ok_or_else(|| "failed to resolve".to_owned())
+                    } else {
+                        resolve(scope, &st, meta)
+                    };
+                    match resolved {
                         Ok(Some((value, memoize))) => {
                             if memoize {
                                 let context = scope.get_current_context();
@@ -63,7 +74,7 @@ pub fn install_interceptor(template: &v8::Local<v8::ObjectTemplate>) {
                         return v8::Intercepted::kNo;
                     }
                     let name = key.to_rust_string_lossy(scope);
-                    match st.meta.find(&name) {
+                    match st.meta.find_global(&name) {
                         Some(m)
                             if !matches!(
                                 m.kind(),
@@ -101,8 +112,14 @@ fn resolve<'s>(
                 scope,
                 std::rc::Rc::as_ptr(&function) as *mut std::ffi::c_void,
             );
-            let builder =
-                v8::FunctionTemplate::builder_raw(ffi::c_function_callback).data(data.into());
+            // its own entry point, for CPU profiles
+            let entry = crate::thunks::entry(
+                ffi::c_function_callback as *const std::ffi::c_void,
+                function.address,
+            );
+            // SAFETY: the thunk jumps to c_function_callback, same signature
+            let callback: v8::FunctionCallback = unsafe { std::mem::transmute(entry) };
+            let builder = v8::FunctionTemplate::builder_raw(callback).data(data.into());
             let template = match crate::fast::overload(&function) {
                 Some(fast) => builder.build_fast(scope, &[fast]),
                 None => builder.build(scope),

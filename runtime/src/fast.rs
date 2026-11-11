@@ -88,6 +88,8 @@ pub fn overload(function: &CFunction) -> Option<FastFunction> {
         (false, false) => INT_TRAMPOLINES[ints],
         (false, true) => FLOAT_TRAMPOLINES[ints],
     };
+    // per function, for CPU profiles (see crate::thunks)
+    let address = crate::thunks::entry(address, function.address);
     Some(FastFunction::new(address, info(&function.args, ret)))
 }
 

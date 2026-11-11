@@ -350,11 +350,53 @@ unsafe extern "C" fn interop_free(env: napi_env, info: napi_callback_info) -> na
     let (argv, _, _, _) = args(env, info);
     match handle_of(js, argv[0], Kind::Pointer) {
         // memory from interop.alloc is garbage collected
-        Some(h) if h.owner.is_null() => libc::free(h.address as *mut c_void),
+        Some(h) if h.owner.is_null() && h.free == 0 => libc::free(h.address as *mut c_void),
         Some(_) => {}
         None => return fail(js, "interop.free expects a Pointer"),
     }
     null_mut()
+}
+
+/// `interop.adopt(pointer, free?)`: a Pointer to the same memory, freed with `free`
+/// (default `free`, e.g. `g_free`, `g_object_unref`) once it is garbage collected.
+unsafe extern "C" fn interop_adopt(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let (argv, _, _, _) = args(env, info);
+    if matches!(js.type_of(argv[0]), UNDEFINED | NULL) {
+        return js.null();
+    }
+    let Some(h) = handle_of(js, argv[0], Kind::Pointer) else {
+        return fail(js, "interop.adopt expects a Pointer");
+    };
+    let address = h.address;
+    if address == 0 {
+        return js.null();
+    }
+    if !h.owner.is_null() || h.free != 0 {
+        return fail(
+            js,
+            "interop.adopt: the memory is already freed by the garbage collector",
+        );
+    }
+    let free = match js.type_of(argv[1]) {
+        FUNCTION => match native_function_address(st, argv[1]) {
+            Some(a) => a,
+            None => {
+                return fail(
+                    js,
+                    "the free function must be a native function such as free, g_free or g_object_unref",
+                )
+            }
+        },
+        UNDEFINED | NULL => libc::free as *const () as usize,
+        _ => return fail(js, "interop.adopt: free must be a native function"),
+    };
+    let pointer = new_pointer(st, address, None);
+    if let Some(h) = handle_of(js, pointer, Kind::Pointer) {
+        h.free = free;
+    }
+    pointer
 }
 
 unsafe extern "C" fn interop_sizeof(env: napi_env, info: napi_callback_info) -> napi_value {
@@ -584,6 +626,7 @@ pub fn install(st: &State, global: napi_value) {
     for (name, cb) in [
         ("alloc", interop_alloc as Cb),
         ("free", interop_free),
+        ("adopt", interop_adopt),
         ("sizeof", interop_sizeof),
         ("handleof", interop_handleof),
         ("stringFromCString", interop_string_from_cstring),

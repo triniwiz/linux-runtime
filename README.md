@@ -77,10 +77,102 @@ export NS_METADATA=metadata-generator/tests/TestOutput/metadata-$(uname -m).bin
 ./target/release/ns-linux -e 'console.log(getpid())'
 ```
 
-`ns-linux [--metadata <file>] [--inspect[-brk][=port]] [--watch] <script | app folder | app.nsbundle> [args]`
+`ns-linux [--metadata <file[:file...]>] [--inspect[-brk][=port]] [--watch] <script | app folder | app.nsbundle> [args]`
 
+- `--metadata` and `NS_METADATA` take one file or a `:`-separated list, like the Node-API addon.
 - `--watch` restarts the script when its files change.
 - `NS_V8_FLAGS` passes flags to V8.
+
+C structs are globals under their typedef name (`GdkRGBA`, `graphene_rect_t`, `GList`). The struct
+tag (`_GdkRGBA`) is the same constructor.
+
+## Metadata for an App's Own C Library
+
+An app or plugin that ships a C library generates metadata from its headers, and the runtime loads it
+with the SDK metadata.
+
+### With the NativeScript CLI
+
+`ns build linux` and `ns run linux` do this on every build, as on iOS. Put the native code in
+`App_Resources/Linux` for the app, or `platforms/linux` in a plugin:
+
+```
+src/              C / C++ sources and headers, compiled into a shared library
+src/module.modulemap
+include/          public headers (and their module.modulemap), for prebuilt libraries
+lib/<x64|arm64>/  prebuilt .so files (bundled) and .a files (linked into the library)
+native.json       { "pkg-config": ["gtk4"], "cflags": [], "libs": [] }
+CMakeLists.txt    builds the native code instead, see below
+```
+
+`native.json` is enough for a few sources. A `CMakeLists.txt` takes over the build: the CLI configures
+and builds it (`CMAKE_BUILD_TYPE` follows `--release`, `NS_ARCH` is `x64` or `arm64`), bundles every
+shared library it builds (`add_library(mason SHARED ...)`) in `lib/`, and parses the headers with the
+include paths and defines from its `compile_commands.json`. `src/` is then left to CMake. The build
+folder is kept in `platforms/linux/build/native`, so later builds are incremental.
+
+A `module.modulemap` anywhere in `src/` or `include/` is used as is. Its headers are generated, its
+modules are what the metadata contains, and the runtime loads its `link` libraries. Sources in `src/`
+are compiled into the library the map's first `link` names (`link "mason"` builds `lib/libmason.so`).
+A map can also expose a library the app doesn't build, from headers anywhere:
+
+```
+module sqlite3 [system] {
+  header "/usr/include/sqlite3.h"
+  link "sqlite3"
+}
+```
+
+Without a module map, the CLI exposes every header in `include/` (or `src/`) as a module named after
+the app or plugin, linked to the compiled library or the prebuilt ones. The build writes
+`metadata/<name>.bin` and `lib/` next to the executable. `ns typings linux` writes the typings to
+`typings/linux`, and later builds keep them up to date.
+
+### By Hand
+
+1. Write a module map for the library. `header` lists the headers to expose, `link` the library to load:
+
+   ```
+   module mason [system] {
+     header "/path/to/include/mason_c.h"
+     link "mason_c"
+   }
+   ```
+
+   A `link` is a soname (`libmason_c.so.1`), a file name in the app's `lib/` (`libmason_c.so`) or an
+   `-l` style name (`mason_c`). An `-l` style name is looked up as `libmason_c.so` or
+   `libmason_c.so.<version>` in `lib/`, then as `libmason_c.so` on the system's library paths. If a
+   library doesn't load, the runtime prints the names it tried.
+
+2. Generate the metadata and typings. Run the generator from its own directory (it finds clang's
+   builtin headers there), with absolute paths and the include paths of the libraries the headers use:
+
+   ```sh
+   echo '#include <mason_c.h>' > /tmp/umbrella.h
+   cd metadata-generator/dist/$(uname -m)/bin
+   ./metadata-generator -input-umbrella /tmp/umbrella.h \
+     -output-bin /path/to/app/metadata/mason.bin -output-typescript /path/to/typings \
+     Xclang -fmodule-map-file=/path/to/module.modulemap -I/path/to/include $(pkg-config --cflags-only-I gtk4)
+   ```
+
+   Only the module map's headers are generated. Types they use from other headers (`GtkWidget *`,
+   `GdkRGBA`, `graphene_rect_t *`) are referenced by name, and come from the SDK metadata at run
+   time. The typings refer to the SDK's typings for them. A library that passes structs by value from
+   headers outside the SDK adds those headers to its module map too.
+
+3. Put the files next to the executable:
+
+   ```
+   ns-linux
+   metadata-<arch>.bin    SDK metadata
+   metadata/mason.bin     every metadata/*.bin is loaded after the SDK metadata
+   lib/libmason_c.so      searched first for `link` names
+   ```
+
+   The layout is relative to the executable, so the folder can be moved. During development, pass the
+   files instead: `ns-linux --metadata sdk.bin:mason.bin app.js` or
+   `NS_METADATA=sdk.bin:mason.bin`. The Node-API addon takes the same `NS_METADATA` list. When two
+   files declare a name, the first file wins.
 
 ## How to Run Tests
 
@@ -111,6 +203,9 @@ cd linux-napi && npm run build && npm test
 The runtime prints a `devtools://` URL to open in Chrome or Chromium. It also shows up under
 `chrome://inspect`, and VS Code can attach to `127.0.0.1:9229`. `--inspect-brk` stops before any
 script code runs; `--inspect` doesn't wait.
+
+CPU profiles show time spent in C under the C function's name. V8 names native functions when
+profiling starts, so a C function first used after the profile started is counted in its JS caller.
 
 ## Release Builds
 

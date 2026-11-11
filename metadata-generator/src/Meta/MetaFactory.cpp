@@ -3,6 +3,7 @@
 #include <sstream>
 
 #include "CreationException.h"
+#include <unordered_set>
 #include "Utils.h"
 #include "Utils/StringUtils.h"
 #include "Utils/pstream.h"
@@ -67,6 +68,47 @@ string MetaFactory::getTypedefOrOwnName(const clang::TagDecl* tagDecl) {
 
   // The decl has no typedef name, so we return its name.
   return tagDecl->getNameAsString();
+}
+
+void MetaFactory::collectRecordTypedefs(
+    const clang::TranslationUnitDecl& translationUnit) {
+  // typedef names share C's ordinary namespace with functions and variables,
+  // so only another tag (`struct foo` next to `typedef struct _foo foo`) can
+  // already use the name
+  std::unordered_set<std::string> tags;
+  std::vector<std::pair<const clang::Decl*, std::string>> candidates;
+  for (const clang::Decl* decl : translationUnit.decls()) {
+    if (const auto* tag = clang::dyn_cast<clang::TagDecl>(decl)) {
+      if (tag->getIdentifier()) tags.insert(tag->getNameAsString());
+      continue;
+    }
+    const auto* typedefDecl = clang::dyn_cast<clang::TypedefNameDecl>(decl);
+    if (!typedefDecl) continue;
+    clang::QualType underlying = typedefDecl->getUnderlyingType();
+    if (underlying.hasLocalQualifiers()) continue;
+    const clang::Type* type = underlying.getTypePtr();
+    if (const auto* elaborated = clang::dyn_cast<clang::ElaboratedType>(type)) {
+      type = elaborated->getNamedType().getTypePtr();
+    }
+    const auto* record = clang::dyn_cast<clang::RecordType>(type);
+    // anonymous records already take the typedef's name
+    if (!record || !record->getDecl()->getIdentifier() ||
+        record->getDecl()->getName() == typedefDecl->getName()) {
+      continue;
+    }
+    candidates.emplace_back(record->getDecl()->getCanonicalDecl(),
+                            typedefDecl->getNameAsString());
+  }
+  // the first typedef wins, unless a later one is public (`FILE` over
+  // glibc's `__FILE` for struct _IO_FILE)
+  for (auto& candidate : candidates) {
+    if (tags.count(candidate.second)) continue;
+    auto inserted = _recordTypedefs.emplace(candidate.first, candidate.second);
+    std::string& current = inserted.first->second;
+    if (!inserted.second && current[0] == '_' && candidate.second[0] != '_') {
+      current = candidate.second;
+    }
+  }
 }
 
 template <class T>
@@ -135,12 +177,16 @@ Meta* MetaFactory::create(const clang::Decl& decl,
         resetMetaAndAddToMap<StructMeta>(insertedMetaPtrRef, this->_metaToDecl,
                                          decl);
         populateIdentificationFields(*record, *insertedMetaPtrRef.get());
-        createFromStruct(*record, insertedMetaPtrRef.get()->as<StructMeta>());
+        if (!insertedMetaPtrRef->isExternal()) {
+          createFromStruct(*record, insertedMetaPtrRef.get()->as<StructMeta>());
+        }
       } else {
         resetMetaAndAddToMap<UnionMeta>(insertedMetaPtrRef, this->_metaToDecl,
                                         decl);
         populateIdentificationFields(*record, *insertedMetaPtrRef.get());
-        createFromRecord(*record, insertedMetaPtrRef.get()->as<UnionMeta>());
+        if (!insertedMetaPtrRef->isExternal()) {
+          createFromRecord(*record, insertedMetaPtrRef.get()->as<UnionMeta>());
+        }
       }
     } else if (const clang::VarDecl* var =
                    clang::dyn_cast<clang::VarDecl>(&decl)) {
@@ -153,7 +199,9 @@ Meta* MetaFactory::create(const clang::Decl& decl,
       resetMetaAndAddToMap<EnumMeta>(insertedMetaPtrRef, this->_metaToDecl,
                                      decl);
       populateIdentificationFields(*enumDecl, *insertedMetaPtrRef.get());
-      createFromEnum(*enumDecl, insertedMetaPtrRef.get()->as<EnumMeta>());
+      if (!insertedMetaPtrRef->isExternal()) {
+        createFromEnum(*enumDecl, insertedMetaPtrRef.get()->as<EnumMeta>());
+      }
     } else if (const clang::EnumConstantDecl* enumConstantDecl =
                    clang::dyn_cast<clang::EnumConstantDecl>(&decl)) {
       resetMetaAndAddToMap<EnumConstantMeta>(insertedMetaPtrRef,
@@ -730,6 +778,13 @@ void MetaFactory::populateIdentificationFields(const clang::NamedDecl& decl,
     case clang::Decl::Kind::Enum: {
       const clang::TagDecl* tagDecl = clang::dyn_cast<clang::TagDecl>(&decl);
       meta.name = meta.jsName = getTypedefOrOwnName(tagDecl);
+      auto alias = _recordTypedefs.find(tagDecl->getCanonicalDecl());
+      if (alias != _recordTypedefs.end() &&
+          clang::isa<clang::RecordDecl>(tagDecl) &&
+          meta.name == tagDecl->getNameAsString()) {
+        meta.jsName = alias->second;
+        static_cast<RecordMeta&>(meta).namedByTypedef = true;
+      }
       break;
     }
     default:
@@ -743,12 +798,12 @@ void MetaFactory::populateIdentificationFields(const clang::NamedDecl& decl,
   if (!meta.is(MetaType::Category)) {
     if (meta.fileName == "") {
       throw MetaCreationException(&meta, "Unknown file for declaration.", true);
-    } else if (meta.module == nullptr) {
-      throw MetaCreationException(&meta, "Unknown module for declaration.",
-                                  false);
     } else if (meta.jsName == "") {
       throw MetaCreationException(
           &meta, "Anonymous declaration. Unable to calculate JS name.", false);
+    } else if (meta.module == nullptr && !meta.isExternal()) {
+      throw MetaCreationException(&meta, "Unknown module for declaration.",
+                                  false);
     }
   }
 }

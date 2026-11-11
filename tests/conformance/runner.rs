@@ -57,6 +57,8 @@ fn http_fixtures(dir: PathBuf) -> String {
 fn run_script(bin: &str, meta: &Path, script: &Path, http: &str) -> (bool, String) {
     let mut child = Command::new(bin)
         .env("NS_TEST_HTTP", http)
+        // `gc()` for tests of GC-driven behavior (V8 engines; the others skip those parts)
+        .env("NS_V8_FLAGS", "--expose-gc")
         .arg("--metadata")
         .arg(meta)
         .arg(script)

@@ -45,6 +45,10 @@ public:
     
     static std::string renameMeta(MetaType type, std::string& originalJsName, int index = 1);
 
+    /// Typedef names of structs and unions declared apart from their definition
+    /// (`typedef struct _GdkRGBA GdkRGBA;`), used as their JS names.
+    void collectRecordTypedefs(const clang::TranslationUnitDecl& translationUnit);
+
 private:
     void createFromFunction(const clang::FunctionDecl& function, FunctionMeta& functionMeta);
 
@@ -84,5 +88,6 @@ private:
 
     Cache _cache;
     MetaToDeclMap _metaToDecl;
+    std::unordered_map<const clang::Decl*, std::string> _recordTypedefs;
 };
 }

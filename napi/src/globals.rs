@@ -70,7 +70,7 @@ pub(crate) unsafe extern "C" fn lookup_has(env: napi_env, info: napi_callback_in
     let (a, ..) = cb_args::<1>(env, info);
     let name = st.js().rust_string(a[0]).unwrap_or_default();
     st.js()
-        .boolean(st.meta.find(&name).is_some_and(|m| is_global(m.kind())))
+        .boolean(st.meta.find_global(&name).is_some_and(|m| is_global(m.kind())))
 }
 
 pub(crate) unsafe extern "C" fn lookup_get(env: napi_env, info: napi_callback_info) -> napi_value {
@@ -80,29 +80,46 @@ pub(crate) unsafe extern "C" fn lookup_get(env: napi_env, info: napi_callback_in
     let Ok(name) = js.rust_string(a[0]) else {
         return js.undefined();
     };
-    let Some(meta) = st.meta.find(&name) else {
+    let Some(meta) = st.meta.find_global(&name) else {
         return js.undefined();
     };
+    let target = match st.globals_target.get() {
+        t if t.is_null() => js.global(),
+        t => js.deref(t),
+    };
+    let define = |key: &str, value: napi_value| {
+        let desc = napi_property_descriptor {
+            utf8name: null_mut(),
+            name: js.string(key),
+            method: None,
+            getter: None,
+            setter: None,
+            value,
+            // configurable, not writable / enumerable
+            attributes: 4,
+            data: null_mut(),
+        };
+        napi_define_properties(env, target, 1, &desc);
+    };
+    // a struct tag (`_GdkRGBA`) shares the constructor of its typedef name
+    let canonical = meta.js_name();
+    if canonical != name {
+        let mut own = false;
+        napi_has_own_property(env, target, js.string(canonical), &mut own);
+        if own {
+            if let Ok(value) = js.get(target, canonical) {
+                define(&name, value);
+                return value;
+            }
+        }
+    }
     match resolve(st, meta) {
         Ok(Some((value, memoize))) => {
             if memoize {
-                let key = js.string(&name);
-                let desc = napi_property_descriptor {
-                    utf8name: null_mut(),
-                    name: key,
-                    method: None,
-                    getter: None,
-                    setter: None,
-                    value,
-                    // configurable, not writable / enumerable
-                    attributes: 4,
-                    data: null_mut(),
-                };
-                let target = match st.globals_target.get() {
-                    t if t.is_null() => js.global(),
-                    t => js.deref(t),
-                };
-                napi_define_properties(env, target, 1, &desc);
+                define(&name, value);
+                if canonical != name {
+                    define(canonical, value);
+                }
             }
             value
         }

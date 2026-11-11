@@ -287,7 +287,7 @@ struct MappingTraits<Meta::Type*> {
       case Meta::TypeType::TypeStruct: {
         Meta::StructType& concreteType = type->as<Meta::StructType>();
         std::string fullModuleName =
-            concreteType.structMeta->module->getFullModuleName();
+            concreteType.structMeta->module ? concreteType.structMeta->module->getFullModuleName() : "";
         io.mapRequired("Module", fullModuleName);
         io.mapRequired("Name", concreteType.structMeta->name);
         break;
@@ -295,7 +295,7 @@ struct MappingTraits<Meta::Type*> {
       case Meta::TypeType::TypeUnion: {
         Meta::UnionType& concreteType = type->as<Meta::UnionType>();
         std::string fullModuleName =
-            concreteType.unionMeta->module->getFullModuleName();
+            concreteType.unionMeta->module ? concreteType.unionMeta->module->getFullModuleName() : "";
         io.mapRequired("Module", fullModuleName);
         io.mapRequired("Name", concreteType.unionMeta->name);
         break;

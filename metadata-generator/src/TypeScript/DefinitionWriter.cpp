@@ -834,8 +834,16 @@ void DefinitionWriter::visit(StructMeta* meta) {
 
   _buffer << "declare var " << metaName << ": interop.StructType<" << metaName
           << ">;";
-
   _buffer << std::endl;
+
+  if (meta->namedByTypedef) {
+    // the struct tag, also a global
+    _buffer << std::endl
+            << "/** Struct tag of {@link " << metaName << "}. */" << std::endl
+            << "type " << meta->name << " = " << metaName << ";" << std::endl
+            << "declare var " << meta->name << ": typeof " << metaName << ";"
+            << std::endl;
+  }
 }
 
 void DefinitionWriter::visit(UnionMeta* meta) {
@@ -845,6 +853,10 @@ void DefinitionWriter::visit(UnionMeta* meta) {
   _buffer << "interface " << meta->jsName << " {" << std::endl;
   writeMembers(meta->fields, comment.fields);
   _buffer << "}" << std::endl;
+
+  if (meta->namedByTypedef) {
+    _buffer << "type " << meta->name << " = " << meta->jsName << ";" << std::endl;
+  }
 
   _buffer << std::endl;
 }
@@ -943,7 +955,7 @@ std::string DefinitionWriter::localizeReference(const std::string& jsName,
 }
 
 std::string DefinitionWriter::localizeReference(const ::Meta::Meta& meta) {
-  return localizeReference(meta.jsName, meta.module->getFullModuleName());
+  return localizeReference(meta.jsName, meta.module ? meta.module->getFullModuleName() : "");
 }
 
 bool DefinitionWriter::hasClosedGenerics(const Type& typeIn) {

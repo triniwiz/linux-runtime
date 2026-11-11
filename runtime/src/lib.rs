@@ -20,6 +20,7 @@ mod structs;
 mod subtle;
 mod tagged;
 mod tasks;
+mod thunks;
 mod workers;
 
 pub use nativescript_metadata::{MetaFile, MetaSet};

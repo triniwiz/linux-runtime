@@ -662,6 +662,74 @@ fn interop_sizeof<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: 
     rv.set(v8::Number::new(scope, size as f64).into());
 }
 
+/// `interop.adopt(pointer, free?)`: a Pointer to the same memory that the garbage
+/// collector frees when it is collected, with `free` (default `free`, e.g. `g_free`,
+/// `g_object_unref`). The call runs at the next checkpoint, outside GC.
+fn interop_adopt<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let v = args.get(0);
+    if v.is_null_or_undefined() {
+        return rv.set_null();
+    }
+    let Some(addr) = pointer_address(scope, v) else {
+        return throw_error(scope, "interop.adopt expects a Pointer");
+    };
+    if addr == 0 {
+        return rv.set_null();
+    }
+    if let Some(o) = handles::is(v, Kind::Pointer) {
+        if handles::owner(scope, o).is_some() {
+            return throw_error(
+                scope,
+                "interop.adopt: the memory is already freed by the garbage collector",
+            );
+        }
+    }
+    let free = match v8::Local::<v8::Function>::try_from(args.get(1)) {
+        Ok(f) => match native_function_address(scope, &st, f) {
+            Some(a) => a,
+            None => {
+                return throw_error(
+                    scope,
+                    "the free function must be a native function such as free, g_free or g_object_unref",
+                )
+            }
+        },
+        Err(_) if args.get(1).is_null_or_undefined() => libc::free as *const () as usize,
+        Err(_) => return throw_error(scope, "interop.adopt: free must be a native function"),
+    };
+    // the owner lives as long as the pointer; its finalizer queues the free
+    let owner = v8::Object::new(scope);
+    let id = st.next_adopted.get();
+    st.next_adopted.set(id + 1);
+    let collected = st.adopted_collected.clone();
+    // SAFETY: the runtime's isolate, on its thread
+    let isolate = unsafe { &mut *st.isolate.get() };
+    let weak = v8::Weak::with_finalizer(
+        isolate,
+        owner,
+        Box::new(move |_| collected.borrow_mut().push((id, free, addr))),
+    );
+    st.adopted.borrow_mut().insert(id, weak);
+    rv.set(new_pointer(scope, &st, addr, Some(owner.into())).into());
+}
+
+/// Frees the adopted pointers collected since the last call.
+pub fn drain_adopted(st: &State) {
+    loop {
+        let collected = std::mem::take(&mut *st.adopted_collected.borrow_mut());
+        if collected.is_empty() {
+            return;
+        }
+        for (id, free, addr) in collected {
+            st.adopted.borrow_mut().remove(&id);
+            // SAFETY: a native function taking the pointer, as passed to interop.adopt
+            let free: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(free) };
+            unsafe { free(addr as *mut c_void) };
+        }
+    }
+}
+
 fn interop_handleof<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let st = state(scope);
     let v = args.get(0);
@@ -879,6 +947,7 @@ pub fn install<'s>(
 
     set_function(scope, interop, "alloc", interop_alloc);
     set_function(scope, interop, "free", interop_free);
+    set_function(scope, interop, "adopt", interop_adopt);
     set_function(scope, interop, "sizeof", interop_sizeof);
     set_function(scope, interop, "handleof", interop_handleof);
     set_function(
