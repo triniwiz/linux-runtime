@@ -15,7 +15,6 @@
     G[name] = i << 2;
     if (g[`G_TYPE_${name}`] === undefined) define(g, `G_TYPE_${name}`, i << 2);
   });
-  const G_TYPE_FLAG_FINAL = 1 << 6;
   const G_SIGNAL_RUN_LAST = 2;
   const G_PARAM_READWRITE = 3;
 
@@ -189,9 +188,6 @@
     } else {
       if (!register(parent)) return false;
       ({ base, baseType, type: parentType } = classes.get(parent));
-    }
-    if (g_type_test_flags(parentType, G_TYPE_FLAG_FINAL)) {
-      throw new TypeError(`${g_type_name(parentType)} is final and can't be subclassed`);
     }
     const structs = [];
     for (let type = parentType; type; type = g_type_parent(type)) {
