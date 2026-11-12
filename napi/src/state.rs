@@ -28,6 +28,8 @@ pub struct State {
     pub reference_ctor: Cell<napi_ref>,
     /// struct view classes by type index
     pub struct_classes: RefCell<HashMap<u32, napi_ref>>,
+    /// set once the env is freed: finalizers run by the engine's teardown can't use it
+    pub closing: Cell<bool>,
     pub timers: RefCell<HashMap<u32, crate::event_loop::Timer>>,
     pub next_timer: Cell<u32>,
     pub loop_refs: Cell<i32>,
@@ -68,6 +70,7 @@ impl State {
             pointer_ctor: Cell::new(std::ptr::null_mut()),
             reference_ctor: Cell::new(std::ptr::null_mut()),
             struct_classes: Default::default(),
+            closing: Cell::new(false),
             timers: Default::default(),
             next_timer: Cell::new(0),
             loop_refs: Cell::new(0),
@@ -160,6 +163,9 @@ unsafe extern "C" fn finalize_handle(env: napi_env, data: *mut c_void, _: *mut c
     let h = Box::from_raw(data as *mut Handle);
     if h.free != 0 {
         free_adopted(h.free, h.address);
+    }
+    if current().is_some_and(|st| st.closing.get()) {
+        return;
     }
     let js = Js(env);
     js.delete_ref(h.owner);

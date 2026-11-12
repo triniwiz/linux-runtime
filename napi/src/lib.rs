@@ -236,6 +236,7 @@ impl Drop for Runtime {
         self.state.timers.borrow_mut().clear();
         unsafe {
             napi_close_handle_scope(self.env, self.scope);
+            self.state.closing.set(true);
             js_free_napi_env(self.env);
             js_free_runtime(self.runtime);
         }
