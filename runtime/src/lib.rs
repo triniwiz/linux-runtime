@@ -7,6 +7,7 @@ mod fast;
 mod ffi;
 mod frames;
 mod globals;
+mod gobject;
 mod handles;
 mod inspector;
 mod interop;
@@ -289,6 +290,7 @@ impl Drop for Runtime {
         if !self.state.napi_envs.borrow().is_empty() {
             event_loop::with_js(&self.state, |_| napi::teardown(&self.state));
         }
+        gobject::shutdown(&self.state);
         event_loop::set_current(None);
         self.state.timers.borrow_mut().clear();
         frames::cancel(&self.state);

@@ -173,6 +173,8 @@
 
   // G_TYPE_FROM_INSTANCE: instance->g_class->g_type
   function g_type_from_instance_ptr(instance) {
+    // JS GObject subclass instances are struct views
+    if (!(instance instanceof interop.Pointer)) instance = interop.handleof(instance) ?? instance;
     const klass = new interop.Reference(t.pointer, instance).value;
     return new interop.Reference(t.ulong, klass).value;
   }

@@ -6,6 +6,7 @@ pub mod call;
 pub mod closure;
 pub mod config;
 pub mod glib;
+pub mod gobject;
 pub mod longdouble;
 pub mod native;
 pub mod nsbundle;

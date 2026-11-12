@@ -342,6 +342,9 @@ pub fn create(js: Js, argv: &[String], engine: &str) -> napi_value {
             js.function(name, Some(cb), std::ptr::null_mut()),
         );
     }
+    for (name, cb) in crate::gobject::NATIVES {
+        js.set(natives, name, js.function(name, Some(cb), std::ptr::null_mut()));
+    }
     crate::app_bundle::install(js, natives);
     let items: Vec<napi_value> = argv.iter().map(|a| js.string(a)).collect();
     js.set(natives, "argv", js.array(&items));

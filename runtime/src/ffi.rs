@@ -719,6 +719,9 @@ pub struct ClosureData {
     slots: Vec<(bool, u8)>,
     state: *const State,
     closure: Option<ClosureCode>,
+    /// a vfunc of a JS GObject class: `function` is called on the JS object of the
+    /// first argument (true: dispose, which mustn't resurrect it)
+    method: Option<bool>,
 }
 
 enum ClosureCode {
@@ -758,6 +761,19 @@ fn closure_data_for<'s>(
             return Ok(b.u64_value().0 as usize as *const ClosureData);
         }
     }
+    let ptr = new_closure_data(scope, st, function, signature, None)?;
+    let value = v8::BigInt::new_from_u64(scope, ptr as usize as u64);
+    function.set_private(scope, key, value.into());
+    Ok(ptr)
+}
+
+fn new_closure_data<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    function: v8::Local<'s, v8::Function>,
+    signature: &[Type],
+    method: Option<bool>,
+) -> Result<*const ClosureData, String> {
     let global = v8::Global::new(scope, function);
     // SAFETY: the Global belongs to this isolate and lives in the ClosureData
     let function_slot = unsafe { v8::Handle::get_unchecked(&global) as *const v8::Function };
@@ -791,6 +807,7 @@ fn closure_data_for<'s>(
         slots,
         state: st as *const State,
         closure: None,
+        method,
     });
     let userdata = &mut *data as *mut ClosureData as *mut c_void;
     #[cfg(target_arch = "x86_64")]
@@ -804,9 +821,19 @@ fn closure_data_for<'s>(
     }
     let ptr = &*data as *const ClosureData;
     st.closures.borrow_mut().push(data);
-    let value = v8::BigInt::new_from_u64(scope, ptr as usize as u64);
-    function.set_private(scope, key, value.into());
     Ok(ptr)
+}
+
+/// C function pointer for a vfunc slot: calls `method` on the JS object of its first
+/// argument, the instance. Lives as long as the runtime, like the class.
+pub fn method_closure<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    method: v8::Local<'s, v8::Function>,
+    signature: &[Type],
+    dispose: bool,
+) -> Result<usize, String> {
+    new_closure_data(scope, st, method, signature, Some(dispose)).map(|d| unsafe { (*d).code() })
 }
 
 /// C function pointer calling `function`; cached per signature, freed by `interop.release`.
@@ -831,7 +858,8 @@ pub fn release_closures<'s>(
         let mut i = 0;
         while i < closures.len() {
             let f = v8::Local::new(scope, &closures[i].function);
-            if f.strict_equals(function.into()) {
+            // vfuncs live as long as their class
+            if closures[i].method.is_none() && f.strict_equals(function.into()) {
                 released.push(closures.swap_remove(i));
             } else {
                 i += 1;
@@ -921,7 +949,27 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     v8::tc_scope!(let tc, scope);
 
     let undefined: v8::Local<v8::Value> = v8::undefined(tc).into();
-    let argc = data.signature.len() - 1;
+    let mut recv = undefined;
+    let mut first = 0;
+    let mut disposing = None;
+    if let Some(dispose) = data.method {
+        let address = unsafe { (*args as *const usize).read_unaligned() };
+        if dispose {
+            crate::gobject::enter_dispose(st, address);
+            disposing = Some(address);
+        }
+        match crate::gobject::instance(tc, st, address, dispose) {
+            Some(object) => recv = object.into(),
+            None => {
+                if let Some(a) = disposing {
+                    crate::gobject::leave_dispose(st, a);
+                }
+                return;
+            }
+        }
+        first = 1;
+    }
+    let argc = data.signature.len() - 1 - first;
     let mut inline = [undefined; 8];
     let mut heap = Vec::new();
     let argv = if argc <= inline.len() {
@@ -930,9 +978,9 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
         heap.resize(argc, undefined);
         &mut heap[..]
     };
-    for (i, ty) in data.signature[1..].iter().enumerate() {
-        let src = unsafe { *args.add(i) } as *const u8;
-        argv[i] = match data.args[i] {
+    for (i, ty) in data.signature[1 + first..].iter().enumerate() {
+        let src = unsafe { *args.add(i + first) } as *const u8;
+        argv[i] = match data.args[i + first] {
             ValueKind::Pointer => match unsafe { (src as *const usize).read_unaligned() } {
                 0 => v8::null(tc).into(),
                 a => crate::interop::new_pointer(tc, st, a, None).into(),
@@ -950,8 +998,12 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
         };
     }
     let function = unsafe { &*data.function_slot };
+    let called = function.call(tc, recv, argv);
+    if let Some(a) = disposing {
+        crate::gobject::leave_dispose(st, a);
+    }
     // an empty result means an exception or termination
-    let Some(result) = function.call(tc, undefined, argv) else {
+    let Some(result) = called else {
         if !tc.has_terminated() {
             if let Some(exception) = tc.exception() {
                 let message = tc.message();

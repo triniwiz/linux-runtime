@@ -308,13 +308,65 @@ unsafe extern "C" fn reference_set(env: napi_env, info: napi_callback_info) -> n
     null_mut()
 }
 
+/// Calls `__nsGObject[name](...args)`, the GObject subclassing hooks of the prelude:
+/// `Ok(None)` without a prelude, `Err` when the hook threw.
+pub(crate) fn gobject_hook(js: Js, name: &str, args: &[napi_value]) -> Result<Option<napi_value>, ()> {
+    let Ok(hooks) = js.get(js.global(), "__nsGObject") else {
+        js.clear_exception();
+        return Ok(None);
+    };
+    if js.type_of(hooks) != OBJECT {
+        return Ok(None);
+    }
+    match js.get(hooks, name) {
+        Ok(f) if js.type_of(f) == FUNCTION => js.call(f, hooks, args).map(Some).map_err(|_| ()),
+        _ => Ok(None),
+    }
+}
+
+/// `class X extends GtkButton` reaches the struct constructor through `super()`, and
+/// TypeScript's ES5 classes through `_super.call(this)`: the class constructed is built
+/// by the prelude as a GObject.
+unsafe fn subclass_target(
+    st: &State,
+    info: napi_callback_info,
+    index: u32,
+    this: napi_value,
+) -> Option<napi_value> {
+    let js = st.js();
+    let ctor = js.deref(*st.struct_ctors.borrow().get(&index)?);
+    if ctor.is_null() {
+        return None;
+    }
+    let mut target = null_mut();
+    napi_get_new_target(js.0, info, &mut target);
+    if target.is_null() || js.type_of(target) == UNDEFINED {
+        target = match js.type_of(this) {
+            // QuickJS's shim has no new.target: native constructors get it as `this`
+            FUNCTION => this,
+            OBJECT if !js.strict_equals(this, js.global()) => js.get(this, "constructor").ok()?,
+            _ => return None,
+        };
+    }
+    (js.type_of(target) == FUNCTION && !js.strict_equals(target, ctor)).then_some(target)
+}
+
 unsafe extern "C" fn struct_ctor(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
-    let (argv, _, _, data) = args(env, info);
+    let (argv, argc, this, data) = cb_args::<8>(env, info);
     let Some(ty) = st.type_at(data as u32) else {
         return null_mut();
     };
+    if let Some(target) = subclass_target(st, info, data as u32, this) {
+        let _ = argc;
+        match crate::gobject::construct(st, target, argv[0]) {
+            Ok(Some(v)) => return v,
+            Ok(None) => {}
+            Err(e) if e.is_empty() => return null_mut(),
+            Err(e) => return fail(js, &e),
+        }
+    }
     let result = (|| {
         let size = st.layout(&ty)?.size;
         let (buffer, mem) = js.arraybuffer(size.max(1));
@@ -327,13 +379,38 @@ unsafe extern "C" fn struct_ctor(env: napi_env, info: napi_callback_info) -> nap
     result.unwrap_or_else(|e| fail(js, &e))
 }
 
+/// `GtkButton.extend(name?, members)`
+unsafe extern "C" fn struct_extend(env: napi_env, info: napi_callback_info) -> napi_value {
+    let js = Js(env);
+    let (argv, argc, this, _) = cb_args::<4>(env, info);
+    let mut list = vec![this];
+    list.extend_from_slice(&argv[..argc.min(4)]);
+    match gobject_hook(js, "extend", &list) {
+        Ok(Some(v)) => v,
+        Ok(None) => fail(js, "GObject subclassing needs the runtime's prelude"),
+        Err(()) => null_mut(),
+    }
+}
+
 /// Constructor for struct / union globals: `new tm({ tm_year: 100 })`.
 pub fn struct_constructor(st: &State, name: &str, ty: Type) -> napi_value {
     let index = st.register_type(&ty);
-    let f = st
-        .js()
-        .function(name, Some(struct_ctor), index as usize as *mut c_void);
+    let js = st.js();
+    let f = js.function(name, Some(struct_ctor), index as usize as *mut c_void);
     tag_type(st, f, &ty);
+    js.define_hidden(f, "extend", js.function("extend", Some(struct_extend), null_mut()));
+    // `class X extends GObject` needs a prototype, which some engines' native functions lack
+    if !js.get(f, "prototype").is_ok_and(|p| js.type_of(p) == OBJECT) {
+        js.clear_exception();
+        let proto = js.object();
+        // writable: `__extends` assigns the subclass's own
+        js.define(proto, "constructor", f, 1 | 4);
+        js.set(f, "prototype", proto);
+    }
+    let previous = st.struct_ctors.borrow_mut().insert(index, js.reference(f, 0));
+    if let Some(r) = previous {
+        js.delete_ref(r);
+    }
     f
 }
 

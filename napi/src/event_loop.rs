@@ -66,6 +66,7 @@ pub fn checkpoint(st: &State) {
     let js = st.js();
     st.jobs_scheduled.set(false);
     crate::state::drain_adopted(st);
+    crate::gobject::drain(st);
     // a Node-API host drains its own microtasks
     #[cfg(not(feature = "engine"))]
     let _ = js;

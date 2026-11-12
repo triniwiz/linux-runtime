@@ -171,13 +171,17 @@ fn resolve<'s>(
     }))
 }
 
-const PRELUDES: [(&str, &str); 6] = [
+const PRELUDES: [(&str, &str); 7] = [
     ("nativescript:tslib", include_str!("../../core/js/tslib.js")),
     (
         "nativescript:prelude",
         include_str!("../../core/js/prelude.js"),
     ),
     ("nativescript:web", include_str!("../../core/js/web.js")),
+    (
+        "nativescript:gobject",
+        include_str!("../../core/js/gobject.js"),
+    ),
     ("nativescript:net", include_str!("../../core/js/net.js")),
     (
         "nativescript:workers",
@@ -193,6 +197,7 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State) -> Result<(), S
     crate::net::install(scope, natives);
     crate::workers::install(scope, st, natives);
     crate::frames::install(scope, natives);
+    crate::gobject::install(scope, natives);
     crate::modules::install_hmr(scope, natives);
     crate::app_bundle::install(scope, natives);
     for (name, code) in PRELUDES {

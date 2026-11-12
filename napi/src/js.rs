@@ -305,6 +305,24 @@ impl Js {
         unsafe { napi_get_reference_value(self.0, r, &mut v) };
         v
     }
+    /// Non-enumerable, read-only property.
+    pub fn define_hidden(self, object: napi_value, key: &str, value: napi_value) {
+        self.define(object, key, value, 0);
+    }
+    /// napi_property_attributes: 1 writable, 2 enumerable, 4 configurable
+    pub fn define(self, object: napi_value, key: &str, value: napi_value, attributes: i32) {
+        let desc = napi_property_descriptor {
+            utf8name: std::ptr::null(),
+            name: self.string(key),
+            method: None,
+            getter: None,
+            setter: None,
+            value,
+            attributes,
+            data: null_mut(),
+        };
+        unsafe { napi_define_properties(self.0, object, 1, &desc) };
+    }
     pub fn delete_ref(self, r: napi_ref) {
         if !r.is_null() {
             unsafe { napi_delete_reference(self.0, r) };
