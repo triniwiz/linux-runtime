@@ -647,10 +647,7 @@ fn register_class<'s>(
         def.signals.push(gobj::Signal { name: CString::new(name).map_err(|e| e.to_string())?, flags, return_type, params });
     }
     let cname = CString::new(name.clone()).map_err(|e| e.to_string())?;
-    let gtype = gobj::register(parent, &cname, def);
-    if gtype == 0 {
-        return Err(format!("GLib refused to register {name}"));
-    }
+    let gtype = gobj::register(parent, &cname, def)?;
     let def = gobj::class_def(gtype).ok_or("registration failed")?;
     let template = structs::view(scope, st, &base, 0, None)
         .ok()

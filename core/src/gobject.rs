@@ -88,6 +88,8 @@ extern "C" {
     fn g_type_set_qdata(type_: GType, quark: u32, data: gpointer);
     fn g_type_get_qdata(type_: GType, quark: u32) -> gpointer;
     fn g_type_parent(type_: GType) -> GType;
+    fn g_type_name(type_: GType) -> *const c_char;
+    fn g_type_test_flags(type_: GType, flags: u32) -> i32;
     fn g_type_fundamental(type_: GType) -> GType;
     fn g_type_from_name(name: *const c_char) -> GType;
     fn g_type_class_ref(type_: GType) -> gpointer;
@@ -166,6 +168,7 @@ extern "C" {
 #[link(name = "glib-2.0")]
 extern "C" {
     fn g_quark_from_static_string(s: *const c_char) -> u32;
+    fn glib_check_version(major: u32, minor: u32, micro: u32) -> *const c_char;
 }
 
 // fundamental type n is n << 2
@@ -303,12 +306,24 @@ pub fn type_query(gtype: GType) -> (u32, u32) {
     (q.class_size, q.instance_size)
 }
 
+/// G_TYPE_FLAG_FINAL
+fn is_final(gtype: GType) -> bool {
+    // GLib before 2.70 has no final types, and reports flags it doesn't know as set
+    static FINAL_TYPES: OnceLock<bool> = OnceLock::new();
+    *FINAL_TYPES.get_or_init(|| unsafe { glib_check_version(2, 70, 0) }.is_null())
+        && unsafe { g_type_test_flags(gtype, 1 << 6) } != 0
+}
+
 /// Registers `name` deriving from `parent`, implemented by `def` (kept for the
-/// process's lifetime, as GTypes are). Returns 0 when GLib refuses it.
-pub fn register(parent: GType, name: &CStr, def: ClassDef) -> GType {
+/// process's lifetime, as GTypes are).
+pub fn register(parent: GType, name: &CStr, def: ClassDef) -> Result<GType, String> {
+    let parent_name = || unsafe { CStr::from_ptr(g_type_name(parent)) }.to_string_lossy().into_owned();
+    if is_final(parent) {
+        return Err(format!("{} is final and can't be subclassed", parent_name()));
+    }
     let (class_size, instance_size) = type_query(parent);
     if class_size == 0 {
-        return 0;
+        return Err(format!("{} can't be subclassed", parent_name()));
     }
     let def: &'static ClassDef = Box::leak(Box::new(def));
     let info = GTypeInfo {
@@ -325,7 +340,7 @@ pub fn register(parent: GType, name: &CStr, def: ClassDef) -> GType {
     };
     let gtype = unsafe { g_type_register_static(parent, name.as_ptr(), &info, 0) };
     if gtype == 0 {
-        return 0;
+        return Err(format!("GLib refused to register {}", name.to_string_lossy()));
     }
     def.gtype.set(gtype);
     unsafe { g_type_set_qdata(gtype, quark(), def as *const ClassDef as gpointer) };
@@ -338,7 +353,7 @@ pub fn register(parent: GType, name: &CStr, def: ClassDef) -> GType {
         };
         unsafe { g_type_add_interface_static(gtype, iface.gtype, &info) };
     }
-    gtype
+    Ok(gtype)
 }
 
 pub fn type_from_name(name: &CStr) -> GType {
