@@ -393,6 +393,9 @@ pub struct ClosureData {
     ret_float: bool,
     state: *const State,
     closure: Option<ClosureCode>,
+    /// a vfunc of a JS GObject class: `function` is called on the JS object of the
+    /// first argument (true: dispose, which mustn't resurrect it)
+    method: Option<bool>,
 }
 
 enum ClosureCode {
@@ -423,10 +426,20 @@ fn closure_data_for(
         .closures
         .borrow()
         .iter()
-        .find(|c| c.signature == signature && js.strict_equals(js.deref(c.function), function))
+        .find(|c| c.method.is_none() && c.signature == signature && js.strict_equals(js.deref(c.function), function))
     {
         return Ok(&**existing as *const ClosureData);
     }
+    new_closure_data(st, function, signature, None)
+}
+
+fn new_closure_data(
+    st: &State,
+    function: napi_value,
+    signature: &[Type],
+    method: Option<bool>,
+) -> Result<*const ClosureData, String> {
+    let js = st.js();
     // signatures that fit in registers skip libffi's per-call argument classification
     let registers = CallDesc::new(st, "", 0, signature.to_vec(), false)?.fast;
     let mut slots = Vec::new();
@@ -450,6 +463,7 @@ fn closure_data_for(
         ret_float: ValueKind::of_arg(&signature[0]).is_float(),
         state: st,
         closure: None,
+        method,
     });
     let userdata = &mut *data as *mut ClosureData as *mut c_void;
     #[cfg(target_arch = "x86_64")]
@@ -466,6 +480,12 @@ fn closure_data_for(
     Ok(ptr)
 }
 
+/// C function pointer for a vfunc slot: calls `method` on the JS object of its first
+/// argument, the instance. Lives as long as the runtime, like the class.
+pub fn method_closure(st: &State, method: napi_value, signature: &[Type], dispose: bool) -> Result<usize, String> {
+    new_closure_data(st, method, signature, Some(dispose)).map(|d| unsafe { (*d).code() })
+}
+
 /// C function pointer calling `function`, cached per (function, signature).
 pub fn closure_for(st: &State, function: napi_value, signature: &[Type]) -> Result<usize, String> {
     closure_data_for(st, function, signature).map(|d| unsafe { (*d).code() })
@@ -477,7 +497,8 @@ pub fn release_closures(st: &State, function: napi_value) -> usize {
     let mut closures = st.closures.borrow_mut();
     let before = closures.len();
     closures.retain(|c| {
-        let keep = !js.strict_equals(js.deref(c.function), function);
+        // vfuncs live as long as their class
+        let keep = c.method.is_some() || !js.strict_equals(js.deref(c.function), function);
         if !keep {
             js.delete_ref(c.function);
         }
@@ -564,7 +585,28 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     );
     let mut scope = null_mut();
     napi_open_handle_scope(js.0, &mut scope);
-    let argc = data.signature.len() - 1;
+    let mut recv = js.undefined();
+    let mut first = 0;
+    let mut disposing = None;
+    if let Some(dispose) = data.method {
+        let address = (*args as *const usize).read_unaligned();
+        if dispose {
+            crate::gobject::enter_dispose(st, address);
+            disposing = Some(address);
+        }
+        match crate::gobject::instance(st, address, dispose) {
+            Some(object) => recv = object,
+            None => {
+                if let Some(a) = disposing {
+                    crate::gobject::leave_dispose(st, a);
+                }
+                napi_close_handle_scope(js.0, scope);
+                return;
+            }
+        }
+        first = 1;
+    }
+    let argc = data.signature.len() - 1 - first;
     let mut inline = [null_mut(); 8];
     let mut heap = Vec::new();
     let argv = if argc <= inline.len() {
@@ -573,8 +615,8 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
         heap.resize(argc, null_mut());
         &mut heap[..]
     };
-    for (i, ty) in data.signature[1..].iter().enumerate() {
-        match marshal::read(st, ty, *args.add(i) as *const u8, Mem::Temp) {
+    for (i, ty) in data.signature[1 + first..].iter().enumerate() {
+        match marshal::read(st, ty, *args.add(i + first) as *const u8, Mem::Temp) {
             Ok(v) => argv[i] = v,
             Err(e) => {
                 eprintln!("[nativescript] callback argument {}: {e}", i + 1);
@@ -583,7 +625,10 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
             }
         }
     }
-    let result = js.call(js.deref(data.function), js.undefined(), argv);
+    let result = js.call(js.deref(data.function), recv, argv);
+    if let Some(a) = disposing {
+        crate::gobject::leave_dispose(st, a);
+    }
     match result {
         Err(_) => crate::event_loop::report_pending(st),
         Ok(result) if !ret_ty.is_void() => {

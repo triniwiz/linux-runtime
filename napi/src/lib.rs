@@ -14,6 +14,7 @@ pub mod esm;
 pub mod event_loop;
 pub mod ffi;
 pub mod globals;
+pub mod gobject;
 pub mod interop;
 pub mod js;
 pub mod marshal;
@@ -54,13 +55,17 @@ use state::State;
 use std::path::Path;
 use std::sync::Arc;
 
-const PRELUDES: [(&str, &str); 3] = [
+const PRELUDES: [(&str, &str); 4] = [
     ("nativescript:tslib", include_str!("../../core/js/tslib.js")),
     (
         "nativescript:prelude",
         include_str!("../../core/js/prelude.js"),
     ),
     ("nativescript:web", include_str!("../../core/js/web.js")),
+    (
+        "nativescript:gobject",
+        include_str!("../../core/js/gobject.js"),
+    ),
 ];
 
 /// Engine features some shims lack.
@@ -235,6 +240,7 @@ impl Drop for Runtime {
         // refs must go before the env
         self.state.timers.borrow_mut().clear();
         unsafe {
+            crate::gobject::shutdown(&self.state);
             napi_close_handle_scope(self.env, self.scope);
             self.state.closing.set(true);
             js_free_napi_env(self.env);

@@ -55,6 +55,7 @@ pub struct State {
     /// Set while a resolved global is being defined on the global object:
     /// defining a property consults the interceptor again, which must not recurse.
     pub memoizing: Cell<bool>,
+    pub gobjects: crate::gobject::GObjects,
     /// V8 value layout, when the probe at startup matched
     tagged: std::cell::OnceCell<crate::tagged::Layout>,
 }
@@ -98,6 +99,7 @@ impl State {
             rejections: Default::default(),
             uncaught: Cell::new(0),
             memoizing: Cell::new(false),
+            gobjects: Default::default(),
             tagged: Default::default(),
         }
     }

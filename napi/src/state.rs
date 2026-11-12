@@ -28,6 +28,9 @@ pub struct State {
     pub reference_ctor: Cell<napi_ref>,
     /// struct view classes by type index
     pub struct_classes: RefCell<HashMap<u32, napi_ref>>,
+    /// struct constructor globals by type index
+    pub struct_ctors: RefCell<HashMap<u32, napi_ref>>,
+    pub gobjects: crate::gobject::GObjects,
     /// set once the env is freed: finalizers run by the engine's teardown can't use it
     pub closing: Cell<bool>,
     pub timers: RefCell<HashMap<u32, crate::event_loop::Timer>>,
@@ -70,6 +73,8 @@ impl State {
             pointer_ctor: Cell::new(std::ptr::null_mut()),
             reference_ctor: Cell::new(std::ptr::null_mut()),
             struct_classes: Default::default(),
+            struct_ctors: Default::default(),
+            gobjects: Default::default(),
             closing: Cell::new(false),
             timers: Default::default(),
             next_timer: Cell::new(0),
@@ -125,6 +130,8 @@ pub struct Handle {
     pub keep: Vec<napi_ref>,
     /// interop.adopt: native function freeing `address` when the handle is collected
     pub free: usize,
+    /// the JS object of a GObject: collecting it releases the GObject
+    pub token: Option<std::rc::Rc<crate::gobject::Token>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -160,9 +167,12 @@ unsafe extern "C" fn finalize_handle(env: napi_env, data: *mut c_void, _: *mut c
     if let Some(st) = current() {
         st.handles.borrow_mut().remove(&(data as usize));
     }
-    let h = Box::from_raw(data as *mut Handle);
+    let mut h = Box::from_raw(data as *mut Handle);
     if h.free != 0 {
         free_adopted(h.free, h.address);
+    }
+    if let Some(token) = h.token.take() {
+        crate::gobject::collected(token);
     }
     if current().is_some_and(|st| st.closing.get()) {
         return;
@@ -251,6 +261,7 @@ impl Handle {
             pending: std::ptr::null_mut(),
             keep: Vec::new(),
             free: 0,
+            token: None,
         }
     }
 }

@@ -86,6 +86,30 @@ export NS_METADATA=metadata-generator/tests/TestOutput/metadata-$(uname -m).bin
 C structs are globals under their typedef name (`GdkRGBA`, `graphene_rect_t`, `GList`). The struct
 tag (`_GdkRGBA`) is the same constructor.
 
+## GObject Subclasses
+
+A JS class extending a GObject's struct registers a GType: [core/js/gobject.js](core/js/gobject.js)
+describes the class once, and the runtime runs it natively ([core/src/gobject.rs](core/src/gobject.rs) and each engine's
+`gobject.rs`).
+Methods override the vfuncs and interface methods of the same name (or its snake_case form), and
+`super.method()` calls the parent's implementation:
+
+```js
+class Swatch extends GtkWidget {
+  static interfaces = [GtkOrientableIface];
+  static properties = { orientation: { override: true }, hue: { type: G_TYPE_DOUBLE } };
+  static signals = { picked: { params: [G_TYPE_DOUBLE] } };
+  snapshot(snapshot) { /* ... */ }
+}
+const swatch = new Swatch({ hue: 0.5 }); // GObject properties, as g_object_new
+swatch.emit('picked', swatch.hue);
+```
+
+`GtkWidget.extend(name, members)` does the same without class syntax, and TypeScript's ES5 output
+(`@NativeClass`, `@Interfaces`) works too. Instances are views of the GObject's instance struct, so
+they pass to C as the object. A JS object holds a toggle reference on its GObject: it is kept alive
+while C code references the GObject, and collecting it releases the GObject.
+
 ## Metadata for an App's Own C Library
 
 An app or plugin that ships a C library generates metadata from its headers, and the runtime loads it

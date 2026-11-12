@@ -101,7 +101,7 @@ extern "C" {
 
 /// Shallow copy, internal fields included.
 #[inline]
-fn clone<'s>(
+pub fn clone<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     o: v8::Local<'s, v8::Object>,
 ) -> Option<v8::Local<'s, v8::Object>> {

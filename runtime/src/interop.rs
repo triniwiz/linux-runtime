@@ -18,7 +18,7 @@ pub mod keys {
     /// Private symbols, created once per isolate.
     #[derive(Default)]
     pub struct Keys {
-        fixed: [OnceCell<v8::Global<v8::Private>>; 6],
+        fixed: [OnceCell<v8::Global<v8::Private>>; 7],
         closures: RefCell<HashMap<Vec<Type>, v8::Global<v8::Private>>>,
         fields: RefCell<HashMap<String, v8::Global<v8::Private>>>,
     }
@@ -101,6 +101,10 @@ pub mod keys {
     /// Metadata offset of a C function wrapper
     pub fn function_meta<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
         fixed(scope, 5, "ns#fnmeta")
+    }
+    /// Index of a JS GObject class in `State::gobjects`
+    pub fn gobject_class<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
+        fixed(scope, 6, "ns#gclass")
     }
     /// BigInt address of the closure state created for a JS function and signature
     pub fn closure<'s>(
@@ -580,11 +584,70 @@ fn reference_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8:
     tmpl
 }
 
+/// Calls `__nsGObject[name](...args)`, the GObject subclassing hooks of the prelude:
+/// `Ok(None)` without a prelude, `Err` when the hook threw.
+pub(crate) fn gobject_hook<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+    args: &[v8::Local<'s, v8::Value>],
+) -> Result<Option<v8::Local<'s, v8::Value>>, ()> {
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__nsGObject").unwrap();
+    let Some(hooks) = global.get(scope, key.into()).and_then(|h| h.to_object(scope)) else {
+        return Ok(None);
+    };
+    let key = v8::String::new(scope, name).unwrap();
+    let Some(f) = hooks
+        .get(scope, key.into())
+        .and_then(|f| v8::Local::<v8::Function>::try_from(f).ok())
+    else {
+        return Ok(None);
+    };
+    f.call(scope, hooks.into(), args).map(Some).ok_or(())
+}
+
+/// `class X extends GtkButton` reaches the struct constructor through `super()`, and
+/// TypeScript's ES5 classes through `_super.call(this)`: the class constructed (which,
+/// unlike struct constructors, has no type tag) is built by the prelude as a GObject.
+fn subclass_target<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &Args<'s>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let target = if args.new_target().is_function() {
+        args.new_target().to_object(scope)?
+    } else {
+        let this = args.this();
+        let global = scope.get_current_context().global(scope);
+        if this.strict_equals(global.into()) {
+            return None;
+        }
+        let key = v8::String::new(scope, "constructor").unwrap();
+        let ctor = this.get(scope, key.into())?;
+        if !ctor.is_function() {
+            return None;
+        }
+        ctor.to_object(scope)?
+    };
+    let key = keys::type_tag(scope);
+    if target.has_private(scope, key).unwrap_or(true) {
+        return None;
+    }
+    Some(target)
+}
+
 fn struct_ctor<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let st = state(scope);
     let Some(ty) = args.data().uint32_value(scope).and_then(|i| st.type_at(i)) else {
         return;
     };
+    if let Some(target) = subclass_target(scope, &args) {
+        match crate::gobject::construct(scope, &st, target, args.get(0)) {
+            Ok(Some(v)) => return rv.set(v),
+            Ok(None) => {}
+            Err(e) if e.is_empty() => return,
+            Err(e) => return throw_error(scope, &e),
+        }
+    }
     // owned, zeroed memory initialized from a plain object / struct / Pointer
     let result = (|| {
         let (buffer, addr) = structs::allocate(scope, &st, &ty)?;
@@ -617,7 +680,21 @@ pub fn struct_constructor<'s>(
     let name = v8::String::new(scope, name).unwrap();
     f.set_name(name);
     tag_type(scope, st, f.into(), ty);
+    let extend = v8::Function::builder(struct_extend).build(scope)?;
+    let key = v8::String::new(scope, "extend").unwrap();
+    f.define_own_property(scope, key.into(), extend.into(), v8::PropertyAttribute::DONT_ENUM);
     Some(f)
+}
+
+/// `GtkButton.extend(name?, members)`
+fn struct_extend<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let mut list = vec![args.this().into()];
+    list.extend((0..args.length()).map(|i| args.get(i)));
+    match gobject_hook(scope, "extend", &list) {
+        Ok(Some(v)) => rv.set(v),
+        Ok(None) => throw_error(scope, "GObject subclassing needs the runtime's prelude"),
+        Err(()) => {}
+    }
 }
 
 fn interop_alloc<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {

@@ -38,7 +38,87 @@ declare module interop {
 	 * Frees the C function pointers made for `func`; returns how many were freed.
 	 */
 	function release(func: Function): number;
+
+	interface StructType<T> {
+		/**
+		 * A GObject subclass of this class, like `class extends`: methods override the
+		 * vfuncs and interface methods of the same name (or its snake_case form), `init`
+		 * runs after construction with the constructor's arguments, and `this.super`
+		 * calls the parent's implementation.
+		 *
+		 * ```js
+		 * const Swatch = GtkWidget.extend('Swatch', {
+		 *   snapshot(snapshot) { ... },
+		 * });
+		 * ```
+		 */
+		extend(name: string, members: GObjectClassMembers & ThisType<any>): any;
+		extend(members: GObjectClassMembers & ThisType<any>): any;
+
+		/** The GType registered for a JavaScript GObject class. */
+		readonly $gtype: number | bigint;
+	}
 }
+
+/** A property of a JavaScript GObject class, in `static properties`. */
+interface GObjectPropertySpec {
+	/** A G_TYPE_* constant, a GType, a GObject class, or an enum / flags / boxed type. Default G_TYPE_STRING. */
+	type?: number | bigint | Function | string;
+	default?: any;
+	minimum?: number | bigint;
+	maximum?: number | bigint;
+	/** GParamFlags, default G_PARAM_READWRITE. */
+	flags?: number;
+	nick?: string;
+	blurb?: string;
+	/** GVariant properties: the variant type string, default 'v'. */
+	variantType?: string;
+	/** Implements a property declared by a parent class or an interface. */
+	override?: boolean;
+}
+
+/** A signal of a JavaScript GObject class, in `static signals`. */
+interface GObjectSignalSpec {
+	/** Parameter GTypes (G_TYPE_* constants, GTypes or GObject classes). */
+	params?: (number | bigint | Function | string)[];
+	returnType?: number | bigint | Function | string;
+	/** GSignalFlags, default G_SIGNAL_RUN_LAST. */
+	flags?: number;
+}
+
+interface GObjectClassMembers {
+	/** Interfaces the class implements: interface structs (`GListModelInterface`), GTypes or type names. */
+	interfaces?: any[];
+	properties?: Record<string, GObjectPropertySpec>;
+	signals?: Record<string, GObjectSignalSpec>;
+	/** Name of the GType, default the class name. */
+	GTypeName?: string;
+	[method: string]: any;
+}
+
+/** Fundamental GTypes (the G_TYPE_* C macros). */
+declare const G_TYPE_INVALID: number;
+declare const G_TYPE_NONE: number;
+declare const G_TYPE_INTERFACE: number;
+declare const G_TYPE_CHAR: number;
+declare const G_TYPE_UCHAR: number;
+declare const G_TYPE_BOOLEAN: number;
+declare const G_TYPE_INT: number;
+declare const G_TYPE_UINT: number;
+declare const G_TYPE_LONG: number;
+declare const G_TYPE_ULONG: number;
+declare const G_TYPE_INT64: number;
+declare const G_TYPE_UINT64: number;
+declare const G_TYPE_ENUM: number;
+declare const G_TYPE_FLAGS: number;
+declare const G_TYPE_FLOAT: number;
+declare const G_TYPE_DOUBLE: number;
+declare const G_TYPE_STRING: number;
+declare const G_TYPE_POINTER: number;
+declare const G_TYPE_BOXED: number;
+declare const G_TYPE_PARAM: number;
+declare const G_TYPE_OBJECT: number;
+declare const G_TYPE_VARIANT: number;
 
 declare namespace nativescript {
 	/** Keeps the event loop alive (e.g. while waiting on callbacks from other threads). */
