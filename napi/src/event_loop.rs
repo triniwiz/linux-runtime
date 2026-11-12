@@ -65,8 +65,6 @@ pub fn with_js(st: &State, f: impl FnOnce(Js)) {
 pub fn checkpoint(st: &State) {
     let js = st.js();
     st.jobs_scheduled.set(false);
-    crate::state::drain_adopted(st);
-    crate::gobject::drain(st);
     // a Node-API host drains its own microtasks
     #[cfg(not(feature = "engine"))]
     let _ = js;
@@ -78,6 +76,9 @@ pub fn checkpoint(st: &State) {
         }
         report_pending(st);
     }
+    // after the jobs: engines may run finalizers there (Hermes)
+    crate::state::drain_adopted(st);
+    crate::gobject::drain(st);
     let flush = st.flush_rejections.get();
     if !flush.is_null() {
         let _ = js.call(js.deref(flush), js.undefined(), &[]);

@@ -11,6 +11,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 HERE="$PWD"
 HERMES_REV="${HERMES_REV:-5465d9c79f5ada4d9340db01814d191f7b40c417}"
+# the revision and this build's patches: vendor/<arch>/REVISION, rebuilt when it changes
+STAMP="$HERMES_REV $(cat "$HERE/$(basename "$0")" csrc/* | sha256sum | cut -c1-16)"
+if [ "${1:-}" = --stamp ]; then
+    echo "$STAMP"
+    exit 0
+fi
 ARCH="$(uname -m)"
 WORK="${WORK:-$HERE/target-hermes}"
 OUT="$HERE/vendor/$ARCH"
@@ -31,8 +37,29 @@ fi
 # CMake modules are case sensitive off Windows
 sed -i 's/^include (ctest)/include(CTest)/' "$SRC/cmake/modules/Lit.cmake"
 # metadata globals resolve through a Proxy in the global's prototype chain
-perl -0pi -e 's/LLVM_UNLIKELY\(self == runtime\.objectPrototypeRawPtr\) \|\|\s*LLVM_UNLIKELY\(self == runtime\.getGlobal\(\)\.get\(\)\)/LLVM_UNLIKELY(self == runtime.objectPrototypeRawPtr)/' "$SRC/lib/VM/JSObject.cpp"
-grep -q 'getGlobal().get())) {' "$SRC/lib/VM/JSObject.cpp" && { echo "global prototype patch failed" >&2; exit 1; }
+JSOBJECT="$SRC/lib/VM/JSObject.cpp"
+# an interrupted earlier run can leave it empty, which still compiles
+[ -s "$JSOBJECT" ] || { echo "$JSOBJECT is empty: delete $SRC and run again" >&2; exit 1; }
+# rewriting it unchanged on reruns would recompile it
+grep -q 'getGlobal().get())) {' "$JSOBJECT" &&
+    perl -0pi -e 's/LLVM_UNLIKELY\(self == runtime\.objectPrototypeRawPtr\) \|\|\s*LLVM_UNLIKELY\(self == runtime\.getGlobal\(\)\.get\(\)\)/LLVM_UNLIKELY(self == runtime.objectPrototypeRawPtr)/' "$JSOBJECT"
+grep -q 'getGlobal().get())) {' "$JSOBJECT" && { echo "global prototype patch failed" >&2; exit 1; }
+NODE_API="$SRC/API/hermes_node_api/hermes_node_api.cpp"
+# a holder runs finalizers until it is empty, but external ArrayBuffers' finalizers have no
+# link back to their holder to leave it: take each one out before running it
+grep -q 'const auto &ref = finalizers_.begin();' "$NODE_API" &&
+    perl -0pi -e 's/const auto &ref = finalizers_\.begin\(\);\n(\s*)\(\*ref\)->invokeFinalizerFromGC\(\);/NodeApiReference *ref = *finalizers_.begin();\n$1finalizers_.erase(finalizers_.begin());\n$1ref->invokeFinalizerFromGC();/' "$NODE_API"
+grep -q 'const auto &ref = finalizers_.begin();' "$NODE_API" && { echo "finalizer holder patch failed" >&2; exit 1; }
+# finalizers of collected napi_wrap objects only run when GC happens inside a Node-API scope,
+# else they wait for the environment's shutdown: let the host run them from its event loop
+grep -q runPendingFinalizers "$NODE_API" || cat >> "$NODE_API" <<'CPP'
+
+namespace hermes::node_api {
+napi_status runPendingFinalizers(napi_env env) noexcept {
+  return CHECKED_ENV(env)->processFinalizerQueueFromCode();
+}
+} // namespace hermes::node_api
+CPP
 mkdir -p "$SRC/API/hermes_ns"
 cp csrc/CMakeLists.txt csrc/hermes_jsr.cpp "$SRC/API/hermes_ns/"
 grep -q hermes_ns "$SRC/API/CMakeLists.txt" || echo 'add_subdirectory(hermes_ns)' >> "$SRC/API/CMakeLists.txt"
@@ -66,5 +93,5 @@ install -m 755 "$BUILD/bin/hermesc" "$OUT/hermesc"
 rm -f "$OUT"/libicu*.a
 [ -n "${ICU_ROOT:-}" ] && cp "$ICU_ROOT"/lib/libicu{i18n,uc,data}.a "$OUT/"
 strip "$OUT/hermesc"
-echo "$HERMES_REV" > "$OUT/REVISION"
+echo "$STAMP" > "$OUT/REVISION"
 ls -la "$OUT"
