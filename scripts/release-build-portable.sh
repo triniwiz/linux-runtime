@@ -41,7 +41,8 @@ run portable '
     export LLVM_WORK_DIR=/src/target/llvm-work
     ./build_metadata_generator.sh
     rm -rf "$LLVM_WORK_DIR"
-    if [[ " '"$ENGINES"' " == *" hermes "* ]] && [ ! -f engines/hermes/vendor/'"$ARCH"'/libicuuc.a ]; then
+    if [[ " '"$ENGINES"' " == *" hermes "* ]] && { [ ! -f engines/hermes/vendor/'"$ARCH"'/libicuuc.a ] ||
+        [ "$(cat engines/hermes/vendor/'"$ARCH"'/REVISION)" != "$(engines/hermes/build-hermes.sh --stamp)" ]; }; then
         engines/hermes/build-hermes.sh
     fi'
 

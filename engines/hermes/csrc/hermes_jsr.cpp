@@ -13,6 +13,11 @@
 #include <memory>
 #include <string>
 
+namespace hermes::node_api {
+// added to hermes_node_api.cpp by build-hermes.sh
+napi_status runPendingFinalizers(napi_env env) noexcept;
+} // namespace hermes::node_api
+
 namespace {
 
 using ::hermes::vm::CallResult;
@@ -252,7 +257,7 @@ JS_API napi_status js_execute_pending_jobs(napi_env env) {
   }
   vm.clearKeptObjects();
   current->tasks->run();
-  return napi_ok;
+  return ::hermes::node_api::runPendingFinalizers(env);
 }
 
 JS_API napi_status js_get_runtime_version(napi_env env, napi_value *version) {
