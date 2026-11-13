@@ -352,6 +352,7 @@ fn class_proto(st: &State, gtype: GType) -> Option<napi_value> {
         set_prototype(st, proto, parent);
     }
     st.gobjects.protos.borrow_mut().insert(gtype, js.reference(proto, 1));
+    let _ = interop::gobject_hook(js, "populate", &[proto, js.number(gtype as f64)]);
     Some(proto)
 }
 
@@ -948,6 +949,95 @@ unsafe extern "C" fn handler(env: napi_env, info: napi_callback_info) -> napi_va
     js.array(&items)
 }
 
+/// `natives.gobjectMethods(typeName)`: [[method, function], ...]
+unsafe extern "C" fn methods(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let (argv, _, _, _) = cb_args::<1>(env, info);
+    let name = js.to_string(argv[0]);
+    let list = gobj::function_prefix(&st.meta, &name).map(|p| gobj::methods(st, &p, &name)).unwrap_or_default();
+    let items: Vec<napi_value> = list
+        .iter()
+        .map(|m| js.array(&[js.string(&m.name), js.string(&m.function)]))
+        .collect();
+    js.array(&items)
+}
+
+/// `natives.gobjectMethod(functionName)`: the C function as a method, its receiver the
+/// first argument.
+unsafe extern "C" fn method(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let (argv, _, _, _) = cb_args::<1>(env, info);
+    let name = js.to_string(argv[0]);
+    let function = st
+        .meta
+        .find(&name)
+        .filter(|m| m.kind() == nativescript_metadata::MetaKind::Function)
+        .and_then(|m| ffi::function_for(st, st.meta.id(&m)).ok());
+    match function {
+        Some(f) => ffi::js_method(st, &name, &f),
+        None => js.undefined(),
+    }
+}
+
+/// `natives.gobjectProperties(gtype)`: [[camelCaseName, pspec], ...] the type installs.
+unsafe extern "C" fn properties(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let (argv, _, _, _) = cb_args::<1>(env, info);
+    let items: Vec<napi_value> = gobj::own_properties(gtype_of(js, argv[0]))
+        .into_iter()
+        .map(|(name, pspec)| js.array(&[js.string(&gobj::camel_name(&name)), interop::new_pointer(st, pspec, None)]))
+        .collect();
+    js.array(&items)
+}
+
+/// `natives.gobjectInterfaces(gtype)`: the interfaces it adds to its parent's.
+unsafe extern "C" fn interfaces(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let (argv, _, _, _) = cb_args::<1>(env, info);
+    let items: Vec<napi_value> = gobj::own_interfaces(gtype_of(js, argv[0])).into_iter().map(|t| js.number(t as f64)).collect();
+    js.array(&items)
+}
+
+fn object_and_pspec(st: &State, object: napi_value, pspec: napi_value) -> Option<(usize, usize)> {
+    let js = st.js();
+    let object = address_of(js, object).ok().filter(|a| *a != 0)?;
+    let pspec = crate::state::handle_of(js, pspec, Kind::Pointer)?.address;
+    Some((object, pspec))
+}
+
+/// `natives.gobjectGet(object, pspec)`
+unsafe extern "C" fn get_prop(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let (argv, _, _, _) = cb_args::<2>(env, info);
+    let Some((object, pspec)) = object_and_pspec(st, argv[0], argv[1]) else {
+        st.js().throw("expected a GObject and a GParamSpec");
+        return null_mut();
+    };
+    let value = gobj::read_property(object, pspec);
+    to_js(st, unsafe { gobj::read(&value.0[0]) })
+}
+
+/// `natives.gobjectSet(object, pspec, value)`
+unsafe extern "C" fn set_prop(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let (argv, _, _, _) = cb_args::<3>(env, info);
+    let Some((object, pspec)) = object_and_pspec(st, argv[0], argv[1]) else {
+        js.throw("expected a GObject and a GParamSpec");
+        return null_mut();
+    };
+    let mut value = gobj::property_value(pspec);
+    match unsafe { set_value(st, &mut value.0[0], argv[2]) } {
+        Ok(()) => gobj::write_property(object, pspec, &value.0[0]),
+        Err(e) => js.throw(&e),
+    }
+    js.undefined()
+}
+
 /// `natives.gobjectFields(structConstructor)`: the prototype of the struct's views, with
 /// its field accessors.
 unsafe extern "C" fn fields(env: napi_env, info: napi_callback_info) -> napi_value {
@@ -979,8 +1069,14 @@ unsafe extern "C" fn pointer_type(env: napi_env, _info: napi_callback_info) -> n
     descriptor
 }
 
-pub const NATIVES: [(&str, unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value); 6] = [
+pub const NATIVES: [(&str, unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value); 12] = [
     ("gobjectHandler", handler),
+    ("gobjectMethods", methods),
+    ("gobjectMethod", method),
+    ("gobjectProperties", properties),
+    ("gobjectInterfaces", interfaces),
+    ("gobjectGet", get_prop),
+    ("gobjectSet", set_prop),
     ("gobjectRegister", register),
     ("gobjectEmit", emit),
     ("gobjectSlot", is_slot),

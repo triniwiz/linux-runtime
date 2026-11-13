@@ -149,6 +149,8 @@ pub struct Native {
     type_index: RefCell<HashMap<Type, u32, FxBuildHasher>>,
     /// record layouts by type index (struct views)
     records_at: RefCell<Vec<Option<Rc<RecordLayout>>>>,
+    /// functions by JS name, sorted: a type's are a range of names
+    functions: std::cell::OnceCell<Vec<(Box<str>, MetaId)>>,
 }
 
 impl Native {
@@ -160,7 +162,24 @@ impl Native {
             types: Default::default(),
             type_index: Default::default(),
             records_at: Default::default(),
+            functions: Default::default(),
         }
+    }
+
+    pub fn functions_with_prefix(&self, prefix: &str) -> &[(Box<str>, MetaId)] {
+        let all = self.functions.get_or_init(|| {
+            let mut v: Vec<(Box<str>, MetaId)> = self
+                .meta
+                .iter()
+                .filter(|m| m.kind() == MetaKind::Function)
+                .map(|m| (m.js_name().into(), self.meta.id(&m)))
+                .collect();
+            v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            v
+        });
+        let start = all.partition_point(|(n, _)| &**n < prefix);
+        let end = start + all[start..].partition_point(|(n, _)| n.starts_with(prefix));
+        &all[start..end]
     }
 
     /// Record layout of the registered type `index`, without hashing the type.

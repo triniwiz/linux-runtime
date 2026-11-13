@@ -21,6 +21,29 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
+/// Arguments of a call from JS; a method's receiver is the first.
+#[derive(Clone, Copy)]
+pub struct Argv<'a, 's> {
+    args: &'a v8::FunctionCallbackArguments<'s>,
+    method: bool,
+}
+
+impl<'s> Argv<'_, 's> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.args.length() as usize + self.method as usize
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> v8::Local<'s, v8::Value> {
+        match (self.method, i) {
+            (true, 0) => self.args.this().into(),
+            (true, i) => self.args.get(i as i32 - 1),
+            (false, i) => self.args.get(i as i32),
+        }
+    }
+}
+
 /// A C function bound to a runtime.
 pub struct CFunction {
     desc: CallDesc,
@@ -163,13 +186,14 @@ impl CFunction {
         &self,
         info: *const v8::FunctionCallbackInfo,
         args: &v8::FunctionCallbackArguments,
+        method: bool,
     ) {
         let st = unsafe { &*self.state };
         if let Some(layout) = st.tagged().filter(|l| l.callback_info()) {
             let done = if self.variadic {
-                unsafe { self.invoke_variadic_registers(info, layout) }
+                unsafe { self.invoke_variadic_registers(info, layout, method) }
             } else {
-                unsafe { self.invoke_registers(info, layout) }
+                unsafe { self.invoke_registers(info, layout, method) }
             };
             if done {
                 return;
@@ -177,7 +201,7 @@ impl CFunction {
         }
         v8::callback_scope!(unsafe scope, unsafe { &*info });
         let mut rv = v8::ReturnValue::from_function_callback_info(unsafe { &*info });
-        match self.call(scope, st, args) {
+        match self.call(scope, st, Argv { args, method }) {
             Ok(v) => rv.set(v),
             Err(e) => throw_error(scope, &e),
         }
@@ -190,11 +214,12 @@ impl CFunction {
         &self,
         info: *const v8::FunctionCallbackInfo,
         layout: &Layout,
+        method: bool,
     ) -> bool {
         let Some(fast) = &self.fast else {
             return false;
         };
-        if unsafe { info::argc(info) } != self.args.len() {
+        if unsafe { info::argc(info) } + method as usize != self.args.len() {
             return false;
         }
         let mut ints: IntRegs = [0; INT_REGS];
@@ -202,7 +227,7 @@ impl CFunction {
         let (mut ni, mut nf) = (0, 0);
         let mut strings = Strings::new();
         for (i, &kind) in self.args.iter().enumerate() {
-            let v = unsafe { info::arg(info, i) };
+            let v = unsafe { arg(info, method, i) };
             let isolate = || unsafe { info::isolate(info) };
             let Some(bits) = fast::simple_arg(Some(layout), isolate, kind, v, &mut strings) else {
                 return false;
@@ -231,11 +256,12 @@ impl CFunction {
         &self,
         info: *const v8::FunctionCallbackInfo,
         layout: &Layout,
+        method: bool,
     ) -> bool {
         let Some(ret_class) = &self.variadic_ret else {
             return false;
         };
-        let argc = unsafe { info::argc(info) };
+        let argc = unsafe { info::argc(info) } + method as usize;
         let fixed = self.args.len();
         if argc < fixed {
             return false;
@@ -245,7 +271,7 @@ impl CFunction {
         let (mut ni, mut nf) = (0, 0);
         let mut strings = Strings::new();
         for i in 0..argc {
-            let v = unsafe { info::arg(info, i) };
+            let v = unsafe { arg(info, method, i) };
             let kind = match self.args.get(i) {
                 Some(&k) => k,
                 None => match vararg_kind(layout, v) {
@@ -337,10 +363,10 @@ impl CFunction {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         st: &State,
-        args: &v8::FunctionCallbackArguments<'s>,
+        args: Argv<'_, 's>,
     ) -> Result<v8::Local<'s, v8::Value>, String> {
         let fixed = self.args.len();
-        let argc = args.length() as usize;
+        let argc = args.len();
         if argc < fixed || (!self.variadic && argc > fixed) {
             return Err(format!(
                 "{}() expects {}{} argument(s), got {}",
@@ -366,7 +392,7 @@ impl CFunction {
                     i,
                     kind,
                     &self.signature[i + 1],
-                    args.get(i as i32),
+                    args.get(i),
                     &mut cx,
                     &mut strings,
                 )?;
@@ -397,7 +423,7 @@ impl CFunction {
                     i,
                     kind,
                     ty,
-                    args.get(i as i32),
+                    args.get(i),
                     slot,
                     &mut cx,
                     &mut strings,
@@ -496,16 +522,16 @@ impl CFunction {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         st: &State,
-        args: &v8::FunctionCallbackArguments<'s>,
+        args: Argv<'_, 's>,
     ) -> Result<v8::Local<'s, v8::Value>, String> {
         let fixed = self.args.len();
-        let argc = args.length() as usize;
+        let argc = args.len();
         let mut types: Vec<(ValueKind, &Type)> = Vec::with_capacity(argc);
         for i in 0..argc {
             types.push(if i < fixed {
                 (self.args[i], &self.signature[i + 1])
             } else {
-                Self::vararg_type(args.get(i as i32))
+                Self::vararg_type(args.get(i))
                     .map_err(|e| format!("{}() argument {}: {e}", self.name, i + 1))?
             });
         }
@@ -528,7 +554,7 @@ impl CFunction {
                     i,
                     kind,
                     ty,
-                    args.get(i as i32),
+                    args.get(i),
                     &mut cx,
                     &mut strings,
                 )?;
@@ -559,7 +585,7 @@ impl CFunction {
                 i,
                 kind,
                 ty,
-                args.get(i as i32),
+                args.get(i),
                 slot,
                 &mut cx,
                 &mut strings,
@@ -666,7 +692,23 @@ fn vararg_kind(layout: &Layout, v: v8::Local<v8::Value>) -> Option<ValueKind> {
 pub unsafe extern "C" fn c_function_callback(info: *const v8::FunctionCallbackInfo) {
     let args = v8::FunctionCallbackArguments::from_function_callback_info(unsafe { &*info });
     let function = unsafe { &*(tagged::external_value(args.data()) as *const CFunction) };
-    unsafe { function.invoke(info, &args) }
+    unsafe { function.invoke(info, &args, false) }
+}
+
+/// API callback of C functions as methods: the receiver is the first argument.
+pub unsafe extern "C" fn c_method_callback(info: *const v8::FunctionCallbackInfo) {
+    let args = v8::FunctionCallbackArguments::from_function_callback_info(unsafe { &*info });
+    let function = unsafe { &*(tagged::external_value(args.data()) as *const CFunction) };
+    unsafe { function.invoke(info, &args, true) }
+}
+
+#[inline(always)]
+unsafe fn arg<'s>(info: *const v8::FunctionCallbackInfo, method: bool, i: usize) -> v8::Local<'s, v8::Value> {
+    if method {
+        unsafe { info::method_arg(info, i) }
+    } else {
+        unsafe { info::arg(info, i) }
+    }
 }
 
 /// Cached [`CFunction`] for the function declaration `id`.

@@ -92,6 +92,10 @@ extern "C" {
     fn g_type_test_flags(type_: GType, flags: u32) -> i32;
     fn g_type_is_a(type_: GType, is_a_type: GType) -> i32;
     fn g_initially_unowned_get_type() -> GType;
+    fn g_object_class_list_properties(class: gpointer, n: *mut u32) -> *mut gpointer;
+    fn g_type_interfaces(type_: GType, n: *mut u32) -> *mut GType;
+    fn g_object_get_property(object: gpointer, name: *const c_char, value: *mut GValue);
+    fn g_object_set_property(object: gpointer, name: *const c_char, value: *const GValue);
     fn g_type_fundamental(type_: GType) -> GType;
     fn g_type_from_name(name: *const c_char) -> GType;
     fn g_type_class_ref(type_: GType) -> gpointer;
@@ -771,4 +775,143 @@ pub fn new_object(gtype: GType, names: &[std::ffi::CString], values: &Values) ->
     unsafe {
         g_object_new_with_properties(gtype, ptrs.len() as u32, ptrs.as_ptr(), values.0.as_ptr()) as usize
     }
+}
+
+#[link(name = "glib-2.0")]
+extern "C" {
+    fn g_free(mem: gpointer);
+}
+
+/// The prefix of a type's functions (`gtk_label` for GtkLabel, `g_dbus_proxy` for
+/// GDBusProxy): the type name split at capitals the way its `*_get_type` function is.
+pub fn function_prefix(meta: &crate::metadata::MetaSet, type_name: &str) -> Option<String> {
+    let mut words: Vec<&str> = Vec::new();
+    let mut start = 0;
+    for (i, c) in type_name.char_indices() {
+        if c.is_ascii_uppercase() && i > 0 {
+            words.push(&type_name[start..i]);
+            start = i;
+        }
+    }
+    words.push(&type_name[start..]);
+    let n = (words.len() - 1).min(10);
+    for mask in (0..1u32 << n).rev() {
+        let mut prefix = words[0].to_ascii_lowercase();
+        for (i, w) in words[1..].iter().enumerate() {
+            if mask & (1 << i) != 0 {
+                prefix.push('_');
+            }
+            prefix.push_str(&w.to_ascii_lowercase());
+        }
+        let found = meta
+            .find(&format!("{prefix}_get_type"))
+            .is_some_and(|m| m.kind() == crate::metadata::MetaKind::Function);
+        if found {
+            return Some(prefix);
+        }
+    }
+    None
+}
+
+pub struct Method {
+    /// the function's name without the type's prefix
+    pub name: String,
+    pub function: String,
+}
+
+/// Functions named `prefix_*` whose first parameter points to the struct `receiver`.
+pub fn methods(native: &crate::native::Native, prefix: &str, receiver: &str) -> Vec<Method> {
+    use crate::metadata::Type;
+    let start = format!("{prefix}_");
+    let receiver = receiver.trim_start_matches('_');
+    let mut out = Vec::new();
+    for (_, id) in native.functions_with_prefix(&start) {
+        let Some(m) = native.meta.meta_at(*id) else { continue };
+        let Some(name) = m.js_name().strip_prefix(&start) else { continue };
+        if name.is_empty() || name == "get_type" {
+            continue;
+        }
+        let Some(signature) = m.signature() else { continue };
+        let takes = match signature.get(1) {
+            Some(Type::Pointer(inner)) => matches!(&**inner, Type::Struct(s) if s.trim_start_matches('_') == receiver),
+            _ => false,
+        };
+        if takes {
+            out.push(Method { name: name.to_owned(), function: m.js_name().to_owned() });
+        }
+    }
+    out
+}
+
+/// GObject properties `gtype` installs (not its ancestors'): (name, GParamSpec).
+pub fn own_properties(gtype: GType) -> Vec<(String, usize)> {
+    if fundamental(gtype) != G_TYPE_OBJECT {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    unsafe {
+        // classes stay referenced: their GParamSpecs are kept by JS
+        let class = g_type_class_ref(gtype);
+        let mut n = 0;
+        let list = g_object_class_list_properties(class, &mut n);
+        for i in 0..n as usize {
+            let pspec = *list.add(i) as *const GParamSpec;
+            if (*pspec).owner_type == gtype {
+                out.push((CStr::from_ptr((*pspec).name).to_string_lossy().into_owned(), pspec as usize));
+            }
+        }
+        g_free(list as gpointer);
+    }
+    out
+}
+
+/// Interfaces `gtype` implements that its parent doesn't.
+pub fn own_interfaces(gtype: GType) -> Vec<GType> {
+    let parent = type_parent(gtype);
+    let mut out = Vec::new();
+    unsafe {
+        let mut n = 0;
+        let list = g_type_interfaces(gtype, &mut n);
+        for i in 0..n as usize {
+            let iface = *list.add(i);
+            if parent == 0 || !is_a(parent, iface) {
+                out.push(iface);
+            }
+        }
+        g_free(list as gpointer);
+    }
+    out
+}
+
+pub fn read_property(object: usize, pspec: usize) -> Values {
+    let pspec = pspec as *const GParamSpec;
+    let mut value = Values::with_types(&[unsafe { (*pspec).value_type }]);
+    unsafe { g_object_get_property(object as gpointer, (*pspec).name, &mut value.0[0]) };
+    value
+}
+
+/// A GValue of the property's type, for [`write_property`].
+pub fn property_value(pspec: usize) -> Values {
+    Values::with_types(&[unsafe { (*(pspec as *const GParamSpec)).value_type }])
+}
+
+pub fn write_property(object: usize, pspec: usize, value: &GValue) {
+    unsafe { g_object_set_property(object as gpointer, (*(pspec as *const GParamSpec)).name, value) };
+}
+
+/// `max-width-chars` -> `maxWidthChars`
+pub fn camel_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut upper = false;
+    for c in name.chars() {
+        if c == '-' || c == '_' {
+            upper = true;
+        } else if upper {
+            out.push(c.to_ascii_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
