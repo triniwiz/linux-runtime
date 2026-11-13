@@ -96,17 +96,19 @@ pub fn install_interceptor(template: &v8::Local<v8::ObjectTemplate>) {
 }
 
 /// The C function `name` as a method: `this` is its first argument (`None`: no such
-/// function or symbol).
+/// function or symbol). `boolean`: its int result is a gboolean.
 pub fn method_function<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     st: &State,
     name: &str,
+    boolean: bool,
 ) -> Result<Option<v8::Local<'s, v8::Function>>, String> {
     let Some(meta) = st.meta.find(name).filter(|m| m.kind() == MetaKind::Function) else {
         return Ok(None);
     };
     let id = st.meta.id(&meta);
-    let Ok(function) = ffi::function_for(st, id) else {
+    let function = if boolean { ffi::boolean_function_for(st, id) } else { ffi::function_for(st, id) };
+    let Ok(function) = function else {
         return Ok(None);
     };
     let data = v8::External::new(scope, std::rc::Rc::as_ptr(&function) as *mut std::ffi::c_void);

@@ -280,13 +280,17 @@
   // the prototype of a native class: its properties, then its methods and its interfaces'
   function populate(proto, gtype) {
     const name = g_type_name(gtype);
-    for (const [key, pspec] of natives.gobjectProperties(gtype)) {
+    // read and written by the class's C functions when their types match, else through GValues
+    for (const [key, pspec, readable, writable, getter, setter, boolean] of natives.gobjectProperties(gtype)) {
       if (own(proto, key)) continue;
-      Object.defineProperty(proto, key, {
-        configurable: true,
-        get() { return natives.gobjectGet(this, pspec); },
-        set(value) { natives.gobjectSet(this, pspec, value); },
-      });
+      const property = { configurable: true };
+      if (readable) {
+        property.get = (getter && natives.gobjectMethod(getter, boolean)) || function () { return natives.gobjectGet(this, pspec); };
+      }
+      if (writable) {
+        property.set = (setter && natives.gobjectMethod(setter)) || function (value) { natives.gobjectSet(this, pspec, value); };
+      }
+      Object.defineProperty(proto, key, property);
     }
     const add = (type, vtable, skip) => {
       for (const [m, fn] of natives.gobjectMethods(g_type_name(type))) {

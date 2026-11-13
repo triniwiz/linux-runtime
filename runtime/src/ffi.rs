@@ -729,6 +729,23 @@ pub fn function_for(st: &State, id: MetaId) -> Result<Rc<CFunction>, String> {
     Ok(function)
 }
 
+/// [`function_for`] with its int result read as a boolean: a gboolean property's getter.
+pub fn boolean_function_for(st: &State, id: MetaId) -> Result<Rc<CFunction>, String> {
+    let key = id | 1 << 63;
+    if let Some(f) = st.functions.borrow().get(&key) {
+        return Ok(f.clone());
+    }
+    let meta = st.meta.meta_at(id).ok_or("unknown function")?;
+    let address = st.symbol(&meta)? as usize;
+    let mut signature = meta.signature().unwrap_or_default();
+    if let Some(ret) = signature.first_mut() {
+        *ret = Type::Bool;
+    }
+    let function = Rc::new(CFunction::new(st, meta.name(), address, signature, meta.is_variadic())?);
+    st.functions.borrow_mut().insert(key, function.clone());
+    Ok(function)
+}
+
 /// Callable JS function for a C function pointer (e.g. returned by a call).
 pub fn function_from_pointer<'s>(
     scope: &mut v8::PinScope<'s, '_>,

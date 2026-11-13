@@ -1008,28 +1008,45 @@ fn methods<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
     rv.set(v8::Array::new_with_elements(scope, &items).into());
 }
 
-/// `natives.gobjectMethod(functionName)`: the C function as a method, its receiver the
-/// first argument.
+/// `natives.gobjectMethod(functionName, boolean)`: the C function as a method, its receiver
+/// the first argument (`boolean`: its int result is a gboolean).
 fn method<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let st = state(scope);
     let name = args.get(0).to_rust_string_lossy(scope);
-    match crate::globals::method_function(scope, &st, &name) {
+    let boolean = args.get(1).is_true();
+    match crate::globals::method_function(scope, &st, &name, boolean) {
         Ok(Some(f)) => rv.set(f.into()),
         Ok(None) => rv.set_undefined(),
         Err(e) => throw_error(scope, &e),
     }
 }
 
-/// `natives.gobjectProperties(gtype)`: [[camelCaseName, pspec], ...] the type installs.
+/// `natives.gobjectProperties(gtype)`: the properties the type installs, as
+/// [camelCaseName, pspec, readable, writable, getter, setter, boolean].
 fn properties<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let st = state(scope);
     let gtype = gtype_of(scope, args.get(0));
-    let items: Vec<v8::Local<v8::Value>> = gobj::own_properties(gtype)
+    let items: Vec<v8::Local<v8::Value>> = gobj::properties(&st, gtype)
         .into_iter()
-        .map(|(name, pspec)| {
-            let key = v8::String::new(scope, &gobj::camel_name(&name)).unwrap().into();
-            let pspec = interop::new_pointer(scope, &st, pspec, None).into();
-            v8::Array::new_with_elements(scope, &[key, pspec]).into()
+        .map(|p| {
+            let name = |n: &Option<String>| -> v8::Local<v8::Value> {
+                match n {
+                    Some(n) => v8::String::new(scope, n).unwrap().into(),
+                    None => v8::null(scope).into(),
+                }
+            };
+            let getter = name(&p.getter);
+            let setter = name(&p.setter);
+            let item = [
+                v8::String::new(scope, &gobj::camel_name(&p.name)).unwrap().into(),
+                interop::new_pointer(scope, &st, p.pspec, None).into(),
+                v8::Boolean::new(scope, p.readable).into(),
+                v8::Boolean::new(scope, p.writable).into(),
+                getter,
+                setter,
+                v8::Boolean::new(scope, p.boolean).into(),
+            ];
+            v8::Array::new_with_elements(scope, &item).into()
         })
         .collect();
     rv.set(v8::Array::new_with_elements(scope, &items).into());

@@ -102,7 +102,10 @@ label.disconnect(id);
 ```
 
 They are still `interop.Pointer`s and pass to C functions as before. Methods come from functions whose
-first parameter is the class's struct, and from the interfaces the class implements. A JS object
+first parameter is the class's struct, and from the interfaces the class implements. A property has
+a getter if it's readable and a setter if it's writable after construction, so writing a read-only
+one throws in strict mode; when the class has a matching C getter or setter (`gtk_widget_get_opacity`
+for `opacity`), the property uses it. A JS object
 holds a reference on its GObject: a floating reference (a new widget) becomes its own, otherwise it
 takes one. C headers don't say who owns a result, so a function that returns a new reference
 (`transfer full`) leaves the caller's reference to release, as in C. `gpointer` results stay

@@ -843,8 +843,95 @@ pub fn methods(native: &crate::native::Native, prefix: &str, receiver: &str) -> 
     out
 }
 
+pub struct PropertyInfo {
+    pub name: String,
+    pub pspec: usize,
+    pub readable: bool,
+    /// writable after construction
+    pub writable: bool,
+    /// a C function reading it without a GValue (`gtk_widget_get_opacity`)
+    pub getter: Option<String>,
+    pub setter: Option<String>,
+    /// a gboolean: the getter's int result reads as a boolean
+    pub boolean: bool,
+}
+
+/// GObject properties `gtype` installs (not its ancestors'), with the class's C
+/// functions reading and writing them when their types match the property's.
+pub fn properties(native: &crate::native::Native, gtype: GType) -> Vec<PropertyInfo> {
+    let type_name = type_name(gtype).to_string_lossy().into_owned();
+    let prefix = function_prefix(&native.meta, &type_name);
+    own_properties(gtype)
+        .into_iter()
+        .map(|(name, pspec)| {
+            let (flags, value_type) = unsafe { ((*(pspec as *const GParamSpec)).flags, (*(pspec as *const GParamSpec)).value_type) };
+            let value = fundamental(value_type);
+            let snake = name.replace('-', "_");
+            let accessor = |kind: &str, args: usize| {
+                let prefix = prefix.as_ref()?;
+                let candidates: &[&str] = if kind == "set" { &["set"] } else { &["get", "is"] };
+                candidates.iter().find_map(|verb| {
+                    let function = format!("{prefix}_{verb}_{snake}");
+                    let meta = native.meta.find(&function).filter(|m| m.kind() == crate::metadata::MetaKind::Function && !m.is_variadic())?;
+                    let signature = meta.signature()?;
+                    let fits = signature.len() == args + 2
+                        && receives(&signature[1], &type_name)
+                        && if kind == "set" { carries(value, &signature[2], false) } else { carries(value, &signature[0], true) };
+                    fits.then_some(function)
+                })
+            };
+            const READABLE: u32 = 1;
+            const WRITABLE: u32 = 2;
+            const CONSTRUCT_ONLY: u32 = 8;
+            PropertyInfo {
+                readable: flags & READABLE != 0,
+                writable: flags & WRITABLE != 0 && flags & CONSTRUCT_ONLY == 0,
+                getter: accessor("get", 0),
+                setter: accessor("set", 1),
+                boolean: value == G_TYPE_BOOLEAN,
+                name,
+                pspec,
+            }
+        })
+        .collect()
+}
+
+fn receives(ty: &crate::metadata::Type, type_name: &str) -> bool {
+    use crate::metadata::Type;
+    matches!(ty, Type::Pointer(inner) if matches!(&**inner, Type::Struct(s) if s.trim_start_matches('_') == type_name))
+}
+
+/// Whether a C value of `ty` is the property's value as the GValue would give it.
+/// Results returning a string to free (`char *`) don't qualify: the GValue copies.
+fn carries(value: GType, ty: &crate::metadata::Type, result: bool) -> bool {
+    use crate::metadata::Type;
+    match value {
+        G_TYPE_BOOLEAN => matches!(ty, Type::Bool | Type::Int | Type::UInt),
+        G_TYPE_CHAR | G_TYPE_UCHAR | G_TYPE_INT | G_TYPE_UINT | G_TYPE_ENUM | G_TYPE_FLAGS => {
+            matches!(ty, Type::Char | Type::UChar | Type::Short | Type::UShort | Type::Int | Type::UInt)
+        }
+        G_TYPE_LONG | G_TYPE_ULONG | G_TYPE_INT64 | G_TYPE_UINT64 => {
+            matches!(ty, Type::Long | Type::ULong | Type::LongLong | Type::ULongLong)
+        }
+        G_TYPE_FLOAT => matches!(ty, Type::Float),
+        G_TYPE_DOUBLE => matches!(ty, Type::Double),
+        G_TYPE_STRING => matches!(ty, Type::ConstCString) || !result && matches!(ty, Type::CString),
+        G_TYPE_OBJECT | G_TYPE_INTERFACE => match ty {
+            Type::Pointer(inner) => match &**inner {
+                Type::Struct(s) => {
+                    let gtype = std::ffi::CString::new(s.trim_start_matches('_')).map_or(0, |c| type_from_name(&c));
+                    matches!(fundamental(gtype), G_TYPE_OBJECT | G_TYPE_INTERFACE) && gtype != 0
+                }
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// GObject properties `gtype` installs (not its ancestors'): (name, GParamSpec).
-pub fn own_properties(gtype: GType) -> Vec<(String, usize)> {
+fn own_properties(gtype: GType) -> Vec<(String, usize)> {
     if fundamental(gtype) != G_TYPE_OBJECT {
         return Vec::new();
     }

@@ -963,32 +963,48 @@ unsafe extern "C" fn methods(env: napi_env, info: napi_callback_info) -> napi_va
     js.array(&items)
 }
 
-/// `natives.gobjectMethod(functionName)`: the C function as a method, its receiver the
-/// first argument.
+/// `natives.gobjectMethod(functionName, boolean)`: the C function as a method, its receiver
+/// the first argument (`boolean`: its int result is a gboolean).
 unsafe extern "C" fn method(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
-    let (argv, _, _, _) = cb_args::<1>(env, info);
+    let (argv, _, _, _) = cb_args::<2>(env, info);
     let name = js.to_string(argv[0]);
+    let boolean = js.type_of(argv[1]) == BOOLEAN && js.bool_of(argv[1]);
     let function = st
         .meta
         .find(&name)
         .filter(|m| m.kind() == nativescript_metadata::MetaKind::Function)
-        .and_then(|m| ffi::function_for(st, st.meta.id(&m)).ok());
+        .and_then(|m| {
+            let id = st.meta.id(&m);
+            if boolean { ffi::boolean_function_for(st, id) } else { ffi::function_for(st, id) }.ok()
+        });
     match function {
         Some(f) => ffi::js_method(st, &name, &f),
         None => js.undefined(),
     }
 }
 
-/// `natives.gobjectProperties(gtype)`: [[camelCaseName, pspec], ...] the type installs.
+/// `natives.gobjectProperties(gtype)`: the properties the type installs, as
+/// [camelCaseName, pspec, readable, writable, getter, setter, boolean].
 unsafe extern "C" fn properties(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
     let (argv, _, _, _) = cb_args::<1>(env, info);
-    let items: Vec<napi_value> = gobj::own_properties(gtype_of(js, argv[0]))
+    let name = |n: &Option<String>| n.as_deref().map_or_else(|| js.null(), |n| js.string(n));
+    let items: Vec<napi_value> = gobj::properties(st, gtype_of(js, argv[0]))
         .into_iter()
-        .map(|(name, pspec)| js.array(&[js.string(&gobj::camel_name(&name)), interop::new_pointer(st, pspec, None)]))
+        .map(|p| {
+            js.array(&[
+                js.string(&gobj::camel_name(&p.name)),
+                interop::new_pointer(st, p.pspec, None),
+                js.boolean(p.readable),
+                js.boolean(p.writable),
+                name(&p.getter),
+                name(&p.setter),
+                js.boolean(p.boolean),
+            ])
+        })
         .collect();
     js.array(&items)
 }

@@ -10,6 +10,12 @@ eq(g_action_get_enabled(action), 0, 'method calls the C function');
 eq(action.enabled, false, 'property');
 action.enabled = true;
 eq([action.enabled, action.parameterType], [true, null], 'property set');
+const setter = Object.getOwnPropertyDescriptor(GSimpleAction.prototype, 'enabled').set;
+// JSC's native functions have no names
+if (g_simple_action_set_enabled.name) eq(setter.name, 'g_simple_action_set_enabled', 'written by the C setter when there is one');
+const throws = (f) => { try { f(); return false; } catch (e) { return e.constructor.name; } };
+eq(throws(() => { 'use strict'; action.name = 'other'; }), 'TypeError', 'construct-only properties are read-only');
+eq(action.name, 'go', 'unchanged');
 
 // inherited and interface methods
 const menu = g_menu_new();
