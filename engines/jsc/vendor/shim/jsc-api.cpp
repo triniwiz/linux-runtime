@@ -428,6 +428,8 @@ class FunctionInfo : public NativeInfo {
                 // is a constructor (ns_proxy's `new proxy()` needs a constructable target; V8's
                 // napi functions are constructable by default, JSC's are not).
                 definition.callAsConstructor = FunctionInfo::CallAsConstructor;
+                // callback objects without hasInstance are never instanceof targets
+                definition.hasInstance = FunctionInfo::HasInstance;
                 definition.attributes = kJSClassAttributeNoAutomaticPrototype;
                 definition.initialize = FunctionInfo::initialize;
                 definition.finalize = Finalize;
@@ -437,6 +439,22 @@ class FunctionInfo : public NativeInfo {
         }
 
         ~FunctionInfo() {}
+
+    // OrdinaryHasInstance
+    static bool HasInstance(JSContextRef ctx, JSObjectRef constructor, JSValueRef value, JSValueRef* exception) {
+        JSValueRef prototype = JSObjectGetProperty(ctx, constructor, JSString("prototype"), exception);
+        if (!JSValueIsObject(ctx, prototype) || !JSValueIsObject(ctx, value)) {
+            return false;
+        }
+        JSValueRef p = JSObjectGetPrototype(ctx, (JSObjectRef) value);
+        while (JSValueIsObject(ctx, p)) {
+            if (JSValueIsStrictEqual(ctx, p, prototype)) {
+                return true;
+            }
+            p = JSObjectGetPrototype(ctx, (JSObjectRef) p);
+        }
+        return false;
+    }
 
     static void initialize(JSContextRef ctx, JSObjectRef object) {
         JSObjectRef global = JSContextGetGlobalObject(ctx);
