@@ -295,6 +295,13 @@ pub fn instance_class(object: usize) -> Option<&'static ClassDef> {
     None
 }
 
+/// GObject.ref_count
+#[inline]
+pub fn ref_count(object: usize) -> u32 {
+    // after the GTypeInstance's class pointer
+    unsafe { (*((object + std::mem::size_of::<usize>()) as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Relaxed) }
+}
+
 /// G_TYPE_FROM_INSTANCE
 #[inline]
 pub fn instance_type(object: usize) -> GType {

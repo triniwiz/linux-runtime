@@ -157,7 +157,8 @@ impl Layout {
         unsafe { (map(w) == map(*proto_slot)).then(|| field::<usize>(w, EMBEDDER_FIELDS + 8) >> 1) }
     }
 
-    /// Address passed for null, undefined or an interop.Pointer.
+    /// Address passed for null, undefined, an interop.Pointer or struct view, or a
+    /// Reference's storage once it has some (out-parameters).
     #[inline(always)]
     pub fn pointer(&self, v: v8::Local<v8::Value>) -> Option<usize> {
         let w = word(v);
@@ -167,7 +168,29 @@ impl Layout {
         if is_smi(w) {
             return None;
         }
-        unsafe { self.interop_address(w, map(w)) }
+        unsafe {
+            let m = map(w);
+            if let Some(a) = self.interop_address(w, m) {
+                return Some(a);
+            }
+            self.reference_storage(w, m)
+        }
+    }
+
+    /// Storage address of a Reference (heap object `w` with map `m`), if allocated.
+    #[inline(always)]
+    unsafe fn reference_storage(&self, w: usize, m: usize) -> Option<usize> {
+        unsafe {
+            let pointer_map = map(*self.pointer_proto);
+            let same_layout = self.other_maps
+                && field::<u16>(m, MAP_INSTANCE_TYPE) == field::<u16>(pointer_map, MAP_INSTANCE_TYPE)
+                && field::<u8>(m, MAP_INOBJECT_START) == field::<u8>(pointer_map, MAP_INOBJECT_START);
+            if !same_layout || field::<usize>(w, EMBEDDER_FIELDS) >> 1 != crate::handles::Kind::Reference as usize {
+                return None;
+            }
+            let address = field::<usize>(w, EMBEDDER_FIELDS + 8) >> 1;
+            (address != 0).then_some(address)
+        }
     }
 
     /// Address of an interop.Pointer or struct view (heap object `w` with map `m`).
