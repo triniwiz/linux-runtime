@@ -60,6 +60,8 @@ pub struct CFunction {
     /// returns a `Struct *`: unknown until the first non-NULL result tells whether the
     /// struct is a GObject type (read as JS objects) or not (plain Pointers)
     ret_gobject: Cell<Option<bool>>,
+    /// the last `const char*` result: getters mostly return the same text
+    ret_string: std::cell::RefCell<Option<(Box<[u8]>, v8::Global<v8::String>)>>,
 }
 
 impl std::ops::Deref for CFunction {
@@ -116,6 +118,7 @@ impl CFunction {
             ret_record: Default::default(),
             callbacks,
             ret_gobject,
+            ret_string: Default::default(),
         })
     }
 
@@ -306,6 +309,12 @@ impl CFunction {
         if unsafe { set_scalar_return(info, layout, self.ret, ret) } {
             return;
         }
+        if self.ret == ValueKind::ConstCString && ret as u64 != 0 {
+            if let Some(slot) = unsafe { self.same_string(ret as u64 as usize) } {
+                unsafe { info::set_return_handle(info, slot) };
+                return;
+            }
+        }
         if self.ret == ValueKind::Pointer {
             let address = ret as u64 as usize;
             let st = unsafe { &*self.state };
@@ -328,6 +337,16 @@ impl CFunction {
             Ok(v) => rv.set(v),
             Err(e) => throw_error(scope, &e),
         }
+    }
+
+    /// Handle slot of the last string result when the C string still has its text.
+    #[inline]
+    unsafe fn same_string(&self, address: usize) -> Option<*const v8::Object> {
+        let cached = self.ret_string.borrow();
+        let (bytes, string) = cached.as_ref()?;
+        let current = unsafe { std::ffi::CStr::from_ptr(address as *const libc::c_char) }.to_bytes();
+        // SAFETY: the Global belongs to this isolate
+        (**bytes == *current).then(|| unsafe { v8::Handle::get_unchecked(string) as *const v8::String as *const v8::Object })
     }
 
     #[inline]
@@ -607,6 +626,15 @@ impl CFunction {
         ty: &Type,
         ret: *const u8,
     ) -> Result<v8::Local<'s, v8::Value>, String> {
+        if self.ret == ValueKind::ConstCString {
+            let v = unsafe { marshal::read(scope, st, ty, ret, Mem::Temp) }?;
+            if let Ok(s) = v8::Local::<v8::String>::try_from(v) {
+                let address = unsafe { (ret as *const usize).read_unaligned() };
+                let bytes = unsafe { std::ffi::CStr::from_ptr(address as *const libc::c_char) }.to_bytes();
+                *self.ret_string.borrow_mut() = Some((bytes.into(), v8::Global::new(scope, s)));
+            }
+            return Ok(v);
+        }
         if !matches!(ty, Type::Struct(_) | Type::Union(_)) {
             return unsafe { marshal::read(scope, st, ty, ret, Mem::Temp) };
         }

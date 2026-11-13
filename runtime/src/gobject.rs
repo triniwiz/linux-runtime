@@ -153,7 +153,7 @@ impl Host {
             return;
         }
         let st = unsafe { &*self.state };
-        if std::thread::current().id() == self.thread {
+        if on_js_thread(self.thread) {
             f(st);
         } else {
             crate::event_loop::run_on_js_thread(self.context, Box::new(|| f(st)));
@@ -166,12 +166,18 @@ impl Host {
         }
         let st = unsafe { &*self.state };
         let call = || with_scope(st, |scope| f(scope, st));
-        if std::thread::current().id() == self.thread {
+        if on_js_thread(self.thread) {
             call();
         } else {
             crate::event_loop::run_on_js_thread(self.context, Box::new(call));
         }
     }
+}
+
+#[inline]
+fn on_js_thread(thread: std::thread::ThreadId) -> bool {
+    thread_local!(static THREAD: std::thread::ThreadId = std::thread::current().id());
+    THREAD.with(|t| *t == thread)
 }
 
 /// A scope in the runtime's context, entered from C.
@@ -333,7 +339,7 @@ pub fn wrap<'s>(
     if floating {
         unsafe { gobj::g_object_ref_sink(address as _) };
     }
-    track(scope, st, address, object, native_def(st));
+    track(scope, st, address, object, native_def(st), owned || floating);
     release(owned || floating);
     Some(object)
 }
@@ -489,12 +495,12 @@ pub fn instance<'s>(
         if let Some(frame) = frames.last_mut().filter(|f| f.0 == gtype && f.1.is_none()) {
             frame.1 = Some(v8::Global::new(scope, object));
             drop(frames);
-            track(scope, st, address, object, def);
+            track(scope, st, address, object, def, false);
             return Some(object);
         }
     }
     // created by native code (GtkBuilder, g_object_new): run the class's constructor
-    track(scope, st, address, object, def);
+    track(scope, st, address, object, def, false);
     let cls = v8::Local::new(scope, &st.gobjects.classes.borrow()[def.class as usize].cls);
     st.gobjects.adopting.borrow_mut().push(v8::Global::new(scope, object));
     v8::tc_scope!(let tc, scope);
@@ -550,16 +556,22 @@ fn bare<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, class: u32, address: u
     Some(object)
 }
 
+/// `release`: the caller drops a reference right after, leaving the toggle reference.
 fn track<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     st: &State,
     address: usize,
     object: v8::Local<'s, v8::Object>,
     def: &'static ClassDef,
+    release: bool,
 ) {
     let isolate = unsafe { &mut *st.isolate.get() };
     let weak = WeakCell::new(isolate, object, address);
-    let strong = Some(v8::Global::new(scope, object));
+    let tracked = st.gobjects.instances.borrow().contains_key(&address);
+    // strong while others reference it too; the toggle notification would drop a
+    // handle made for an object only JS will reference
+    let refs = gobj::ref_count(address) + !tracked as u32 - release as u32;
+    let strong = (refs > 1).then(|| v8::Global::new(scope, object));
     let previous = st.gobjects.instances.borrow_mut().insert(address, Entry { weak, strong, def });
     if previous.is_none() {
         let data = def as *const ClassDef as *mut std::ffi::c_void;
@@ -654,7 +666,7 @@ pub fn construct<'s>(
         Some(g) => v8::Local::new(scope, &g),
         None => {
             let object = bare(scope, st, class, address).ok_or("failed to create the JS object")?;
-            track(scope, st, address, object, def);
+            track(scope, st, address, object, def, false);
             object
         }
     };

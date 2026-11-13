@@ -524,8 +524,11 @@ pub unsafe fn read<'s>(
             if addr == 0 {
                 v8::null(scope).into()
             } else {
-                let s = CStr::from_ptr(addr as *const libc::c_char).to_string_lossy();
-                v8::String::new(scope, &s).ok_or("string too long")?.into()
+                // V8 replaces invalid UTF-8 like to_string_lossy, in one pass
+                let bytes = CStr::from_ptr(addr as *const libc::c_char).to_bytes();
+                v8::String::new_from_utf8(scope, bytes, v8::NewStringType::Normal)
+                    .ok_or("string too long")?
+                    .into()
             }
         }
         t if t.is_pointer_like() => {
