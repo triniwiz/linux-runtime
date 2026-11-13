@@ -913,6 +913,41 @@ unsafe extern "C" fn is_slot(env: napi_env, info: napi_callback_info) -> napi_va
     js.boolean(slot)
 }
 
+struct HandlerNotify {
+    host: &'static Host,
+    closure: usize,
+}
+
+/// GClosure finalize notifier of a signal handler: disconnected, or its instance finalized.
+unsafe extern "C" fn handler_finalized(data: *mut c_void, _closure: *mut c_void) {
+    let notify = unsafe { Box::from_raw(data as *mut HandlerNotify) };
+    let closure = notify.closure;
+    notify.host.on_thread(move |st| ffi::release_handler(st, closure));
+}
+
+/// `natives.gobjectHandler(function, { returns, args })`: [callback, notify, notify data]
+/// for a GClosure of its own, freed with it.
+unsafe extern "C" fn handler(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let (argv, _, _, _) = cb_args::<2>(env, info);
+    if js.type_of(argv[0]) != FUNCTION {
+        js.throw("expected a function");
+        return null_mut();
+    }
+    let made = interop::signature_from_spec(st, argv[1]).and_then(|signature| ffi::handler_closure(st, argv[0], &signature));
+    let (code, closure) = match made {
+        Ok(m) => m,
+        Err(e) => {
+            js.throw(&e);
+            return null_mut();
+        }
+    };
+    let notify = Box::into_raw(Box::new(HandlerNotify { host: host(st), closure }));
+    let items = [code, handler_finalized as *const () as usize, notify as usize].map(|a| interop::new_pointer(st, a, None));
+    js.array(&items)
+}
+
 /// `natives.gobjectFields(structConstructor)`: the prototype of the struct's views, with
 /// its field accessors.
 unsafe extern "C" fn fields(env: napi_env, info: napi_callback_info) -> napi_value {
@@ -944,7 +979,8 @@ unsafe extern "C" fn pointer_type(env: napi_env, _info: napi_callback_info) -> n
     descriptor
 }
 
-pub const NATIVES: [(&str, unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value); 5] = [
+pub const NATIVES: [(&str, unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value); 6] = [
+    ("gobjectHandler", handler),
     ("gobjectRegister", register),
     ("gobjectEmit", emit),
     ("gobjectSlot", is_slot),

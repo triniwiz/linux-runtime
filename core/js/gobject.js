@@ -284,7 +284,7 @@
     return cls;
   }
 
-  define(g, '__nsGObject', Object.freeze({ register, extend, gtype: typeFromName, object: natives.gobjectPointerType() }));
+  define(g, '__nsGObject', Object.freeze({ register, extend, gtype: typeFromName, object: natives.gobjectPointerType(), handler: natives.gobjectHandler }));
   if (g.NativeClass === undefined) {
     define(g, 'NativeClass', (...args) => (typeof args[0] === 'function' ? args[0] : (cls) => cls));
   }

@@ -748,6 +748,8 @@ pub struct ClosureData {
     /// a vfunc of a JS GObject class: `function` is called on the JS object of the
     /// first argument (true: dispose, which mustn't resurrect it)
     method: Option<bool>,
+    /// a signal handler's: freed when GLib finalizes its closure, not by `interop.release`
+    handler: bool,
 }
 
 enum ClosureCode {
@@ -787,7 +789,7 @@ fn closure_data_for<'s>(
             return Ok(b.u64_value().0 as usize as *const ClosureData);
         }
     }
-    let ptr = new_closure_data(scope, st, function, signature, None)?;
+    let ptr = new_closure_data(scope, st, function, signature, None, false)?;
     let value = v8::BigInt::new_from_u64(scope, ptr as usize as u64);
     function.set_private(scope, key, value.into());
     Ok(ptr)
@@ -799,6 +801,7 @@ fn new_closure_data<'s>(
     function: v8::Local<'s, v8::Function>,
     signature: &[Type],
     method: Option<bool>,
+    handler: bool,
 ) -> Result<*const ClosureData, String> {
     let global = v8::Global::new(scope, function);
     // SAFETY: the Global belongs to this isolate and lives in the ClosureData
@@ -834,6 +837,7 @@ fn new_closure_data<'s>(
         state: st as *const State,
         closure: None,
         method,
+        handler,
     });
     let userdata = &mut *data as *mut ClosureData as *mut c_void;
     #[cfg(target_arch = "x86_64")]
@@ -859,7 +863,32 @@ pub fn method_closure<'s>(
     signature: &[Type],
     dispose: bool,
 ) -> Result<usize, String> {
-    new_closure_data(scope, st, method, signature, Some(dispose)).map(|d| unsafe { (*d).code() })
+    new_closure_data(scope, st, method, signature, Some(dispose), false).map(|d| unsafe { (*d).code() })
+}
+
+/// A closure of its own for one signal connection: (C function pointer, closure data
+/// for [`release_handler`]). Connecting a function twice mustn't share one, as either
+/// disconnect frees it.
+pub fn handler_closure<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    function: v8::Local<'s, v8::Function>,
+    signature: &[Type],
+) -> Result<(usize, usize), String> {
+    let data = new_closure_data(scope, st, function, signature, None, true)?;
+    Ok((unsafe { (*data).code() }, data as usize))
+}
+
+/// Frees a signal handler's closure: GLib finalized its GClosure.
+pub fn release_handler(st: &State, data: usize) {
+    let released = {
+        let mut closures = st.closures.borrow_mut();
+        let i = closures.iter().position(|c| &**c as *const ClosureData as usize == data);
+        i.map(|i| closures.swap_remove(i))
+    };
+    if released.is_some() {
+        st.closure_generation.set(st.closure_generation.get() + 1);
+    }
 }
 
 /// C function pointer calling `function`; cached per signature, freed by `interop.release`.
@@ -884,8 +913,8 @@ pub fn release_closures<'s>(
         let mut i = 0;
         while i < closures.len() {
             let f = v8::Local::new(scope, &closures[i].function);
-            // vfuncs live as long as their class
-            if closures[i].method.is_none() && f.strict_equals(function.into()) {
+            // vfuncs live as long as their class, handlers as long as their connection
+            if closures[i].method.is_none() && !closures[i].handler && f.strict_equals(function.into()) {
                 released.push(closures.swap_remove(i));
             } else {
                 i += 1;
