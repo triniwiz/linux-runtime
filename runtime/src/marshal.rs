@@ -534,6 +534,8 @@ pub unsafe fn read<'s>(
                 v8::null(scope).into()
             } else if let Type::FunctionPointer(sig) = t {
                 ffi::function_from_pointer(scope, st, addr, sig)?
+            } else if let Some(o) = crate::gobject::read_pointer(scope, st, t, addr) {
+                o.into()
             } else {
                 interop::new_pointer(scope, st, addr, None).into()
             }

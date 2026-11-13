@@ -8,6 +8,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAP_INSTANCE_TYPE: usize = 12;
+const MAP_INOBJECT_START: usize = 9;
 const HEAP_NUMBER_VALUE: usize = 8;
 const EXTERNAL_VALUE: usize = 24;
 const EMBEDDER_FIELDS: usize = 32;
@@ -38,6 +39,8 @@ pub struct Layout {
     pointer_proto: *const usize,
     /// `FunctionCallbackInfo` matches the slots above
     callback_info: bool,
+    /// interop objects with another prototype (GObjects) are recognized by their layout
+    other_maps: bool,
     /// sequential one-byte strings are read in place
     seq_strings: bool,
 }
@@ -119,8 +122,8 @@ impl Layout {
             if m == self.heap_number_map {
                 return Value::Number(f64::from_bits(field(w, HEAP_NUMBER_VALUE)));
             }
-            if m == map(*self.pointer_proto) {
-                return Value::Pointer(field::<usize>(w, EMBEDDER_FIELDS + 8) >> 1);
+            if let Some(a) = self.interop_address(w, m) {
+                return Value::Pointer(a);
             }
             let t: u16 = field(m, MAP_INSTANCE_TYPE);
             if t < FIRST_NONSTRING_TYPE {
@@ -161,9 +164,32 @@ impl Layout {
         if w == self.null || w == self.undefined {
             return Some(0);
         }
+        if is_smi(w) {
+            return None;
+        }
+        unsafe { self.interop_address(w, map(w)) }
+    }
+
+    /// Address of an interop.Pointer or struct view (heap object `w` with map `m`).
+    #[inline(always)]
+    unsafe fn interop_address(&self, w: usize, m: usize) -> Option<usize> {
         unsafe {
-            (!is_smi(w) && map(w) == map(*self.pointer_proto))
-                .then(|| field::<usize>(w, EMBEDDER_FIELDS + 8) >> 1)
+            let pointer_map = map(*self.pointer_proto);
+            if m == pointer_map {
+                return Some(field::<usize>(w, EMBEDDER_FIELDS + 8) >> 1);
+            }
+            // GObjects are interop.Pointers and struct views with their class's prototype:
+            // the same embedder fields, in other maps
+            if self.other_maps
+                && field::<u16>(m, MAP_INSTANCE_TYPE) == field::<u16>(pointer_map, MAP_INSTANCE_TYPE)
+                && field::<u8>(m, MAP_INOBJECT_START) == field::<u8>(pointer_map, MAP_INOBJECT_START)
+            {
+                let kind = field::<usize>(w, EMBEDDER_FIELDS) >> 1;
+                if kind == crate::handles::Kind::Pointer as usize || kind == crate::handles::Kind::Struct as usize {
+                    return Some(field::<usize>(w, EMBEDDER_FIELDS + 8) >> 1);
+                }
+            }
+            None
         }
     }
 
@@ -255,6 +281,7 @@ impl Layout {
             heap_number_map,
             pointer_proto,
             callback_info: false,
+            other_maps: false,
             seq_strings: true,
         };
         layout.seq_strings = probe_strings(scope, &layout);
@@ -283,6 +310,18 @@ impl Layout {
                 return None;
             }
         }
+        layout.other_maps = true;
+        layout.other_maps = (|| {
+            let p = pointer(scope, 0x7f12_3456_7890)?;
+            let proto = v8::Object::new(scope);
+            p.set_prototype(scope, proto.into())?;
+            let plain = v8::Object::new(scope);
+            plain.set_prototype(scope, proto.into())?;
+            (matches!(layout.classify(p.into()), Value::Pointer(0x7f12_3456_7890))
+                && matches!(layout.classify(plain.into()), Value::Other))
+            .then_some(())
+        })()
+        .is_some();
         let external = v8::External::new(scope, 0x7f00_1234_5678usize as *mut c_void);
         if unsafe { field::<usize>(word(external.into()), EXTERNAL_VALUE) } != 0x7f00_1234_5678 {
             return None;

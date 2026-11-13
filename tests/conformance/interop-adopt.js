@@ -23,13 +23,14 @@ if (typeof gc === 'function') {
   const G_TYPE_OBJECT = BigInt(20 << 2);
   const object = g_object_new_with_properties(G_TYPE_OBJECT, 0, null, null);
   const refs = () => new interop.Reference(GObject, object).value.ref_count;
+  const before = refs();
   (() => {
     interop.adopt(g_object_ref(object), g_object_unref);
   })();
-  eq(refs(), 2, 'adopted reference');
+  eq(refs(), before + 1, 'adopted reference');
   gc();
   setTimeout(() => {
-    eq(refs(), 1, 'unreffed after collection');
+    eq(refs(), before, 'unreffed after collection');
     g_object_unref(object);
   }, 0);
 }

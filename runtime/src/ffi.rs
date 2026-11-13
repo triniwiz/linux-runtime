@@ -34,6 +34,9 @@ pub struct CFunction {
     ret_record: std::cell::OnceCell<structs::RecordClass>,
     /// last closure passed per callback argument, with `State::closure_generation`
     callbacks: Box<[Cell<(*const ClosureData, u64)>]>,
+    /// returns a `Struct *`: unknown until the first non-NULL result tells whether the
+    /// struct is a GObject type (read as JS objects) or not (plain Pointers)
+    ret_gobject: Cell<Option<bool>>,
 }
 
 impl std::ops::Deref for CFunction {
@@ -81,6 +84,7 @@ impl CFunction {
             .iter()
             .map(|_| Cell::new((std::ptr::null(), 0)))
             .collect();
+        let ret_gobject = Cell::new(crate::gobject::pointee(&desc.signature[0]).is_none().then_some(false));
         Ok(CFunction {
             desc,
             state: st,
@@ -88,6 +92,7 @@ impl CFunction {
             variadic_ret,
             ret_record: Default::default(),
             callbacks,
+            ret_gobject,
         })
     }
 
@@ -275,10 +280,19 @@ impl CFunction {
         if unsafe { set_scalar_return(info, layout, self.ret, ret) } {
             return;
         }
-        if self.ret == ValueKind::Pointer
-            && unsafe { self.return_pointer(info, ret as u64 as usize) }
-        {
-            return;
+        if self.ret == ValueKind::Pointer {
+            let address = ret as u64 as usize;
+            let st = unsafe { &*self.state };
+            let done = if self.returns_gobject() {
+                crate::gobject::live_slot(st, address)
+                    .map(|slot| unsafe { info::set_return_handle(info, slot) })
+                    .is_some()
+            } else {
+                unsafe { self.return_pointer(info, address) }
+            };
+            if done {
+                return;
+            }
         }
         v8::callback_scope!(unsafe scope, unsafe { &*info });
         let mut rv = v8::ReturnValue::from_function_callback_info(unsafe { &*info });
@@ -288,6 +302,18 @@ impl CFunction {
             Ok(v) => rv.set(v),
             Err(e) => throw_error(scope, &e),
         }
+    }
+
+    #[inline]
+    fn returns_gobject(&self) -> bool {
+        if let Some(known) = self.ret_gobject.get() {
+            return known;
+        }
+        let st = unsafe { &*self.state };
+        let name = crate::gobject::pointee(&self.signature[0]).unwrap_or_default();
+        let known = crate::gobject::pointee_gtype(st, name) != 0;
+        self.ret_gobject.set(Some(known));
+        known
     }
 
     /// Pointer result made without a scope; `false` if the factory can't.
@@ -981,10 +1007,12 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     for (i, ty) in data.signature[1 + first..].iter().enumerate() {
         let src = unsafe { *args.add(i + first) } as *const u8;
         argv[i] = match data.args[i + first] {
-            ValueKind::Pointer => match unsafe { (src as *const usize).read_unaligned() } {
-                0 => v8::null(tc).into(),
-                a => crate::interop::new_pointer(tc, st, a, None).into(),
-            },
+            ValueKind::Pointer if crate::gobject::pointee(ty).is_none() => {
+                match unsafe { (src as *const usize).read_unaligned() } {
+                    0 => v8::null(tc).into(),
+                    a => crate::interop::new_pointer(tc, st, a, None).into(),
+                }
+            }
             ValueKind::I32 => {
                 v8::Integer::new(tc, unsafe { (src as *const i32).read_unaligned() }).into()
             }

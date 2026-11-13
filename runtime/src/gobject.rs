@@ -118,6 +118,21 @@ pub struct GObjects {
     disposing: RefCell<Vec<usize>>,
     signals: RefCell<HashMap<(GType, String), Rc<gobj::SignalInfo>>>,
     host: OnceCell<&'static Host>,
+    /// toggle-reference data of native classes' instances
+    native: OnceCell<&'static ClassDef>,
+    wrappers: RefCell<HashMap<GType, Wrapper, nativescript_core::native::FxBuildHasher>>,
+    protos: RefCell<HashMap<GType, v8::Global<v8::Object>, nativescript_core::native::FxBuildHasher>>,
+    /// struct name -> the GObject type or interface it names, 0 for other structs
+    pointees: RefCell<HashMap<String, GType, nativescript_core::native::FxBuildHasher>>,
+    /// struct name -> its GType, found through `*_get_type` when not registered yet
+    named: RefCell<HashMap<String, GType, nativescript_core::native::FxBuildHasher>>,
+}
+
+enum Wrapper {
+    NotObject,
+    JsClass,
+    /// an interop.Pointer with the class's prototype, cloned per instance
+    Native(v8::Global<v8::Object>),
 }
 
 pub struct Host {
@@ -237,6 +252,208 @@ fn host(st: &State) -> &'static Host {
     })
 }
 
+fn native_def(st: &State) -> &'static ClassDef {
+    st.gobjects.native.get_or_init(|| Box::leak(Box::new(ClassDef::new(host(st), u32::MAX, false))))
+}
+
+/// The struct a `Struct *` type points to.
+#[inline]
+pub fn pointee(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Pointer(inner) => match &**inner {
+            Type::Struct(name) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The GObject type or interface a struct name stands for (`GtkWidget`), else 0. Only
+/// asked with an instance at hand, so the type is registered.
+pub fn pointee_gtype(st: &State, name: &str) -> GType {
+    if let Some(&gtype) = st.gobjects.pointees.borrow().get(name) {
+        return gtype;
+    }
+    let bare = name.strip_prefix('_').unwrap_or(name);
+    let gtype = CString::new(bare).map_or(0, |c| gobj::type_from_name(&c));
+    let gtype = match gobj::fundamental(gtype) {
+        gobj::G_TYPE_OBJECT | gobj::G_TYPE_INTERFACE => gtype,
+        _ => 0,
+    };
+    st.gobjects.pointees.borrow_mut().insert(name.to_owned(), gtype);
+    gtype
+}
+
+/// A `Struct *` value: the JS object of the GObject when the struct is a GObject type.
+pub fn read_pointer<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    ty: &Type,
+    address: usize,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let name = pointee(ty)?;
+    if pointee_gtype(st, name) == 0 {
+        return None;
+    }
+    wrap(scope, st, address, false)
+}
+
+/// The JS object of the GObject at `address`: the instance of its JS class, or an
+/// interop.Pointer with its native class's prototype, one per GObject while JS holds it.
+/// `owned`: the caller's reference passes to the JS object. `None` when it isn't a GObject.
+pub fn wrap<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    address: usize,
+    owned: bool,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let release = |owned: bool| {
+        if owned {
+            unsafe { gobj::g_object_unref(address as _) };
+        }
+    };
+    if let Some(o) = live(scope, st, address) {
+        release(owned);
+        return Some(o);
+    }
+    let template = match wrapper(scope, st, gobj::instance_type(address)) {
+        Some(Ok(t)) => t,
+        Some(Err(())) => {
+            let o = instance(scope, st, address, false);
+            release(owned);
+            return o;
+        }
+        None => return None,
+    };
+    let object = handles::clone(scope, template)?;
+    handles::set_address(object, address);
+    // without ownership annotations, take a reference of our own: a floating one (a new
+    // widget) becomes it, a borrowed object stays referenced by whoever else holds it
+    let floating = unsafe { gobj::g_object_is_floating(address as _) } != 0;
+    if floating {
+        unsafe { gobj::g_object_ref_sink(address as _) };
+    }
+    track(scope, st, address, object, native_def(st));
+    release(owned || floating);
+    Some(object)
+}
+
+/// How instances of `gtype` read in JS: `Ok(template)` for native classes, `Err` for JS
+/// classes of this runtime, `None` for types that aren't GObjects.
+fn wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    gtype: GType,
+) -> Option<Result<v8::Local<'s, v8::Object>, ()>> {
+    let made = |scope: &mut v8::PinScope<'s, '_>, w: &Wrapper| match w {
+        Wrapper::NotObject => None,
+        Wrapper::JsClass => Some(Err(())),
+        Wrapper::Native(t) => Some(Ok(v8::Local::new(scope, t))),
+    };
+    if let Some(w) = st.gobjects.wrappers.borrow().get(&gtype) {
+        return made(scope, w);
+    }
+    let ours = host(st) as *const Host as *const u8;
+    let mut js = false;
+    let mut t = gtype;
+    while t != 0 && !js {
+        js = gobj::class_def(t).is_some_and(|d| std::ptr::eq(d.host as *const dyn gobj::Host as *const u8, ours));
+        t = gobj::type_parent(t);
+    }
+    let w = if !gobj::is_a(gtype, gobj::G_TYPE_OBJECT) {
+        Wrapper::NotObject
+    } else if js {
+        Wrapper::JsClass
+    } else {
+        let proto = class_proto(scope, st, gtype)?;
+        let template = interop::new_pointer(scope, st, 0, None);
+        template.set_prototype(scope, proto.into());
+        Wrapper::Native(v8::Global::new(scope, template))
+    };
+    let result = made(scope, &w);
+    st.gobjects.wrappers.borrow_mut().insert(gtype, w);
+    result
+}
+
+/// The prototype of a native class's instances: its struct constructor's (`GtkLabel.prototype`)
+/// when the metadata has one, inheriting the parent class's, and interop.Pointer's at the root.
+pub fn class_proto<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, gtype: GType) -> Option<v8::Local<'s, v8::Object>> {
+    if let Some(p) = st.gobjects.protos.borrow().get(&gtype) {
+        return Some(v8::Local::new(scope, p));
+    }
+    let parent = match gobj::type_parent(gtype) {
+        0 => interop::new_pointer(scope, st, 0, None).get_prototype(scope)?.to_object(scope)?,
+        p => class_proto(scope, st, p)?,
+    };
+    let proto = constructor_proto(scope, st, gtype).unwrap_or_else(|| v8::Object::new(scope));
+    let object_proto = v8::Object::new(scope).get_prototype(scope)?;
+    if proto.get_prototype(scope).is_some_and(|p| p == object_proto) {
+        proto.set_prototype(scope, parent.into());
+    }
+    st.gobjects.protos.borrow_mut().insert(gtype, v8::Global::new(scope, proto));
+    Some(proto)
+}
+
+fn constructor_proto<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, gtype: GType) -> Option<v8::Local<'s, v8::Object>> {
+    let name = gobj::type_name(gtype).to_str().ok()?;
+    let global = scope.get_current_context().global(scope);
+    for name in [name.to_owned(), format!("_{name}")] {
+        let key = v8::String::new(scope, &name)?;
+        let Some(ctor) = global.get(scope, key.into()).filter(|v| v.is_function()) else {
+            continue;
+        };
+        if !matches!(interop::type_from_value(scope, st, ctor), Some(Type::Struct(_))) {
+            continue;
+        }
+        let key = v8::String::new(scope, "prototype")?;
+        return ctor.to_object(scope)?.get(scope, key.into())?.to_object(scope);
+    }
+    None
+}
+
+/// The GType of the struct `name`, registering it through its `*_get_type` function; 0
+/// for structs that aren't GTypes.
+fn gtype_named(scope: &mut v8::PinScope<'_, '_>, st: &State, name: &str) -> GType {
+    if let Some(&gtype) = st.gobjects.named.borrow().get(name) {
+        return gtype;
+    }
+    let bare = name.strip_prefix('_').unwrap_or(name);
+    let mut gtype = CString::new(bare).map_or(0, |c| gobj::type_from_name(&c));
+    if gtype == 0 {
+        if let Some(n) = v8::String::new(scope, bare) {
+            if let Ok(Some(v)) = interop::gobject_hook(scope, "gtype", &[n.into()]) {
+                gtype = gtype_of(scope, v);
+            }
+        }
+    }
+    st.gobjects.named.borrow_mut().insert(name.to_owned(), gtype);
+    gtype
+}
+
+/// `new GtkLabel(props)`: a new instance of a native GObject class (`Ok(None)` for other
+/// structs).
+pub fn construct_native<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    ty: &Type,
+    props: v8::Local<'s, v8::Value>,
+) -> Result<Option<v8::Local<'s, v8::Value>>, String> {
+    let Type::Struct(name) = ty else { return Ok(None) };
+    let gtype = gtype_named(scope, st, name);
+    if gtype == 0 || !gobj::is_a(gtype, gobj::G_TYPE_OBJECT) {
+        return Ok(None);
+    }
+    if gobj::is_abstract(gtype) {
+        return Err(format!("{name} is abstract: extend it, or create one with a C constructor"));
+    }
+    let address = create(scope, gtype, props)?;
+    if address == 0 {
+        return Err(format!("failed to create a {name}"));
+    }
+    let owned = gobj::new_is_owned(gtype, address);
+    wrap(scope, st, address, owned).map(|o| Some(o.into())).ok_or_else(|| format!("failed to create a {name}"))
+}
+
 fn tag<'s>(scope: &mut v8::PinScope<'s, '_>, o: v8::Local<'s, v8::Object>) -> Option<u32> {
     let key = keys::gobject_class(scope);
     let v = o.get_private(scope, key)?;
@@ -291,6 +508,19 @@ pub fn instance<'s>(
         adopting.remove(i);
     }
     Some(object)
+}
+
+/// Handle slot of the JS object of a GObject, for returns without a scope.
+#[inline]
+pub fn live_slot(st: &State, address: usize) -> Option<*const v8::Object> {
+    let instances = st.gobjects.instances.borrow();
+    let entry = instances.get(&address)?;
+    let slot = match &entry.strong {
+        // SAFETY: the Global belongs to this isolate
+        Some(g) => unsafe { v8::Handle::get_unchecked(g) as *const v8::Object },
+        None => entry.weak.slot.get() as *const v8::Object,
+    };
+    (!slot.is_null()).then_some(slot)
 }
 
 fn live<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, address: usize) -> Option<v8::Local<'s, v8::Object>> {
@@ -426,12 +656,14 @@ pub fn construct<'s>(
             object
         }
     };
-    unsafe {
-        if gobj::g_object_is_floating(address as _) != 0 {
-            gobj::g_object_ref_sink(address as _);
+    if gobj::new_is_owned(gtype, address) {
+        unsafe {
+            if gobj::g_object_is_floating(address as _) != 0 {
+                gobj::g_object_ref_sink(address as _);
+            }
+            // the toggle reference keeps it alive from here
+            gobj::g_object_unref(address as _);
         }
-        // the toggle reference keeps it alive from here
-        gobj::g_object_unref(address as _);
     }
     Ok(Some(object.into()))
 }
@@ -522,7 +754,7 @@ pub fn to_js<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, v: Val) -> v8::Lo
         Val::F64(n) => v8::Number::new(scope, n).into(),
         Val::Str(None) | Val::Object(0) | Val::Pointer(0) => v8::null(scope).into(),
         Val::Str(Some(s)) => v8::String::new(scope, &s.to_string_lossy()).map_or_else(|| v8::null(scope).into(), Into::into),
-        Val::Object(a) => match instance(scope, st, a, false) {
+        Val::Object(a) => match wrap(scope, st, a, false) {
             Some(o) => o.into(),
             None => interop::new_pointer(scope, st, a, None).into(),
         },
@@ -604,6 +836,9 @@ fn register_class<'s>(
     let base = str_arg(scope, desc, "base").ok_or("no base")?;
     let base = interop::type_from_value(scope, st, base).ok_or("the base isn't a struct constructor")?;
     let root = str_arg(scope, desc, "root").is_some_and(|v| v.is_true());
+    if root {
+        class_proto(scope, st, parent).ok_or("the parent class has no prototype")?;
+    }
     let class = st.gobjects.classes.borrow().len() as u32;
     let key = v8::String::new(scope, "prototype").unwrap();
     let proto = cls.get(scope, key.into()).and_then(|p| p.to_object(scope)).ok_or("the class has no prototype")?;
@@ -724,7 +959,39 @@ fn is_slot<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
     rv.set(v8::Boolean::new(scope, slot).into());
 }
 
+/// `natives.gobjectFields(structConstructor)`: the prototype of the struct's views, with
+/// its field accessors.
+fn fields<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let proto = interop::type_from_value(scope, &st, args.get(0))
+        .and_then(|ty| structs::view(scope, &st, &ty, 0, None).ok())
+        .and_then(|v| v.to_object(scope))
+        .and_then(|o| o.get_prototype(scope));
+    match proto {
+        Some(p) => rv.set(p),
+        None => throw_error(scope, "expected a struct constructor"),
+    }
+}
+
+/// `natives.gobjectPointerType()`: an interop type for `GObject *` values, read as their
+/// JS objects.
+fn pointer_type<'s>(scope: &mut v8::PinScope<'s, '_>, _args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let descriptor = v8::Object::new(scope);
+    let key = v8::String::new(scope, "name").unwrap();
+    let name = v8::String::new(scope, "GObject*").unwrap();
+    descriptor.set(scope, key.into(), name.into());
+    interop::tag_type(scope, &st, descriptor, Type::Pointer(Box::new(Type::Struct("GObject".into()))));
+    rv.set(descriptor.into());
+}
+
 pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, natives: v8::Local<'s, v8::Object>) {
+    let f = v8::Function::new(scope, fields).unwrap();
+    let k = v8::String::new(scope, "gobjectFields").unwrap();
+    natives.set(scope, k.into(), f.into());
+    let f = v8::Function::new(scope, pointer_type).unwrap();
+    let k = v8::String::new(scope, "gobjectPointerType").unwrap();
+    natives.set(scope, k.into(), f.into());
     let f = v8::Function::new(scope, is_slot).unwrap();
     let k = v8::String::new(scope, "gobjectSlot").unwrap();
     natives.set(scope, k.into(), f.into());

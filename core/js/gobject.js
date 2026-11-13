@@ -181,10 +181,10 @@
       base = parent;
       parentType = baseType = typeFromName(String(parent.name).replace(/^_/, ''));
       if (!parentType || !g_type_is_a(parentType, G.OBJECT)) throw new TypeError(`${parent.name} is not a GObject class`);
-      // instances are views of the base's struct: keep its fields reachable
-      if (Object.getPrototypeOf(base.prototype) === Object.prototype) {
-        Object.setPrototypeOf(base.prototype, Object.getPrototypeOf(new base()));
-      }
+      // instances are views of the base's struct: its fields come before the base's prototype
+      const fields = natives.gobjectFields(base);
+      if (Object.getPrototypeOf(fields) === Object.prototype) Object.setPrototypeOf(fields, base.prototype);
+      Object.setPrototypeOf(cls.prototype, fields);
     } else {
       if (!register(parent)) return false;
       ({ base, baseType, type: parentType } = classes.get(parent));
@@ -284,7 +284,7 @@
     return cls;
   }
 
-  define(g, '__nsGObject', Object.freeze({ register, extend }));
+  define(g, '__nsGObject', Object.freeze({ register, extend, gtype: typeFromName, object: natives.gobjectPointerType() }));
   if (g.NativeClass === undefined) {
     define(g, 'NativeClass', (...args) => (typeof args[0] === 'function' ? args[0] : (cls) => cls));
   }
