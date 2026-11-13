@@ -278,13 +278,17 @@ impl Native {
             .ok_or_else(|| {
                 format!("'{name}' is an opaque or unknown record, its layout is not available")
             })?;
-        let fields = meta
+        let fields: Vec<_> = meta
             .fields()
             .unwrap_or_default()
             .into_iter()
             .map(|(n, t)| (n.into_owned(), t))
             .collect();
-        let layout = Rc::new(self.compute_record(fields, union, meta.record_layout().as_ref())?);
+        let clang = meta.record_layout();
+        if clang.is_none() && fields.is_empty() {
+            return Err(format!("'{name}' is an opaque record, its layout is not available"));
+        }
+        let layout = Rc::new(self.compute_record(fields, union, clang.as_ref())?);
         self.records.borrow_mut().insert(ty.clone(), layout.clone());
         Ok(layout)
     }

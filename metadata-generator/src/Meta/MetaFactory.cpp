@@ -336,8 +336,15 @@ void MetaFactory::createFromStruct(const clang::RecordDecl& record,
 void MetaFactory::createFromRecord(const clang::RecordDecl& record,
                                    RecordMeta& structMeta) {
   if (!record.isThisDeclarationADefinition()) {
-    throw MetaCreationException(&structMeta, "A forward declaration of record.",
-                                false);
+    bool opaque = record.isStruct() && !record.getDefinition() &&
+                  record.isCanonicalDecl();
+    if (!opaque) {
+      throw MetaCreationException(&structMeta,
+                                  "A forward declaration of record.", false);
+    }
+    // no fields and no layout: only pointers to it are used
+    populateMetaFields(record, structMeta);
+    return;
   }
 
   populateMetaFields(record, structMeta);

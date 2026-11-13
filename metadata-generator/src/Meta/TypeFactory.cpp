@@ -426,6 +426,15 @@ shared_ptr<Type> TypeFactory::createFromRecordType(
     const clang::RecordType* type) {
   clang::RecordDecl* recordDef = type->getDecl()->getDefinition();
   if (!recordDef) {
+    // opaque struct: keep its name, pointers to it may be GObjects
+    const auto* decl = clang::cast<clang::RecordDecl>(type->getDecl()->getCanonicalDecl());
+    if (decl->isStruct() && MetaFactory::getTypedefOrOwnName(decl) != "") {
+      try {
+        return make_shared<StructType>(
+            &_metaFactory->create(*decl)->as<StructMeta>());
+      } catch (MetaCreationException&) {
+      }
+    }
     return TypeFactory::getVoid();
   }
   if (!recordDef->isStruct() && !recordDef->isUnion())
