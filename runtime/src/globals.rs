@@ -95,6 +95,38 @@ pub fn install_interceptor(template: &v8::Local<v8::ObjectTemplate>) {
     );
 }
 
+/// The C function `name` as a method: `this` is its first argument (`None`: no such
+/// function or symbol). `boolean`: its int result is a gboolean.
+pub fn method_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    st: &State,
+    name: &str,
+    boolean: bool,
+) -> Result<Option<v8::Local<'s, v8::Function>>, String> {
+    let Some(meta) = st.meta.find(name).filter(|m| m.kind() == MetaKind::Function) else {
+        return Ok(None);
+    };
+    let id = st.meta.id(&meta);
+    let function = if boolean { ffi::boolean_function_for(st, id) } else { ffi::function_for(st, id) };
+    let Ok(function) = function else {
+        return Ok(None);
+    };
+    let data = v8::External::new(scope, std::rc::Rc::as_ptr(&function) as *mut std::ffi::c_void);
+    let entry = crate::thunks::entry(ffi::c_method_callback as *const std::ffi::c_void, function.address);
+    // SAFETY: the thunk jumps to c_method_callback, same signature
+    let callback: v8::FunctionCallback = unsafe { std::mem::transmute(entry) };
+    let builder = v8::FunctionTemplate::builder_raw(callback).data(data.into());
+    let template = match crate::fast::method_overload(&function) {
+        Some(fast) => builder.build_fast(scope, &[fast]),
+        None => builder.build(scope),
+    };
+    let f = template.get_function(scope).ok_or("failed to create function")?;
+    let js_name = meta.js_name();
+    let key = v8::String::new(scope, js_name).unwrap();
+    f.set_name(key);
+    Ok(Some(f))
+}
+
 /// JS value for a declaration, and whether it can be memoized on the global.
 fn resolve<'s>(
     scope: &mut v8::PinScope<'s, '_>,

@@ -86,13 +86,39 @@ export NS_METADATA=metadata-generator/tests/TestOutput/metadata-$(uname -m).bin
 C structs are globals under their typedef name (`GdkRGBA`, `graphene_rect_t`, `GList`). The struct
 tag (`_GdkRGBA`) is the same constructor.
 
+## GObjects
+
+A GObject that reaches JS (a C function's result, a struct field, a signal argument) is an object of
+its class, one per GObject: `gtk_widget_get_parent(label) === box`. A class's C functions are its
+methods, named without the type's prefix, and its GObject properties read and write in camelCase:
+
+```js
+const label = new GtkLabel({ label: 'Hi' }); // g_object_new with construct properties
+label.set_text('Hello');                     // gtk_label_set_text(label, 'Hello')
+label.maxWidthChars = 20;                    // the max-width-chars property
+box.append(label);                           // gtk_box_append(box, label)
+const id = label.connect('notify::label', (self) => console.log(self.label));
+label.disconnect(id);
+```
+
+They are still `interop.Pointer`s and pass to C functions as before. Methods come from functions whose
+first parameter is the class's struct, and from the interfaces the class implements. A property has
+a getter if it's readable and a setter if it's writable after construction, so writing a read-only
+one throws in strict mode; when the class has a matching C getter or setter (`gtk_widget_get_opacity`
+for `opacity`), the property uses it. A JS object
+holds a reference on its GObject: a floating reference (a new widget) becomes its own, otherwise it
+takes one. C headers don't say who owns a result, so a function that returns a new reference
+(`transfer full`) leaves the caller's reference to release, as in C. `gpointer` results stay
+Pointers.
+
 ## GObject Subclasses
 
 A JS class extending a GObject's struct registers a GType: [core/js/gobject.js](core/js/gobject.js)
 describes the class once, and the runtime runs it natively ([core/src/gobject.rs](core/src/gobject.rs) and each engine's
 `gobject.rs`).
 Methods override the vfuncs and interface methods of the same name (or its snake_case form), and
-`super.method()` calls the parent's implementation:
+`super.method()` calls the parent's implementation, also when the class has a method of the same
+name (`super.measure()` calls the parent's vfunc, not `gtk_widget_measure`):
 
 ```js
 class Swatch extends GtkWidget {

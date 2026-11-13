@@ -243,6 +243,77 @@
     return true;
   }
 
+  // Methods of native classes: `gtk_label_set_text(label, s)` is also `label.set_text(s)`,
+  // the C function called with the receiver as its first argument.
+  const camel = (s) => s.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+
+  // A JS class's override of `method` between the instance and its native base: reaching
+  // the base's method then means super, the parent class's implementation of the vfunc.
+  const parents = new Map();
+  function parentVfunc(self, method, S) {
+    const info = self != null && classes.get(self.constructor);
+    if (!info) return undefined;
+    let overridden = false;
+    for (let p = Object.getPrototypeOf(self); p && p !== info.base.prototype && !overridden; p = Object.getPrototypeOf(p)) {
+      overridden = own(p, method) || own(p, camel(method));
+    }
+    if (!overridden) return undefined;
+    const key = `${info.baseType}:${method}`;
+    if (!parents.has(key)) parents.set(key, view(S, g_type_class_ref(info.baseType))[method] || noop);
+    return parents.get(key);
+  }
+  const noop = () => {};
+
+  function method(name, fn, vtable) {
+    const call = natives.gobjectMethod(fn);
+    if (typeof call !== 'function') return undefined;
+    // a public function with a vfunc of the same name (gtk_widget_measure, GtkWidgetClass.measure)
+    if (!vtable || !natives.gobjectSlot(vtable, name)) return call;
+    return function (...args) {
+      const vfunc = parentVfunc(this, name, vtable);
+      return vfunc ? vfunc(this, ...args) : call.apply(this, args);
+    };
+  }
+
+  const reservedMethods = new Set(['constructor', 'connect', 'disconnect', 'emit']);
+
+  // the prototype of a native class: its properties, then its methods and its interfaces'
+  function populate(proto, gtype) {
+    const name = g_type_name(gtype);
+    // read and written by the class's C functions when their types match, else through GValues
+    for (const [key, pspec, readable, writable, getter, setter, boolean] of natives.gobjectProperties(gtype)) {
+      if (own(proto, key)) continue;
+      const property = { configurable: true };
+      if (readable) {
+        property.get = (getter && natives.gobjectMethod(getter, boolean)) || function () { return natives.gobjectGet(this, pspec); };
+      }
+      if (writable) {
+        property.set = (setter && natives.gobjectMethod(setter)) || function (value) { natives.gobjectSet(this, pspec, value); };
+      }
+      Object.defineProperty(proto, key, property);
+    }
+    const add = (type, vtable, skip) => {
+      for (const [m, fn] of natives.gobjectMethods(g_type_name(type))) {
+        if (reservedMethods.has(m) || skip(m)) continue;
+        const f = method(m, fn, vtable);
+        if (f) define(proto, m, f);
+      }
+    };
+    add(gtype, structFor(gtype, ['Class']), (m) => own(proto, m) && typeof Object.getOwnPropertyDescriptor(proto, m).value === 'function');
+    for (const iface of natives.gobjectInterfaces(gtype)) add(iface, structFor(iface, ['Interface', 'Iface']), (m) => m in proto);
+    if (name === 'GObject') {
+      define(proto, 'connect', function (signal, handler, after = false) {
+        return (after ? g_signal_connect_after : g_signal_connect)(this, signal, handler);
+      });
+      define(proto, 'disconnect', function (id) {
+        g_signal_handler_disconnect(this, id);
+      });
+      define(proto, 'emit', function (signal, ...args) {
+        return natives.gobjectEmit(this, signal, ...args);
+      });
+    }
+  }
+
   const config = new Set(['interfaces', 'properties', 'signals', 'GTypeName']);
 
   function extend(base, name, members) {
@@ -284,7 +355,7 @@
     return cls;
   }
 
-  define(g, '__nsGObject', Object.freeze({ register, extend, gtype: typeFromName, object: natives.gobjectPointerType(), handler: natives.gobjectHandler }));
+  define(g, '__nsGObject', Object.freeze({ register, extend, populate, gtype: typeFromName, object: natives.gobjectPointerType(), handler: natives.gobjectHandler }));
   if (g.NativeClass === undefined) {
     define(g, 'NativeClass', (...args) => (typeof args[0] === 'function' ? args[0] : (cls) => cls));
   }

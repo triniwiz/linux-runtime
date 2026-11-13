@@ -391,6 +391,8 @@ pub fn class_proto<'s>(scope: &mut v8::PinScope<'s, '_>, st: &State, gtype: GTyp
         proto.set_prototype(scope, parent.into());
     }
     st.gobjects.protos.borrow_mut().insert(gtype, v8::Global::new(scope, proto));
+    let id = v8::Number::new(scope, gtype as f64);
+    let _ = interop::gobject_hook(scope, "populate", &[proto.into(), id.into()]);
     Some(proto)
 }
 
@@ -990,6 +992,98 @@ fn handler<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
     rv.set(v8::Array::new_with_elements(scope, &items).into());
 }
 
+/// `natives.gobjectMethods(typeName)`: [[method, function], ...]
+fn methods<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let list = gobj::function_prefix(&st.meta, &name).map(|p| gobj::methods(&st, &p, &name)).unwrap_or_default();
+    let items: Vec<v8::Local<v8::Value>> = list
+        .iter()
+        .map(|m| {
+            let name = v8::String::new(scope, &m.name).unwrap().into();
+            let function = v8::String::new(scope, &m.function).unwrap().into();
+            v8::Array::new_with_elements(scope, &[name, function]).into()
+        })
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// `natives.gobjectMethod(functionName, boolean)`: the C function as a method, its receiver
+/// the first argument (`boolean`: its int result is a gboolean).
+fn method<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let boolean = args.get(1).is_true();
+    match crate::globals::method_function(scope, &st, &name, boolean) {
+        Ok(Some(f)) => rv.set(f.into()),
+        Ok(None) => rv.set_undefined(),
+        Err(e) => throw_error(scope, &e),
+    }
+}
+
+/// `natives.gobjectProperties(gtype)`: the properties the type installs, as
+/// [camelCaseName, pspec, readable, writable, getter, setter, boolean].
+fn properties<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let gtype = gtype_of(scope, args.get(0));
+    let items: Vec<v8::Local<v8::Value>> = gobj::properties(&st, gtype)
+        .into_iter()
+        .map(|p| {
+            let name = |n: &Option<String>| -> v8::Local<v8::Value> {
+                match n {
+                    Some(n) => v8::String::new(scope, n).unwrap().into(),
+                    None => v8::null(scope).into(),
+                }
+            };
+            let getter = name(&p.getter);
+            let setter = name(&p.setter);
+            let item = [
+                v8::String::new(scope, &gobj::camel_name(&p.name)).unwrap().into(),
+                interop::new_pointer(scope, &st, p.pspec, None).into(),
+                v8::Boolean::new(scope, p.readable).into(),
+                v8::Boolean::new(scope, p.writable).into(),
+                getter,
+                setter,
+                v8::Boolean::new(scope, p.boolean).into(),
+            ];
+            v8::Array::new_with_elements(scope, &item).into()
+        })
+        .collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// `natives.gobjectInterfaces(gtype)`: the interfaces it adds to its parent's.
+fn interfaces<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let gtype = gtype_of(scope, args.get(0));
+    let items: Vec<v8::Local<v8::Value>> =
+        gobj::own_interfaces(gtype).into_iter().map(|t| v8::Number::new(scope, t as f64).into()).collect();
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
+/// `natives.gobjectGet(object, pspec)`
+fn get_prop<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let (Ok(object), Some(pspec)) = (address_of(scope, args.get(0)), handles::is(args.get(1), Kind::Pointer)) else {
+        return throw_error(scope, "expected a GObject and a GParamSpec");
+    };
+    let value = gobj::read_property(object, handles::address(pspec));
+    let v = unsafe { to_js(scope, &st, gobj::read(&value.0[0])) };
+    rv.set(v);
+}
+
+/// `natives.gobjectSet(object, pspec, value)`
+fn set_prop<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, _rv: Rv<'s>) {
+    let (Ok(object), Some(pspec)) = (address_of(scope, args.get(0)), handles::is(args.get(1), Kind::Pointer)) else {
+        return throw_error(scope, "expected a GObject and a GParamSpec");
+    };
+    let pspec = handles::address(pspec);
+    let mut value = gobj::property_value(pspec);
+    match unsafe { set_value(scope, &mut value.0[0], args.get(2)) } {
+        Ok(()) => gobj::write_property(object, pspec, &value.0[0]),
+        Err(e) => throw_error(scope, &e),
+    }
+}
+
 /// `natives.gobjectFields(structConstructor)`: the prototype of the struct's views, with
 /// its field accessors.
 fn fields<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
@@ -1026,6 +1120,17 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, natives: v8::Local<'s, v8::
     let f = v8::Function::new(scope, handler).unwrap();
     let k = v8::String::new(scope, "gobjectHandler").unwrap();
     natives.set(scope, k.into(), f.into());
+    for (name, f) in [
+        ("gobjectMethods", v8::Function::new(scope, methods)),
+        ("gobjectMethod", v8::Function::new(scope, method)),
+        ("gobjectProperties", v8::Function::new(scope, properties)),
+        ("gobjectInterfaces", v8::Function::new(scope, interfaces)),
+        ("gobjectGet", v8::Function::new(scope, get_prop)),
+        ("gobjectSet", v8::Function::new(scope, set_prop)),
+    ] {
+        let k = v8::String::new(scope, name).unwrap();
+        natives.set(scope, k.into(), f.unwrap().into());
+    }
     let f = v8::Function::new(scope, is_slot).unwrap();
     let k = v8::String::new(scope, "gobjectSlot").unwrap();
     natives.set(scope, k.into(), f.into());

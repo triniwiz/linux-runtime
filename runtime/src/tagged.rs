@@ -395,6 +395,16 @@ pub mod info {
         unsafe { std::mem::transmute((info as *const usize).add(INFO_FIRST_ARG + i)) }
     }
 
+    /// Argument `i` of a method, the receiver being argument 0: its slot precedes the
+    /// arguments'.
+    #[inline(always)]
+    pub unsafe fn method_arg<'s>(
+        info: *const v8::FunctionCallbackInfo,
+        i: usize,
+    ) -> v8::Local<'s, v8::Value> {
+        unsafe { std::mem::transmute((info as *const usize).add(INFO_RECEIVER + i)) }
+    }
+
     /// Sets the return value to a Smi, oddball or other immortal word.
     #[inline(always)]
     pub unsafe fn set_return_word(info: *const v8::FunctionCallbackInfo, w: usize) {

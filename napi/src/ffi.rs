@@ -325,6 +325,40 @@ pub unsafe extern "C" fn c_function_callback(
     }
 }
 
+/// napi callback for C functions as methods: the receiver is the first argument.
+pub unsafe extern "C" fn c_method_callback(env: napi_env, info: napi_callback_info) -> napi_value {
+    let mut argc = 15usize;
+    let mut argv = [null_mut(); 16];
+    let mut this = null_mut();
+    let mut data: *mut c_void = null_mut();
+    napi_get_cb_info(env, info, &mut argc, argv[1..].as_mut_ptr(), &mut this, &mut data);
+    argv[0] = this;
+    let function = &*(data as *const CFunction);
+    let st = &*function.state;
+    let result = if argc <= 15 {
+        function.call(st, &argv[..argc + 1])
+    } else {
+        let mut all = vec![null_mut(); argc + 1];
+        napi_get_cb_info(env, info, &mut argc, all[1..].as_mut_ptr(), null_mut(), null_mut());
+        all[0] = this;
+        function.call(st, &all)
+    };
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            if !Js(env).is_exception_pending() {
+                Js(env).throw(&e);
+            }
+            null_mut()
+        }
+    }
+}
+
+/// JS function calling a C function with its receiver as the first argument.
+pub fn js_method(st: &State, name: &str, function: &Rc<CFunction>) -> napi_value {
+    st.js().function(name, Some(c_method_callback), Rc::as_ptr(function) as *mut c_void)
+}
+
 /// Cached [`CFunction`] for the function declaration `id`.
 pub fn function_for(st: &State, id: MetaId) -> Result<Rc<CFunction>, String> {
     if let Some(f) = st.functions.borrow().get(&id) {
@@ -340,6 +374,23 @@ pub fn function_for(st: &State, id: MetaId) -> Result<Rc<CFunction>, String> {
         meta.is_variadic(),
     )?);
     st.functions.borrow_mut().insert(id, function.clone());
+    Ok(function)
+}
+
+/// [`function_for`] with its int result read as a boolean: a gboolean property's getter.
+pub fn boolean_function_for(st: &State, id: MetaId) -> Result<Rc<CFunction>, String> {
+    let key = id | 1 << 63;
+    if let Some(f) = st.functions.borrow().get(&key) {
+        return Ok(f.clone());
+    }
+    let meta = st.meta.meta_at(id).ok_or("unknown function")?;
+    let address = st.symbol(&meta)? as usize;
+    let mut signature = meta.signature().unwrap_or_default();
+    if let Some(ret) = signature.first_mut() {
+        *ret = Type::Bool;
+    }
+    let function = Rc::new(CFunction::new(st, meta.name(), address, signature, meta.is_variadic())?);
+    st.functions.borrow_mut().insert(key, function.clone());
     Ok(function)
 }
 

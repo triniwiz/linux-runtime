@@ -93,6 +93,29 @@ pub fn overload(function: &CFunction) -> Option<FastFunction> {
     Some(FastFunction::new(address, info(&function.args, ret)))
 }
 
+/// Fast overload of `function` as a method: the receiver is its first argument.
+pub fn method_overload(function: &CFunction) -> Option<FastFunction> {
+    function.fast.as_ref()?;
+    if function.args.first() != Some(&ValueKind::Pointer)
+        || function
+            .args
+            .iter()
+            .any(|k| matches!(k, ValueKind::Other | ValueKind::Callback))
+    {
+        return None;
+    }
+    let ret = ret_type(function.ret)?;
+    let ints = function.int_args.len() - 1;
+    let address = match (ints + 1 == function.args.len(), function.ret.is_float()) {
+        (true, false) => METHOD_INTS_INT_TRAMPOLINES[ints],
+        (true, true) => METHOD_INTS_FLOAT_TRAMPOLINES[ints],
+        (false, false) => METHOD_INT_TRAMPOLINES[ints],
+        (false, true) => METHOD_FLOAT_TRAMPOLINES[ints],
+    };
+    let address = crate::thunks::entry(address, function.address);
+    Some(FastFunction::new(address, info(&function.args[1..], ret)))
+}
+
 const STRINGS: usize = 1024;
 
 /// NUL terminated copies of string args, on the caller's stack.
@@ -464,6 +487,61 @@ trampolines! {
     6 => int6, float6 (a, b, c, d, e, f);
     7 => int7, float7 (a, b, c, d, e, f, g);
     8 => int8, float8 (a, b, c, d, e, f, g, h);
+}
+
+// methods: the receiver is the C function's first argument
+macro_rules! method_trampolines {
+    ($($n:literal => $int:ident, $float:ident, $ints_int:ident, $ints_float:ident ($($a:ident),*);)*) => {
+        $(
+            unsafe extern "C" fn $int(
+                recv: v8::Local<v8::Value>,
+                $($a: v8::Local<v8::Value>,)*
+                opts: *mut FastApiCallbackOptions,
+                f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64,
+            ) -> u64 {
+                unsafe { invoke(opts, &[recv, $($a),*], Some([f0, f1, f2, f3, f4, f5, f6, f7])) }
+            }
+            unsafe extern "C" fn $float(
+                recv: v8::Local<v8::Value>,
+                $($a: v8::Local<v8::Value>,)*
+                opts: *mut FastApiCallbackOptions,
+                f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64,
+            ) -> f64 {
+                f64::from_bits(unsafe {
+                    invoke(opts, &[recv, $($a),*], Some([f0, f1, f2, f3, f4, f5, f6, f7]))
+                })
+            }
+            unsafe extern "C" fn $ints_int(
+                recv: v8::Local<v8::Value>,
+                $($a: v8::Local<v8::Value>,)*
+                opts: *mut FastApiCallbackOptions,
+            ) -> u64 {
+                unsafe { invoke(opts, &[recv, $($a),*], None) }
+            }
+            unsafe extern "C" fn $ints_float(
+                recv: v8::Local<v8::Value>,
+                $($a: v8::Local<v8::Value>,)*
+                opts: *mut FastApiCallbackOptions,
+            ) -> f64 {
+                f64::from_bits(unsafe { invoke(opts, &[recv, $($a),*], None) })
+            }
+        )*
+        const METHOD_INT_TRAMPOLINES: [*const c_void; 8] = [$($int as *const c_void),*];
+        const METHOD_FLOAT_TRAMPOLINES: [*const c_void; 8] = [$($float as *const c_void),*];
+        const METHOD_INTS_INT_TRAMPOLINES: [*const c_void; 8] = [$($ints_int as *const c_void),*];
+        const METHOD_INTS_FLOAT_TRAMPOLINES: [*const c_void; 8] = [$($ints_float as *const c_void),*];
+    };
+}
+
+method_trampolines! {
+    0 => method_int0, method_float0, method_ints_int0, method_ints_float0 ();
+    1 => method_int1, method_float1, method_ints_int1, method_ints_float1 (a);
+    2 => method_int2, method_float2, method_ints_int2, method_ints_float2 (a, b);
+    3 => method_int3, method_float3, method_ints_int3, method_ints_float3 (a, b, c);
+    4 => method_int4, method_float4, method_ints_int4, method_ints_float4 (a, b, c, d);
+    5 => method_int5, method_float5, method_ints_int5, method_ints_float5 (a, b, c, d, e);
+    6 => method_int6, method_float6, method_ints_int6, method_ints_float6 (a, b, c, d, e, f);
+    7 => method_int7, method_float7, method_ints_int7, method_ints_float7 (a, b, c, d, e, f, g);
 }
 
 struct StaticInfo(CFunctionInfo);
