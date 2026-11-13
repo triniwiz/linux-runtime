@@ -396,6 +396,8 @@ pub struct ClosureData {
     /// a vfunc of a JS GObject class: `function` is called on the JS object of the
     /// first argument (true: dispose, which mustn't resurrect it)
     method: Option<bool>,
+    /// a signal handler's: freed when GLib finalizes its closure, not by `interop.release`
+    handler: bool,
 }
 
 enum ClosureCode {
@@ -426,11 +428,11 @@ fn closure_data_for(
         .closures
         .borrow()
         .iter()
-        .find(|c| c.method.is_none() && c.signature == signature && js.strict_equals(js.deref(c.function), function))
+        .find(|c| c.method.is_none() && !c.handler && c.signature == signature && js.strict_equals(js.deref(c.function), function))
     {
         return Ok(&**existing as *const ClosureData);
     }
-    new_closure_data(st, function, signature, None)
+    new_closure_data(st, function, signature, None, false)
 }
 
 fn new_closure_data(
@@ -438,6 +440,7 @@ fn new_closure_data(
     function: napi_value,
     signature: &[Type],
     method: Option<bool>,
+    handler: bool,
 ) -> Result<*const ClosureData, String> {
     let js = st.js();
     // signatures that fit in registers skip libffi's per-call argument classification
@@ -464,6 +467,7 @@ fn new_closure_data(
         state: st,
         closure: None,
         method,
+        handler,
     });
     let userdata = &mut *data as *mut ClosureData as *mut c_void;
     #[cfg(target_arch = "x86_64")]
@@ -483,7 +487,28 @@ fn new_closure_data(
 /// C function pointer for a vfunc slot: calls `method` on the JS object of its first
 /// argument, the instance. Lives as long as the runtime, like the class.
 pub fn method_closure(st: &State, method: napi_value, signature: &[Type], dispose: bool) -> Result<usize, String> {
-    new_closure_data(st, method, signature, Some(dispose)).map(|d| unsafe { (*d).code() })
+    new_closure_data(st, method, signature, Some(dispose), false).map(|d| unsafe { (*d).code() })
+}
+
+/// A closure of its own for one signal connection: (C function pointer, closure data
+/// for [`release_handler`]). Connecting a function twice mustn't share one, as either
+/// disconnect frees it.
+pub fn handler_closure(st: &State, function: napi_value, signature: &[Type]) -> Result<(usize, usize), String> {
+    let data = new_closure_data(st, function, signature, None, true)?;
+    Ok((unsafe { (*data).code() }, data as usize))
+}
+
+/// Frees a signal handler's closure: GLib finalized its GClosure.
+pub fn release_handler(st: &State, data: usize) {
+    let released = {
+        let mut closures = st.closures.borrow_mut();
+        let i = closures.iter().position(|c| &**c as *const ClosureData as usize == data);
+        i.map(|i| closures.swap_remove(i))
+    };
+    if let Some(c) = released {
+        st.js().delete_ref(c.function);
+        st.closure_generation.set(st.closure_generation.get() + 1);
+    }
 }
 
 /// C function pointer calling `function`, cached per (function, signature).
@@ -497,8 +522,8 @@ pub fn release_closures(st: &State, function: napi_value) -> usize {
     let mut closures = st.closures.borrow_mut();
     let before = closures.len();
     closures.retain(|c| {
-        // vfuncs live as long as their class
-        let keep = c.method.is_some() || !js.strict_equals(js.deref(c.function), function);
+        // vfuncs live as long as their class, handlers as long as their connection
+        let keep = c.method.is_some() || c.handler || !js.strict_equals(js.deref(c.function), function);
         if !keep {
             js.delete_ref(c.function);
         }

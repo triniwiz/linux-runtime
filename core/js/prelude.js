@@ -186,10 +186,18 @@
 
   const define = (name, value) =>
     Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false });
-  define('g_signal_connect', (instance, signal, handler, data = null) =>
-    g_signal_connect_data(instance, signal, interop.callback(handler, signature(instance, signal)), data, null, 0));
-  define('g_signal_connect_after', (instance, signal, handler, data = null) =>
-    g_signal_connect_data(instance, signal, interop.callback(handler, signature(instance, signal)), data, null, 1 /* G_CONNECT_AFTER */));
+  function connect(instance, signal, handler, data, after) {
+    const sig = signature(instance, signal);
+    const native = g.__nsGObject?.handler;
+    if (!native) return g_signal_connect_data(instance, signal, interop.callback(handler, sig), data, null, after);
+    // a closure per connection, freed when GLib finalizes it: disconnected, or its instance finalized
+    const [callback, notify, notifyData] = native(handler, sig);
+    const closure = g_cclosure_new(callback, data, null);
+    g_closure_add_finalize_notifier(closure, notifyData, notify);
+    return g_signal_connect_closure(instance, signal, closure, after);
+  }
+  define('g_signal_connect', (instance, signal, handler, data = null) => connect(instance, signal, handler, data, 0));
+  define('g_signal_connect_after', (instance, signal, handler, data = null) => connect(instance, signal, handler, data, 1));
 })();
 
 // GVariant to JS values, and D-Bus objects whose properties read as JS properties.

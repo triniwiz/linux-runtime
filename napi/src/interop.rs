@@ -606,6 +606,27 @@ unsafe extern "C" fn interop_buffer_from_data(
     result
 }
 
+/// `{ returns, args }` of `interop.callback`.
+pub fn signature_from_spec(st: &State, spec: napi_value) -> Result<Vec<Type>, String> {
+    let js = st.js();
+    let returns = js.get(spec, "returns").map_err(|_| "expected { returns, args }")?;
+    let ret = if js.type_of(returns) == UNDEFINED {
+        Type::Void
+    } else {
+        type_from_value(st, returns).ok_or("invalid return type")?
+    };
+    let mut signature = vec![ret];
+    let list = js.get(spec, "args").map_err(|_| "expected { returns, args }")?;
+    let mut len = 0;
+    unsafe { napi_get_array_length(js.0, list, &mut len) };
+    for i in 0..len {
+        let mut t = null_mut();
+        unsafe { napi_get_element(js.0, list, i, &mut t) };
+        signature.push(type_from_value(st, t).ok_or_else(|| format!("invalid type for argument {}", i + 1))?);
+    }
+    Ok(signature)
+}
+
 unsafe extern "C" fn interop_callback(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
@@ -613,31 +634,7 @@ unsafe extern "C" fn interop_callback(env: napi_env, info: napi_callback_info) -
     if js.type_of(argv[0]) != FUNCTION {
         return fail(js, "interop.callback expects a function");
     }
-    let result = (|| -> Result<usize, String> {
-        let returns = js
-            .get(argv[1], "returns")
-            .map_err(|_| "expected { returns, args }")?;
-        let ret = if js.type_of(returns) == UNDEFINED {
-            Type::Void
-        } else {
-            type_from_value(st, returns).ok_or("invalid return type")?
-        };
-        let mut signature = vec![ret];
-        let list = js
-            .get(argv[1], "args")
-            .map_err(|_| "expected { returns, args }")?;
-        let mut len = 0;
-        napi_get_array_length(env, list, &mut len);
-        for i in 0..len {
-            let mut t = null_mut();
-            napi_get_element(env, list, i, &mut t);
-            signature.push(
-                type_from_value(st, t)
-                    .ok_or_else(|| format!("invalid type for argument {}", i + 1))?,
-            );
-        }
-        ffi::closure_for(st, argv[0], &signature)
-    })();
+    let result = signature_from_spec(st, argv[1]).and_then(|signature| ffi::closure_for(st, argv[0], &signature));
     match result {
         Ok(addr) => new_pointer(st, addr, Some(argv[0])),
         Err(e) => fail(js, &e),

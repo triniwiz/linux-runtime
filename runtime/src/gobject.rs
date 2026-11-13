@@ -959,6 +959,37 @@ fn is_slot<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
     rv.set(v8::Boolean::new(scope, slot).into());
 }
 
+struct HandlerNotify {
+    host: &'static Host,
+    closure: usize,
+}
+
+/// GClosure finalize notifier of a signal handler: disconnected, or its instance finalized.
+unsafe extern "C" fn handler_finalized(data: *mut std::ffi::c_void, _closure: *mut std::ffi::c_void) {
+    let notify = unsafe { Box::from_raw(data as *mut HandlerNotify) };
+    let closure = notify.closure;
+    notify.host.on_thread(move |st| crate::ffi::release_handler(st, closure));
+}
+
+/// `natives.gobjectHandler(function, { returns, args })`: [callback, notify, notify data]
+/// for a GClosure of its own, freed with it.
+fn handler<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
+    let st = state(scope);
+    let Ok(function) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
+        return throw_error(scope, "expected a function");
+    };
+    let made = interop::signature_from_spec(scope, &st, args.get(1))
+        .and_then(|signature| crate::ffi::handler_closure(scope, &st, function, &signature));
+    let (code, closure) = match made {
+        Ok(m) => m,
+        Err(e) => return throw_error(scope, &e),
+    };
+    let notify = Box::into_raw(Box::new(HandlerNotify { host: host(&st), closure }));
+    let items = [code, handler_finalized as *const () as usize, notify as usize]
+        .map(|a| -> v8::Local<v8::Value> { interop::new_pointer(scope, &st, a, None).into() });
+    rv.set(v8::Array::new_with_elements(scope, &items).into());
+}
+
 /// `natives.gobjectFields(structConstructor)`: the prototype of the struct's views, with
 /// its field accessors.
 fn fields<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
@@ -991,6 +1022,9 @@ pub fn install<'s>(scope: &mut v8::PinScope<'s, '_>, natives: v8::Local<'s, v8::
     natives.set(scope, k.into(), f.into());
     let f = v8::Function::new(scope, pointer_type).unwrap();
     let k = v8::String::new(scope, "gobjectPointerType").unwrap();
+    natives.set(scope, k.into(), f.into());
+    let f = v8::Function::new(scope, handler).unwrap();
+    let k = v8::String::new(scope, "gobjectHandler").unwrap();
     natives.set(scope, k.into(), f.into());
     let f = v8::Function::new(scope, is_slot).unwrap();
     let k = v8::String::new(scope, "gobjectSlot").unwrap();
