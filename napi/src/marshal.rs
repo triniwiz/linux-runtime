@@ -402,6 +402,8 @@ pub unsafe fn read(st: &State, ty: &Type, src: *const u8, mem: Mem) -> Result<na
                 js.null()
             } else if let Type::FunctionPointer(sig) = t {
                 ffi::function_from_pointer(st, addr, sig)?
+            } else if let Some(o) = crate::gobject::read_pointer(st, t, addr) {
+                o
             } else {
                 interop::new_pointer(st, addr, None)
             }

@@ -498,7 +498,7 @@ pub fn address_of(v: v8::Local<v8::Value>) -> Option<usize> {
     if v.is_null_or_undefined() {
         return Some(0);
     }
-    if let Some(o) = handles::is(v, Kind::Pointer) {
+    if let Some((o, Kind::Pointer | Kind::Struct)) = handles::of(v) {
         return Some(handles::address(o));
     }
     if let Ok(b) = v8::Local::<v8::BigInt>::try_from(v) {
@@ -514,7 +514,10 @@ unsafe fn this_pointer(
     recv: v8::Local<v8::Value>,
     opts: *mut FastApiCallbackOptions,
 ) -> Option<usize> {
-    let addr = handles::is(recv, Kind::Pointer).map(handles::address);
+    let addr = match handles::of(recv) {
+        Some((o, Kind::Pointer | Kind::Struct)) => Some(handles::address(o)),
+        _ => None,
+    };
     if addr.is_none() {
         v8::callback_scope!(unsafe scope, &*opts);
         throw_error(scope, "not an interop.Pointer");

@@ -149,7 +149,12 @@
     40: t.int64, 44: t.uint64, 48: t.int32, 52: t.uint32, 56: t.float, 60: t.double, 64: t.UTF8CString,
   };
   // mask G_SIGNAL_TYPE_STATIC_SCOPE, GTypes are pointer sized so use BigInts
-  const typeFor = (gtype) => fundamentals[Number(g_type_fundamental(BigInt(gtype) & ~1n))] || t.pointer;
+  // GObject and interface arguments read as their JS objects
+  const object = () => g.__nsGObject?.object ?? t.pointer;
+  const typeFor = (gtype) => {
+    const fundamental = Number(g_type_fundamental(BigInt(gtype) & ~1n));
+    return fundamentals[fundamental] || (fundamental === 80 || fundamental === 8 ? object() : t.pointer);
+  };
   const signatures = new Map();
 
   function signature(instance, signal) {
@@ -162,7 +167,7 @@
     if (!id) throw new Error(`unknown signal '${name}'`);
     const query = new _GSignalQuery();
     g_signal_query(id, query);
-    const args = [t.pointer];
+    const args = [object()];
     const params = query.n_params ? new BigUint64Array(interop.bufferFromData(query.param_types, query.n_params * 8)) : [];
     for (const p of params) args.push(typeFor(p));
     args.push(t.pointer);
@@ -174,7 +179,7 @@
   // G_TYPE_FROM_INSTANCE: instance->g_class->g_type
   function g_type_from_instance_ptr(instance) {
     // JS GObject subclass instances are struct views
-    if (!(instance instanceof interop.Pointer)) instance = interop.handleof(instance) ?? instance;
+    instance = interop.handleof(instance) ?? instance;
     const klass = new interop.Reference(t.pointer, instance).value;
     return new interop.Reference(t.ulong, klass).value;
   }

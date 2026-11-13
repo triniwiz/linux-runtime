@@ -314,8 +314,11 @@ fn this_pointer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: &v8::FunctionCallbackArguments<'s>,
 ) -> Option<usize> {
-    let this = args.this();
-    let addr = pointer_address(scope, this.into());
+    // GObjects of JS classes are struct views that inherit interop.Pointer's methods
+    let addr = match handles::of(args.this().into()) {
+        Some((o, Kind::Pointer | Kind::Struct)) => Some(handles::address(o)),
+        _ => None,
+    };
     if addr.is_none() {
         throw_error(scope, "not an interop.Pointer");
     }
@@ -645,6 +648,12 @@ fn struct_ctor<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<
             Ok(Some(v)) => return rv.set(v),
             Ok(None) => {}
             Err(e) if e.is_empty() => return,
+            Err(e) => return throw_error(scope, &e),
+        }
+    } else if args.new_target().is_function() {
+        match crate::gobject::construct_native(scope, &st, &ty, args.get(0)) {
+            Ok(Some(v)) => return rv.set(v),
+            Ok(None) => {}
             Err(e) => return throw_error(scope, &e),
         }
     }

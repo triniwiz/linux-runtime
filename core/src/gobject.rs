@@ -90,6 +90,8 @@ extern "C" {
     fn g_type_parent(type_: GType) -> GType;
     fn g_type_name(type_: GType) -> *const c_char;
     fn g_type_test_flags(type_: GType, flags: u32) -> i32;
+    fn g_type_is_a(type_: GType, is_a_type: GType) -> i32;
+    fn g_initially_unowned_get_type() -> GType;
     fn g_type_fundamental(type_: GType) -> GType;
     fn g_type_from_name(name: *const c_char) -> GType;
     fn g_type_class_ref(type_: GType) -> gpointer;
@@ -358,6 +360,34 @@ pub fn register(parent: GType, name: &CStr, def: ClassDef) -> Result<GType, Stri
 
 pub fn type_from_name(name: &CStr) -> GType {
     unsafe { g_type_from_name(name.as_ptr()) }
+}
+
+pub fn type_name(gtype: GType) -> &'static CStr {
+    let name = unsafe { g_type_name(gtype) };
+    if name.is_null() {
+        c""
+    } else {
+        unsafe { CStr::from_ptr(name) }
+    }
+}
+
+pub fn type_parent(gtype: GType) -> GType {
+    unsafe { g_type_parent(gtype) }
+}
+
+pub fn is_a(gtype: GType, of: GType) -> bool {
+    unsafe { g_type_is_a(gtype, of) != 0 }
+}
+
+/// Whether a new instance's creation reference is the caller's: an InitiallyUnowned that
+/// is no longer floating was sunk by someone else (a GtkWindow, for GTK's list of windows).
+pub fn new_is_owned(gtype: GType, object: usize) -> bool {
+    unsafe { g_object_is_floating(object as gpointer) != 0 || !is_a(gtype, g_initially_unowned_get_type()) }
+}
+
+/// G_TYPE_FLAG_ABSTRACT
+pub fn is_abstract(gtype: GType) -> bool {
+    unsafe { g_type_test_flags(gtype, 1 << 4) != 0 }
 }
 
 unsafe fn write_slots(memory: gpointer, slots: &[Slot]) {

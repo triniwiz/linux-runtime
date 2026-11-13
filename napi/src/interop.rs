@@ -70,7 +70,8 @@ fn address_from_value(st: &State, v: napi_value) -> Result<usize, String> {
         UNDEFINED | NULL => Ok(0),
         NUMBER => Ok(js.f64_of(v).unwrap_or(0.0) as usize),
         BIGINT => Ok(js.bigint_u64_of(v).unwrap_or(0) as usize),
-        _ => handle_of(js, v, Kind::Pointer)
+        _ => handle(js, v)
+            .filter(|h| matches!(h.kind, Kind::Pointer | Kind::Struct))
             .map(|h| h.address)
             .ok_or_else(|| "expected a number, bigint or Pointer".into()),
     }
@@ -97,7 +98,8 @@ unsafe fn this_pointer<'a>(
     info: napi_callback_info,
 ) -> Option<(&'a mut Handle, [napi_value; 3])> {
     let (argv, _, this, _) = args(env, info);
-    match handle_of(Js(env), this, Kind::Pointer) {
+    // GObjects of JS classes are struct views that inherit interop.Pointer's methods
+    match handle(Js(env), this).filter(|h| matches!(h.kind, Kind::Pointer | Kind::Struct)) {
         Some(h) => Some((h, argv)),
         None => {
             Js(env).throw("not an interop.Pointer");
@@ -351,6 +353,18 @@ unsafe fn subclass_target(
     (js.type_of(target) == FUNCTION && !js.strict_equals(target, ctor)).then_some(target)
 }
 
+fn is_construct_call(st: &State, info: napi_callback_info, index: u32, this: napi_value) -> bool {
+    let js = st.js();
+    let mut target = null_mut();
+    unsafe { napi_get_new_target(js.0, info, &mut target) };
+    if !target.is_null() && js.type_of(target) == FUNCTION {
+        return true;
+    }
+    // QuickJS's shim passes new.target as `this`
+    let ctor = st.struct_ctors.borrow().get(&index).map(|r| js.deref(*r));
+    ctor.is_some_and(|c| !c.is_null() && js.strict_equals(this, c))
+}
+
 unsafe extern "C" fn struct_ctor(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
@@ -364,6 +378,12 @@ unsafe extern "C" fn struct_ctor(env: napi_env, info: napi_callback_info) -> nap
             Ok(Some(v)) => return v,
             Ok(None) => {}
             Err(e) if e.is_empty() => return null_mut(),
+            Err(e) => return fail(js, &e),
+        }
+    } else if is_construct_call(st, info, data as u32, this) {
+        match crate::gobject::construct_native(st, &ty, argv[0]) {
+            Ok(Some(v)) => return v,
+            Ok(None) => {}
             Err(e) => return fail(js, &e),
         }
     }

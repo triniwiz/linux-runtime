@@ -66,6 +66,24 @@ pub struct GObjects {
     key: OnceCell<napi_ref>,
     /// Object.create
     create: OnceCell<napi_ref>,
+    /// Object.setPrototypeOf
+    set_prototype: OnceCell<napi_ref>,
+    /// toggle-reference data of native classes' instances
+    native: OnceCell<&'static ClassDef>,
+    wrappers: RefCell<HashMap<GType, Wrapper, nativescript_core::native::FxBuildHasher>>,
+    protos: RefCell<HashMap<GType, napi_ref, nativescript_core::native::FxBuildHasher>>,
+    /// struct name -> the GObject type or interface it names, 0 for other structs
+    pointees: RefCell<HashMap<String, GType, nativescript_core::native::FxBuildHasher>>,
+    /// struct name -> its GType, found through `*_get_type` when not registered yet
+    named: RefCell<HashMap<String, GType, nativescript_core::native::FxBuildHasher>>,
+}
+
+#[derive(Clone, Copy)]
+enum Wrapper {
+    NotObject,
+    JsClass,
+    /// instances are interop.Pointers with the class's prototype
+    Native(napi_ref),
 }
 
 pub struct Host {
@@ -193,6 +211,202 @@ fn host(st: &State) -> &'static Host {
     })
 }
 
+fn native_def(st: &State) -> &'static ClassDef {
+    st.gobjects.native.get_or_init(|| Box::leak(Box::new(ClassDef::new(host(st), u32::MAX, false))))
+}
+
+fn object_fn(st: &State, cell: &OnceCell<napi_ref>, name: &str) -> napi_value {
+    let js = st.js();
+    let r = *cell.get_or_init(|| {
+        let object = js.get(js.global(), "Object").unwrap_or(null_mut());
+        js.reference(js.get(object, name).unwrap_or(null_mut()), 1)
+    });
+    js.deref(r)
+}
+
+fn set_prototype(st: &State, object: napi_value, proto: napi_value) {
+    let js = st.js();
+    let f = object_fn(st, &st.gobjects.set_prototype, "setPrototypeOf");
+    let _ = js.call(f, js.undefined(), &[object, proto]);
+}
+
+/// The struct a `Struct *` type points to.
+#[inline]
+pub fn pointee(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Pointer(inner) => match &**inner {
+            Type::Struct(name) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The GObject type or interface a struct name stands for (`GtkWidget`), else 0. Only
+/// asked with an instance at hand, so the type is registered.
+pub fn pointee_gtype(st: &State, name: &str) -> GType {
+    if let Some(&gtype) = st.gobjects.pointees.borrow().get(name) {
+        return gtype;
+    }
+    let bare = name.strip_prefix('_').unwrap_or(name);
+    let gtype = CString::new(bare).map_or(0, |c| gobj::type_from_name(&c));
+    let gtype = match gobj::fundamental(gtype) {
+        gobj::G_TYPE_OBJECT | gobj::G_TYPE_INTERFACE => gtype,
+        _ => 0,
+    };
+    st.gobjects.pointees.borrow_mut().insert(name.to_owned(), gtype);
+    gtype
+}
+
+/// A `Struct *` value: the JS object of the GObject when the struct is a GObject type.
+pub fn read_pointer(st: &State, ty: &Type, address: usize) -> Option<napi_value> {
+    let name = pointee(ty)?;
+    if pointee_gtype(st, name) == 0 {
+        return None;
+    }
+    wrap(st, address, false)
+}
+
+/// The JS object of the GObject at `address`: the instance of its JS class, or an
+/// interop.Pointer with its native class's prototype, one per GObject while JS holds it.
+/// `owned`: the caller's reference passes to the JS object. `None` when it isn't a GObject.
+pub fn wrap(st: &State, address: usize, owned: bool) -> Option<napi_value> {
+    let release = |owned: bool| {
+        if owned {
+            unsafe { gobj::g_object_unref(address as _) };
+        }
+    };
+    if let Some(o) = live(st, address) {
+        release(owned);
+        return Some(o);
+    }
+    let proto = match wrapper(st, gobj::instance_type(address)) {
+        Wrapper::NotObject => return None,
+        Wrapper::JsClass => {
+            let o = instance(st, address, false);
+            release(owned);
+            return o;
+        }
+        Wrapper::Native(proto) => proto,
+    };
+    // an interop.Pointer instance keeps its handle where engines find it fastest (V8's
+    // napi_define_class instances: an internal field rather than a private property)
+    let object = interop::new_pointer(st, address, None);
+    let h = crate::state::handle_of(st.js(), object, Kind::Pointer)?;
+    let token = Rc::new(Token { address });
+    h.token = Some(token.clone());
+    set_prototype(st, object, st.js().deref(proto));
+    // without ownership annotations, take a reference of our own: a floating one (a new
+    // widget) becomes it, a borrowed object stays referenced by whoever else holds it
+    let floating = unsafe { gobj::g_object_is_floating(address as _) } != 0;
+    if floating {
+        unsafe { gobj::g_object_ref_sink(address as _) };
+    }
+    track(st, address, object, token, native_def(st));
+    release(owned || floating);
+    Some(object)
+}
+
+fn wrapper(st: &State, gtype: GType) -> Wrapper {
+    if let Some(&w) = st.gobjects.wrappers.borrow().get(&gtype) {
+        return w;
+    }
+    let ours = host(st) as *const Host as *const u8;
+    let mut js_class = false;
+    let mut t = gtype;
+    while t != 0 && !js_class {
+        js_class = gobj::class_def(t).is_some_and(|d| std::ptr::eq(d.host as *const dyn gobj::Host as *const u8, ours));
+        t = gobj::type_parent(t);
+    }
+    let w = if !gobj::is_a(gtype, gobj::G_TYPE_OBJECT) {
+        Wrapper::NotObject
+    } else if js_class {
+        Wrapper::JsClass
+    } else {
+        match class_proto(st, gtype) {
+            Some(_) => Wrapper::Native(st.gobjects.protos.borrow()[&gtype]),
+            None => Wrapper::NotObject,
+        }
+    };
+    st.gobjects.wrappers.borrow_mut().insert(gtype, w);
+    w
+}
+
+/// The prototype of a native class's instances: its struct constructor's (`GtkLabel.prototype`)
+/// when the metadata has one, inheriting the parent class's, and interop.Pointer's at the root.
+fn class_proto(st: &State, gtype: GType) -> Option<napi_value> {
+    let js = st.js();
+    if let Some(&p) = st.gobjects.protos.borrow().get(&gtype) {
+        return Some(js.deref(p));
+    }
+    let parent = match gobj::type_parent(gtype) {
+        0 => js.get(js.deref(st.pointer_ctor.get()), "prototype").ok()?,
+        p => class_proto(st, p)?,
+    };
+    let proto = constructor_proto(st, gtype).unwrap_or_else(|| js.object());
+    let mut current = null_mut();
+    unsafe { napi_get_prototype(js.0, proto, &mut current) };
+    let mut object_proto = null_mut();
+    unsafe { napi_get_prototype(js.0, js.object(), &mut object_proto) };
+    if js.strict_equals(current, object_proto) {
+        set_prototype(st, proto, parent);
+    }
+    st.gobjects.protos.borrow_mut().insert(gtype, js.reference(proto, 1));
+    Some(proto)
+}
+
+fn constructor_proto(st: &State, gtype: GType) -> Option<napi_value> {
+    let js = st.js();
+    let name = gobj::type_name(gtype).to_str().ok()?;
+    for name in [name.to_owned(), format!("_{name}")] {
+        let Some(ctor) = js.get(js.global(), &name).ok().filter(|v| js.type_of(*v) == FUNCTION) else {
+            continue;
+        };
+        if !matches!(interop::type_from_value(st, ctor), Some(Type::Struct(_))) {
+            continue;
+        }
+        return js.get(ctor, "prototype").ok();
+    }
+    None
+}
+
+/// The GType of the struct `name`, registering it through its `*_get_type` function; 0
+/// for structs that aren't GTypes.
+fn gtype_named(st: &State, name: &str) -> GType {
+    if let Some(&gtype) = st.gobjects.named.borrow().get(name) {
+        return gtype;
+    }
+    let js = st.js();
+    let bare = name.strip_prefix('_').unwrap_or(name);
+    let mut gtype = CString::new(bare).map_or(0, |c| gobj::type_from_name(&c));
+    if gtype == 0 {
+        if let Ok(Some(v)) = interop::gobject_hook(js, "gtype", &[js.string(bare)]) {
+            gtype = gtype_of(js, v);
+        }
+    }
+    st.gobjects.named.borrow_mut().insert(name.to_owned(), gtype);
+    gtype
+}
+
+/// `new GtkLabel(props)`: a new instance of a native GObject class (`Ok(None)` for other
+/// structs).
+pub fn construct_native(st: &State, ty: &Type, props: napi_value) -> Result<Option<napi_value>, String> {
+    let Type::Struct(name) = ty else { return Ok(None) };
+    let gtype = gtype_named(st, name);
+    if gtype == 0 || !gobj::is_a(gtype, gobj::G_TYPE_OBJECT) {
+        return Ok(None);
+    }
+    if gobj::is_abstract(gtype) {
+        return Err(format!("{name} is abstract: extend it, or create one with a C constructor"));
+    }
+    let address = create(st, gtype, props)?;
+    if address == 0 {
+        return Err(format!("failed to create a {name}"));
+    }
+    let owned = gobj::new_is_owned(gtype, address);
+    wrap(st, address, owned).map(Some).ok_or_else(|| format!("failed to create a {name}"))
+}
+
 fn get(js: Js, object: napi_value, key: napi_value) -> Option<napi_value> {
     let mut v = null_mut();
     (unsafe { napi_get_property(js.0, object, key, &mut v) } == 0).then_some(v)
@@ -274,11 +488,8 @@ fn bare(st: &State, class: u32, address: usize, token: Option<Rc<Token>>) -> Opt
         let c = &classes[class as usize];
         (js.deref(c.proto), c.base)
     };
-    let create = *st.gobjects.create.get_or_init(|| {
-        let object = js.get(js.global(), "Object").unwrap_or(null_mut());
-        js.reference(js.get(object, "create").unwrap_or(null_mut()), 1)
-    });
-    let object = js.call(js.deref(create), js.undefined(), &[proto]).ok()?;
+    let create = object_fn(st, &st.gobjects.create, "create");
+    let object = js.call(create, js.undefined(), &[proto]).ok()?;
     let h = attach(js, object, Handle::new(Kind::Struct, address, Some(base), null_mut()));
     unsafe { (*h).token = token };
     Some(object)
@@ -396,12 +607,14 @@ pub fn construct(st: &State, target: napi_value, props: napi_value) -> Result<Op
             object
         }
     };
-    unsafe {
-        if gobj::g_object_is_floating(address as _) != 0 {
-            gobj::g_object_ref_sink(address as _);
+    if gobj::new_is_owned(gtype, address) {
+        unsafe {
+            if gobj::g_object_is_floating(address as _) != 0 {
+                gobj::g_object_ref_sink(address as _);
+            }
+            // the toggle reference keeps it alive from here
+            gobj::g_object_unref(address as _);
         }
-        // the toggle reference keeps it alive from here
-        gobj::g_object_unref(address as _);
     }
     Ok(Some(object))
 }
@@ -515,7 +728,7 @@ pub fn to_js(st: &State, v: Val) -> napi_value {
         Val::F64(n) => js.number(n),
         Val::Str(None) | Val::Object(0) | Val::Pointer(0) => js.null(),
         Val::Str(Some(s)) => js.string(&s.to_string_lossy()),
-        Val::Object(a) => instance(st, a, false).unwrap_or_else(|| interop::new_pointer(st, a, None)),
+        Val::Object(a) => wrap(st, a, false).unwrap_or_else(|| interop::new_pointer(st, a, None)),
         Val::Pointer(a) => interop::new_pointer(st, a, None),
     }
 }
@@ -561,6 +774,9 @@ fn register_class(st: &State, cls: napi_value, desc: napi_value) -> Result<GType
     let base = interop::type_from_value(st, field("base")).ok_or("the base isn't a struct constructor")?;
     let base = st.register_type(&base);
     let root = js.bool_of(field("root"));
+    if root {
+        class_proto(st, parent).ok_or("the parent class has no prototype")?;
+    }
     let proto = js.get(cls, "prototype").map_err(|_| "the class has no prototype")?;
     let class = st.gobjects.classes.borrow().len() as u32;
     let mut def = ClassDef::new(host(st), class, root);
@@ -697,5 +913,41 @@ unsafe extern "C" fn is_slot(env: napi_env, info: napi_callback_info) -> napi_va
     js.boolean(slot)
 }
 
-pub const NATIVES: [(&str, unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value); 3] =
-    [("gobjectRegister", register), ("gobjectEmit", emit), ("gobjectSlot", is_slot)];
+/// `natives.gobjectFields(structConstructor)`: the prototype of the struct's views, with
+/// its field accessors.
+unsafe extern "C" fn fields(env: napi_env, info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let (argv, _, _, _) = cb_args::<1>(env, info);
+    let js = st.js();
+    let view = interop::type_from_value(st, argv[0]).and_then(|ty| crate::structs::view(st, &ty, 0, None).ok());
+    match view {
+        Some(v) => {
+            let mut proto = null_mut();
+            unsafe { napi_get_prototype(js.0, v, &mut proto) };
+            proto
+        }
+        None => {
+            js.throw("expected a struct constructor");
+            null_mut()
+        }
+    }
+}
+
+/// `natives.gobjectPointerType()`: an interop type for `GObject *` values, read as their
+/// JS objects.
+unsafe extern "C" fn pointer_type(env: napi_env, _info: napi_callback_info) -> napi_value {
+    let st = state(env);
+    let js = st.js();
+    let descriptor = js.object();
+    unsafe { napi_set_named_property(js.0, descriptor, c"name".as_ptr(), js.string("GObject*")) };
+    interop::tag_type(st, descriptor, &Type::Pointer(Box::new(Type::Struct("GObject".into()))));
+    descriptor
+}
+
+pub const NATIVES: [(&str, unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value); 5] = [
+    ("gobjectRegister", register),
+    ("gobjectEmit", emit),
+    ("gobjectSlot", is_slot),
+    ("gobjectFields", fields),
+    ("gobjectPointerType", pointer_type),
+];
