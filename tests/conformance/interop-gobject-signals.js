@@ -52,3 +52,42 @@ if (typeof gc === 'function' && typeof FinalizationRegistry === 'function') {
     });
   }, 10);
 }
+
+// a handler capturing its own instance doesn't keep it alive, and lives as long as it
+if (typeof gc === 'function') {
+  let finalized = 0;
+  const notify = interop.callback(() => finalized++, { returns: interop.types.void, args: [interop.types.pointer, interop.types.pointer] });
+  const created = (name) => {
+    const a = g_simple_action_new(name, null);
+    g_object_unref(a);
+    return a;
+  };
+  (() => {
+    const a = created('self');
+    g_object_weak_ref(a, notify, null);
+    g_signal_connect(a, 'activate', () => a);
+  })();
+  const kept = created('kept');
+  let keptCalls = 0;
+  g_signal_connect(kept, 'activate', () => keptCalls++);
+  const store = g_list_store_new(g_simple_action_get_type());
+  let heldCalls = 0;
+  (() => {
+    const a = created('held');
+    g_signal_connect(a, 'activate', () => (heldCalls++, a));
+    g_list_store_append(store, a);
+  })();
+  const settle = (rounds, then) => {
+    gc();
+    setTimeout(() => (rounds > 1 ? settle(rounds - 1, then) : then()), 10);
+  };
+  settle(4, () => {
+    eq(finalized, 1, 'a handler capturing its instance is collected with it');
+    g_action_activate(kept, null);
+    eq(keptCalls, 1, 'a handler lives while JS holds its instance');
+    const held = g_list_model_get_object(store, 0);
+    g_action_activate(held, null);
+    eq(heldCalls, 1, 'a handler lives while C holds its instance');
+    g_object_unref(held);
+  });
+}

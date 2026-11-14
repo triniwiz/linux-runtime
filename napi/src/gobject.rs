@@ -413,16 +413,47 @@ fn get(js: Js, object: napi_value, key: napi_value) -> Option<napi_value> {
     (unsafe { napi_get_property(js.0, object, key, &mut v) } == 0).then_some(v)
 }
 
-fn class_key(st: &State) -> napi_value {
+fn key(st: &State, index: u32) -> napi_value {
     let js = st.js();
     let r = *st.gobjects.key.get_or_init(|| {
-        let mut symbol = null_mut();
-        unsafe { napi_create_symbol(js.0, js.string("gobject-class"), &mut symbol) };
-        js.reference(js.array(&[symbol]), 1)
+        let symbols = ["gobject-class", "gobject-handlers"].map(|name| {
+            let mut symbol = null_mut();
+            unsafe { napi_create_symbol(js.0, js.string(name), &mut symbol) };
+            symbol
+        });
+        js.reference(js.array(&symbols), 1)
     });
     let mut symbol = null_mut();
-    unsafe { napi_get_element(js.0, js.deref(r), 0, &mut symbol) };
+    unsafe { napi_get_element(js.0, js.deref(r), index, &mut symbol) };
     symbol
+}
+
+fn class_key(st: &State) -> napi_value {
+    key(st, 0)
+}
+
+/// Object of a GObject's JS object: closure data address to its signal handler.
+fn handlers(st: &State, object: napi_value, create: bool) -> Option<napi_value> {
+    let js = st.js();
+    let key = key(st, 1);
+    if let Some(v) = get(js, object, key).filter(|&v| js.type_of(v) == OBJECT) {
+        return Some(v);
+    }
+    create.then(|| {
+        let v = js.object();
+        let desc = napi_property_descriptor {
+            utf8name: std::ptr::null(),
+            name: key,
+            method: None,
+            getter: None,
+            setter: None,
+            value: v,
+            attributes: 0,
+            data: null_mut(),
+        };
+        unsafe { napi_define_properties(js.0, object, 1, &desc) };
+        v
+    })
 }
 
 fn tag(st: &State, cls: napi_value) -> Option<u32> {
@@ -917,26 +948,39 @@ unsafe extern "C" fn is_slot(env: napi_env, info: napi_callback_info) -> napi_va
 struct HandlerNotify {
     host: &'static Host,
     closure: usize,
+    /// the GObject whose JS object holds the handler, else 0
+    instance: usize,
 }
 
 /// GClosure finalize notifier of a signal handler: disconnected, or its instance finalized.
 unsafe extern "C" fn handler_finalized(data: *mut c_void, _closure: *mut c_void) {
     let notify = unsafe { Box::from_raw(data as *mut HandlerNotify) };
-    let closure = notify.closure;
-    notify.host.on_thread(move |st| ffi::release_handler(st, closure));
+    let HandlerNotify { host, closure, instance } = *notify;
+    host.run(move |js, st| {
+        if let Some(handlers) = live(st, instance).and_then(|o| handlers(st, o, false)) {
+            let mut deleted = false;
+            unsafe { napi_delete_property(js.0, handlers, js.string(&closure.to_string()), &mut deleted) };
+        }
+        ffi::release_handler(st, closure);
+    });
 }
 
-/// `natives.gobjectHandler(function, { returns, args })`: [callback, notify, notify data]
-/// for a GClosure of its own, freed with it.
+/// `natives.gobjectHandler(function, { returns, args }, instance)`: [callback, notify,
+/// notify data] for a GClosure of its own, freed with it.
 unsafe extern "C" fn handler(env: napi_env, info: napi_callback_info) -> napi_value {
     let st = state(env);
     let js = st.js();
-    let (argv, _, _, _) = cb_args::<2>(env, info);
+    let (argv, _, _, _) = cb_args::<3>(env, info);
     if js.type_of(argv[0]) != FUNCTION {
         js.throw("expected a function");
         return null_mut();
     }
-    let made = interop::signature_from_spec(st, argv[1]).and_then(|signature| ffi::handler_closure(st, argv[0], &signature));
+    // the instance's JS object holds the handler, as GLib's closure would hold a C one:
+    // a handler capturing its own instance is then collected along with it
+    let instance = crate::state::handle_of(js, argv[2], Kind::Pointer).map_or(0, |h| h.address);
+    let owner = if instance == 0 { None } else { wrap(st, instance, false) };
+    let made = interop::signature_from_spec(st, argv[1])
+        .and_then(|signature| ffi::handler_closure(st, argv[0], &signature, owner.is_some()));
     let (code, closure) = match made {
         Ok(m) => m,
         Err(e) => {
@@ -944,7 +988,11 @@ unsafe extern "C" fn handler(env: napi_env, info: napi_callback_info) -> napi_va
             return null_mut();
         }
     };
-    let notify = Box::into_raw(Box::new(HandlerNotify { host: host(st), closure }));
+    if let Some(handlers) = owner.and_then(|o| handlers(st, o, true)) {
+        js.set(handlers, &closure.to_string(), argv[0]);
+    }
+    let instance = if owner.is_some() { instance } else { 0 };
+    let notify = Box::into_raw(Box::new(HandlerNotify { host: host(st), closure, instance }));
     let items = [code, handler_finalized as *const () as usize, notify as usize].map(|a| interop::new_pointer(st, a, None));
     js.array(&items)
 }

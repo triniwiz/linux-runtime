@@ -433,6 +433,8 @@ pub fn function_from_pointer(
 
 /// State of a closure that calls into JS.
 pub struct ClosureData {
+    /// weak for a signal handler its instance's JS object holds, so the handler doesn't
+    /// keep its instance alive
     function: napi_ref,
     main_context: usize,
     signature: Vec<Type>,
@@ -483,7 +485,7 @@ fn closure_data_for(
     {
         return Ok(&**existing as *const ClosureData);
     }
-    new_closure_data(st, function, signature, None, false)
+    new_closure_data(st, function, signature, None, false, false)
 }
 
 fn new_closure_data(
@@ -492,6 +494,7 @@ fn new_closure_data(
     signature: &[Type],
     method: Option<bool>,
     handler: bool,
+    weak: bool,
 ) -> Result<*const ClosureData, String> {
     let js = st.js();
     // signatures that fit in registers skip libffi's per-call argument classification
@@ -509,7 +512,7 @@ fn new_closure_data(
         }
     }
     let mut data = Box::new(ClosureData {
-        function: js.reference(function, 1),
+        function: js.reference(function, !weak as u32),
         main_context: st.main_context.context,
         signature: signature.to_vec(),
         ret_size: st.layout(&signature[0])?.size,
@@ -538,14 +541,14 @@ fn new_closure_data(
 /// C function pointer for a vfunc slot: calls `method` on the JS object of its first
 /// argument, the instance. Lives as long as the runtime, like the class.
 pub fn method_closure(st: &State, method: napi_value, signature: &[Type], dispose: bool) -> Result<usize, String> {
-    new_closure_data(st, method, signature, Some(dispose), false).map(|d| unsafe { (*d).code() })
+    new_closure_data(st, method, signature, Some(dispose), false, false).map(|d| unsafe { (*d).code() })
 }
 
 /// A closure of its own for one signal connection: (C function pointer, closure data
 /// for [`release_handler`]). Connecting a function twice mustn't share one, as either
-/// disconnect frees it.
-pub fn handler_closure(st: &State, function: napi_value, signature: &[Type]) -> Result<(usize, usize), String> {
-    let data = new_closure_data(st, function, signature, None, true)?;
+/// disconnect frees it. `weak`: the caller keeps `function` alive.
+pub fn handler_closure(st: &State, function: napi_value, signature: &[Type], weak: bool) -> Result<(usize, usize), String> {
+    let data = new_closure_data(st, function, signature, None, true, weak)?;
     Ok((unsafe { (*data).code() }, data as usize))
 }
 
@@ -661,6 +664,11 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     );
     let mut scope = null_mut();
     napi_open_handle_scope(js.0, &mut scope);
+    let function = js.deref(data.function);
+    if function.is_null() {
+        napi_close_handle_scope(js.0, scope);
+        return;
+    }
     let mut recv = js.undefined();
     let mut first = 0;
     let mut disposing = None;
@@ -701,7 +709,7 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
             }
         }
     }
-    let result = js.call(js.deref(data.function), recv, argv);
+    let result = js.call(function, recv, argv);
     if let Some(a) = disposing {
         crate::gobject::leave_dispose(st, a);
     }

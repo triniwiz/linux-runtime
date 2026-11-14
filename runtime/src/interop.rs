@@ -18,7 +18,7 @@ pub mod keys {
     /// Private symbols, created once per isolate.
     #[derive(Default)]
     pub struct Keys {
-        fixed: [OnceCell<v8::Global<v8::Private>>; 7],
+        fixed: [OnceCell<v8::Global<v8::Private>>; 8],
         closures: RefCell<HashMap<Vec<Type>, v8::Global<v8::Private>>>,
         fields: RefCell<HashMap<String, v8::Global<v8::Private>>>,
     }
@@ -105,6 +105,10 @@ pub mod keys {
     /// Index of a JS GObject class in `State::gobjects`
     pub fn gobject_class<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
         fixed(scope, 6, "ns#gclass")
+    }
+    /// Map of a GObject's JS object: closure data address to its signal handler
+    pub fn handlers<'s>(scope: &v8::PinScope<'s, '_, ()>) -> v8::Local<'s, v8::Private> {
+        fixed(scope, 7, "ns#handlers")
     }
     /// BigInt address of the closure state created for a JS function and signature
     pub fn closure<'s>(
