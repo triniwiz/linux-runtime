@@ -191,7 +191,7 @@
     const native = g.__nsGObject?.handler;
     if (!native) return g_signal_connect_data(instance, signal, interop.callback(handler, sig), data, null, after);
     // a closure per connection, freed when GLib finalizes it: disconnected, or its instance finalized
-    const [callback, notify, notifyData] = native(handler, sig);
+    const [callback, notify, notifyData] = native(handler, sig, interop.handleof(instance) ?? instance);
     const closure = g_cclosure_new(callback, data, null);
     g_closure_add_finalize_notifier(closure, notifyData, notify);
     return g_signal_connect_closure(instance, signal, closure, after);

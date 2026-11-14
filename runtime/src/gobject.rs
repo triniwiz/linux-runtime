@@ -53,8 +53,19 @@ extern "C" {
         parameter: *const std::ffi::c_void,
         callback: unsafe extern "C" fn(*const std::ffi::c_void),
     ) -> *const v8::Data;
-    fn v8__Global__Reset(data: *const v8::Data);
-    fn v8__WeakCallbackInfo__GetParameter(info: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    pub(crate) fn v8__Global__Reset(data: *const v8::Data);
+    pub(crate) fn v8__WeakCallbackInfo__GetParameter(info: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+/// A weak handle slot to `value`; `callback` must reset it.
+pub(crate) fn new_weak(
+    isolate: &mut v8::Isolate,
+    value: v8::Local<v8::Data>,
+    parameter: *const std::ffi::c_void,
+    callback: unsafe extern "C" fn(*const std::ffi::c_void),
+) -> *const v8::Data {
+    let raw = unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, *mut std::ffi::c_void>(isolate.as_raw_isolate_ptr()) };
+    unsafe { v8__Global__NewWeak(raw, &*value, parameter, callback) }
 }
 
 /// A weak handle to a JS object. V8 holds a reference to the cell (the callback's
@@ -79,10 +90,8 @@ unsafe extern "C" fn weak_callback(info: *const std::ffi::c_void) {
 impl WeakCell {
     fn new(isolate: &mut v8::Isolate, object: v8::Local<v8::Object>, address: usize) -> Rc<Self> {
         let cell = Rc::new(WeakCell { slot: Cell::new(std::ptr::null()), address });
-        let raw = unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, *mut std::ffi::c_void>(isolate.as_raw_isolate_ptr()) };
         let parameter = Rc::into_raw(cell.clone()) as *const std::ffi::c_void;
-        let data = &*object as *const v8::Object as *const v8::Data;
-        cell.slot.set(unsafe { v8__Global__NewWeak(raw, data, parameter, weak_callback) });
+        cell.slot.set(new_weak(isolate, object.into(), parameter, weak_callback));
         cell
     }
 
@@ -587,6 +596,7 @@ pub fn shutdown(st: &State) {
         host.alive.store(false, std::sync::atomic::Ordering::Release);
     }
     st.gobjects.instances.borrow_mut().clear();
+    crate::ffi::reset_weak_handlers(st);
     COLLECTED.with(|c| c.borrow_mut().clear());
 }
 
@@ -978,29 +988,58 @@ fn is_slot<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>)
 struct HandlerNotify {
     host: &'static Host,
     closure: usize,
+    /// the GObject whose JS object holds the handler, else 0
+    instance: usize,
 }
 
 /// GClosure finalize notifier of a signal handler: disconnected, or its instance finalized.
 unsafe extern "C" fn handler_finalized(data: *mut std::ffi::c_void, _closure: *mut std::ffi::c_void) {
     let notify = unsafe { Box::from_raw(data as *mut HandlerNotify) };
-    let closure = notify.closure;
-    notify.host.on_thread(move |st| crate::ffi::release_handler(st, closure));
+    let HandlerNotify { host, closure, instance } = *notify;
+    host.run(move |scope, st| {
+        if let Some(handlers) = live(scope, st, instance).and_then(|o| handlers(scope, o, false)) {
+            let key = v8::Number::new(scope, closure as f64);
+            handlers.delete(scope, key.into());
+        }
+        crate::ffi::release_handler(st, closure);
+    });
 }
 
-/// `natives.gobjectHandler(function, { returns, args })`: [callback, notify, notify data]
-/// for a GClosure of its own, freed with it.
+fn handlers<'s>(scope: &mut v8::PinScope<'s, '_>, object: v8::Local<'s, v8::Object>, create: bool) -> Option<v8::Local<'s, v8::Map>> {
+    let key = keys::handlers(scope);
+    if let Some(map) = object.get_private(scope, key).and_then(|v| v8::Local::<v8::Map>::try_from(v).ok()) {
+        return Some(map);
+    }
+    create.then(|| {
+        let map = v8::Map::new(scope);
+        object.set_private(scope, key, map.into());
+        map
+    })
+}
+
+/// `natives.gobjectHandler(function, { returns, args }, instance)`: [callback, notify,
+/// notify data] for a GClosure of its own, freed with it.
 fn handler<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'s>) {
     let st = state(scope);
     let Ok(function) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
         return throw_error(scope, "expected a function");
     };
+    // the instance's JS object holds the handler, as GLib's closure would hold a C one:
+    // a handler capturing its own instance is then collected along with it
+    let instance = interop::pointer_address(scope, args.get(2)).unwrap_or(0);
+    let owner = if instance == 0 { None } else { wrap(scope, &st, instance, false) };
     let made = interop::signature_from_spec(scope, &st, args.get(1))
-        .and_then(|signature| crate::ffi::handler_closure(scope, &st, function, &signature));
+        .and_then(|signature| crate::ffi::handler_closure(scope, &st, function, &signature, owner.is_some()));
     let (code, closure) = match made {
         Ok(m) => m,
         Err(e) => return throw_error(scope, &e),
     };
-    let notify = Box::into_raw(Box::new(HandlerNotify { host: host(&st), closure }));
+    if let Some(map) = owner.and_then(|o| handlers(scope, o, true)) {
+        let key = v8::Number::new(scope, closure as f64);
+        map.set(scope, key.into(), function.into());
+    }
+    let instance = if owner.is_some() { instance } else { 0 };
+    let notify = Box::into_raw(Box::new(HandlerNotify { host: host(&st), closure, instance }));
     let items = [code, handler_finalized as *const () as usize, notify as usize]
         .map(|a| -> v8::Local<v8::Value> { interop::new_pointer(scope, &st, a, None).into() });
     rv.set(v8::Array::new_with_elements(scope, &items).into());

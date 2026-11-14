@@ -816,9 +816,11 @@ pub fn function_from_pointer<'s>(
 
 /// State of a libffi closure that calls into JS.
 pub struct ClosureData {
-    function: v8::Global<v8::Function>,
-    /// handle slot of `function`
-    function_slot: *const v8::Function,
+    /// `None` for a signal handler its instance's JS object holds: `function_slot` is a
+    /// weak handle then, so the handler doesn't keep its instance alive
+    function: Option<v8::Global<v8::Function>>,
+    /// handle slot of the function, null once a weak one is collected
+    function_slot: Cell<*const v8::Function>,
     /// GMainContext of the JS thread, read from foreign threads
     main_context: usize,
     signature: Vec<Type>,
@@ -859,7 +861,34 @@ impl ClosureData {
     /// Whether `v` is this closure's function.
     #[inline]
     fn is(&self, v: v8::Local<v8::Value>) -> bool {
-        tagged::word(v) == unsafe { *(self.function_slot as *const usize) }
+        let slot = self.function_slot.get();
+        !slot.is_null() && tagged::word(v) == unsafe { *(slot as *const usize) }
+    }
+
+    fn reset_weak(&self) {
+        let slot = self.function_slot.replace(std::ptr::null());
+        if self.function.is_none() && !slot.is_null() {
+            unsafe { crate::gobject::v8__Global__Reset(slot as *const v8::Data) };
+        }
+    }
+}
+
+impl Drop for ClosureData {
+    fn drop(&mut self) {
+        self.reset_weak();
+    }
+}
+
+/// Runs during GC: the weak function of a handler was collected with its instance's JS object.
+unsafe extern "C" fn function_collected(info: *const c_void) {
+    let slot = unsafe { &*(crate::gobject::v8__WeakCallbackInfo__GetParameter(info) as *const Cell<*const v8::Function>) };
+    unsafe { crate::gobject::v8__Global__Reset(slot.replace(std::ptr::null()) as *const v8::Data) };
+}
+
+/// Drops the weak handles of handlers while the isolate is still there.
+pub fn reset_weak_handlers(st: &State) {
+    for c in st.closures.borrow().iter() {
+        c.reset_weak();
     }
 }
 
@@ -876,7 +905,7 @@ fn closure_data_for<'s>(
             return Ok(b.u64_value().0 as usize as *const ClosureData);
         }
     }
-    let ptr = new_closure_data(scope, st, function, signature, None, false)?;
+    let ptr = new_closure_data(scope, st, function, signature, None, false, false)?;
     let value = v8::BigInt::new_from_u64(scope, ptr as usize as u64);
     function.set_private(scope, key, value.into());
     Ok(ptr)
@@ -889,10 +918,8 @@ fn new_closure_data<'s>(
     signature: &[Type],
     method: Option<bool>,
     handler: bool,
+    weak: bool,
 ) -> Result<*const ClosureData, String> {
-    let global = v8::Global::new(scope, function);
-    // SAFETY: the Global belongs to this isolate and lives in the ClosureData
-    let function_slot = unsafe { v8::Handle::get_unchecked(&global) as *const v8::Function };
     let ret = match ValueKind::of_arg(&signature[0]) {
         // strings returned to C would dangle: only the full conversion takes them
         ValueKind::CString => ValueKind::Pointer,
@@ -913,8 +940,8 @@ fn new_closure_data<'s>(
         }
     }
     let mut data = Box::new(ClosureData {
-        function: global,
-        function_slot,
+        function: None,
+        function_slot: Cell::new(std::ptr::null()),
         main_context: st.main_context.context,
         signature: signature.to_vec(),
         args: signature[1..].iter().map(ValueKind::of_ret).collect(),
@@ -926,6 +953,17 @@ fn new_closure_data<'s>(
         method,
         handler,
     });
+    if weak {
+        let isolate: &mut v8::Isolate = scope;
+        let parameter = &data.function_slot as *const Cell<*const v8::Function> as *const c_void;
+        let slot = crate::gobject::new_weak(isolate, function.into(), parameter, function_collected);
+        data.function_slot.set(slot as *const v8::Function);
+    } else {
+        let global = v8::Global::new(scope, function);
+        // SAFETY: the Global belongs to this isolate and lives in the ClosureData
+        data.function_slot.set(unsafe { v8::Handle::get_unchecked(&global) as *const v8::Function });
+        data.function = Some(global);
+    }
     let userdata = &mut *data as *mut ClosureData as *mut c_void;
     #[cfg(target_arch = "x86_64")]
     if registers.is_some() {
@@ -950,19 +988,20 @@ pub fn method_closure<'s>(
     signature: &[Type],
     dispose: bool,
 ) -> Result<usize, String> {
-    new_closure_data(scope, st, method, signature, Some(dispose), false).map(|d| unsafe { (*d).code() })
+    new_closure_data(scope, st, method, signature, Some(dispose), false, false).map(|d| unsafe { (*d).code() })
 }
 
 /// A closure of its own for one signal connection: (C function pointer, closure data
 /// for [`release_handler`]). Connecting a function twice mustn't share one, as either
-/// disconnect frees it.
+/// disconnect frees it. `weak`: the caller keeps `function` alive.
 pub fn handler_closure<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     st: &State,
     function: v8::Local<'s, v8::Function>,
     signature: &[Type],
+    weak: bool,
 ) -> Result<(usize, usize), String> {
-    let data = new_closure_data(scope, st, function, signature, None, true)?;
+    let data = new_closure_data(scope, st, function, signature, None, true, weak)?;
     Ok((unsafe { (*data).code() }, data as usize))
 }
 
@@ -999,9 +1038,12 @@ pub fn release_closures<'s>(
         let mut closures = st.closures.borrow_mut();
         let mut i = 0;
         while i < closures.len() {
-            let f = v8::Local::new(scope, &closures[i].function);
+            let c = &closures[i];
             // vfuncs live as long as their class, handlers as long as their connection
-            if closures[i].method.is_none() && !closures[i].handler && f.strict_equals(function.into()) {
+            let matches = c.method.is_none()
+                && !c.handler
+                && c.function.as_ref().is_some_and(|g| v8::Local::new(scope, g).strict_equals(function.into()));
+            if matches {
                 released.push(closures.swap_remove(i));
             } else {
                 i += 1;
@@ -1090,6 +1132,17 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     // creates objects before Function::Call would enter one
     let scope = &mut v8::ContextScope::new(scope, context);
     v8::tc_scope!(let tc, scope);
+    let Some(function) = (unsafe { data.function_slot.get().as_ref() }) else {
+        return;
+    };
+    let rooted;
+    let function = if data.function.is_none() {
+        // a GC while the arguments are read could collect a weak one
+        rooted = v8::Local::new(tc, unsafe { std::mem::transmute::<&v8::Function, v8::Local<v8::Function>>(function) });
+        &*rooted
+    } else {
+        function
+    };
 
     let undefined: v8::Local<v8::Value> = v8::undefined(tc).into();
     let mut recv = undefined;
@@ -1142,7 +1195,6 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
             },
         };
     }
-    let function = unsafe { &*data.function_slot };
     let called = function.call(tc, recv, argv);
     if let Some(a) = disposing {
         crate::gobject::leave_dispose(st, a);
