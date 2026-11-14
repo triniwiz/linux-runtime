@@ -1085,9 +1085,10 @@ unsafe fn invoke_js(data: &ClosureData, ret: *mut c_void, args: *mut *mut c_void
     };
     let isolate = unsafe { &mut *st.isolate.get() };
     v8::scope!(let _handles, isolate);
-    // C usually calls back from inside a JS call, with the context entered;
-    // Function::Call enters it when it isn't
     v8::callback_scope!(unsafe scope, context);
+    // called from the main loop, no context is entered, and marshalling the arguments
+    // creates objects before Function::Call would enter one
+    let scope = &mut v8::ContextScope::new(scope, context);
     v8::tc_scope!(let tc, scope);
 
     let undefined: v8::Local<v8::Value> = v8::undefined(tc).into();

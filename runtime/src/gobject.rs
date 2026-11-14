@@ -188,6 +188,8 @@ fn with_scope(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
     let isolate = unsafe { &mut *st.isolate.get() };
     v8::scope!(let _handles, isolate);
     v8::callback_scope!(unsafe scope, context);
+    // from the main loop no context is entered
+    let scope = &mut v8::ContextScope::new(scope, context);
     v8::tc_scope!(let tc, scope);
     f(tc);
     if let Some(exception) = tc.exception() {
