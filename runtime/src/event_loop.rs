@@ -50,6 +50,15 @@ pub(crate) fn current() -> Option<Rc<State>> {
 /// Runs `f` with a fresh scope in the runtime's context, then reports
 /// exceptions, runs microtasks and reports unhandled rejections.
 pub fn with_js(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
+    enter_js(st, f, true);
+}
+
+/// `with_js` without the microtask checkpoint, for teardown.
+pub fn with_js_final(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
+    enter_js(st, f, false);
+}
+
+fn enter_js(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>), run_microtasks: bool) {
     let isolate = st.isolate.get();
     let Some(context) = st.context.borrow().clone() else {
         return;
@@ -70,7 +79,9 @@ pub fn with_js(st: &State, f: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
         st.uncaught.set(st.uncaught.get() + 1);
         tc.reset();
     }
-    checkpoint(tc, st);
+    if run_microtasks {
+        checkpoint(tc, st);
+    }
 }
 
 /// Runs pending microtasks and reports unhandled rejections.

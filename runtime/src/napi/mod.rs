@@ -95,6 +95,8 @@ pub struct Env {
     pub(crate) finalizers: Rc<RefCell<Vec<PendingFinalize>>>,
     pub(crate) filename: CString,
     pub(crate) callbacks: Vec<Box<CallbackData>>,
+    /// Torn down: the addon's functions are no longer called.
+    pub(crate) closed: bool,
 }
 
 impl Env {
@@ -171,6 +173,9 @@ pub(crate) fn trampoline<'s>(
         return;
     };
     let data = unsafe { &*(ext.value() as *const CallbackData) };
+    if unsafe { (*data.env).closed } {
+        return;
+    }
     let info = CallbackInfo {
         args: &args as *const _ as *const c_void,
         data: data.data,
@@ -313,6 +318,7 @@ pub fn load_addon<'s>(
         filename: CString::new(nativescript_core::resolve::path_to_file_url(path))
             .unwrap_or_default(),
         callbacks: Vec::new(),
+        closed: false,
     });
     let env_ptr: napi_env = &mut *env;
     st.napi_envs.borrow_mut().push(env);
@@ -332,18 +338,25 @@ pub fn load_addon<'s>(
     Ok(exports)
 }
 
-/// Runs cleanup hooks and instance data finalizers (runtime teardown).
-pub fn teardown(st: &State) {
-    let envs: Vec<Box<Env>> = std::mem::take(&mut *st.napi_envs.borrow_mut());
-    for mut env in envs {
-        let ptr: napi_env = &mut *env;
+/// Runs cleanup hooks and instance data finalizers (runtime teardown). The envs are returned
+/// closed: the runtime keeps them until its isolate is disposed, since JS functions point at
+/// their callback data until then.
+pub fn teardown(st: &State) -> Vec<Box<Env>> {
+    let mut envs: Vec<Box<Env>> = std::mem::take(&mut *st.napi_envs.borrow_mut());
+    for env in envs.iter_mut() {
+        env.closed = true;
+    }
+    for env in envs.iter_mut() {
+        let ptr: napi_env = &mut **env;
         for (hook, arg) in std::mem::take(&mut env.cleanup_hooks).into_iter().rev() {
             unsafe { hook(arg) };
         }
         if let Some((data, Some(cb), hint)) = env.instance_data.take() {
             unsafe { cb(ptr, data, hint) };
         }
+        env.exception.take();
     }
+    envs
 }
 
 /// Keeps every exported napi symbol in the binary (see build.rs, -rdynamic).
