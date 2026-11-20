@@ -112,7 +112,9 @@ step('property binding', (done) => {
   g_object_freeze_notify(source);
   g_object_set_property(source, 'proxy-resolver', value);
   eq(target.resolver, undefined, 'not bound while notifications are frozen');
-  g_idle_add_once(g_object_thaw_notify, source);
+  // thawed by C from the loop, without g_idle_add_once (GLib 2.74): the source returns
+  // FALSE (not floating) and its destroy notify thaws
+  g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, g_object_is_floating, source, g_object_thaw_notify);
   setTimeout(() => {
     eq([target.resolver instanceof GSimpleProxyResolver, interop.handleof(target.resolver).equals(resolver)], [true, true], 'bound from the loop');
     done();
