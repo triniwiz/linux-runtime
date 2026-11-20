@@ -64,3 +64,31 @@ fn addon() {
         })
     );
 }
+
+#[test]
+fn terminated_worker_drops_queued_addon_calls() {
+    let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../metadata-generator/tests/TestOutput/metadata-{}.bin",
+        std::env::consts::ARCH
+    ));
+    let Some(addon) = build_addon().filter(|_| meta.exists()) else {
+        eprintln!("skipping: metadata or C compiler missing");
+        return;
+    };
+    let mut rt = Runtime::new(MetaFile::open(meta).unwrap()).unwrap();
+    // The worker's teardown used to run that call against its freed env.
+    rt.run_script(
+        &format!(
+            r#"
+          const w = new Worker('{}');
+          w.onmessage = () => w.terminate();
+          w.postMessage('{}');
+        "#,
+            fixtures().join("terminate-worker.js").display(),
+            addon.display()
+        ),
+        "terminate.js",
+    )
+    .unwrap();
+    rt.run_event_loop().unwrap();
+}

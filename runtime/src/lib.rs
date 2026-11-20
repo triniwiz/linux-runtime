@@ -52,6 +52,8 @@ pub struct Runtime {
     isolate: Box<v8::OwnedIsolate>,
     // after `isolate`: tasks posted while it is disposed still find a live context
     _tasks: tasks::Registration,
+    // after `isolate`: JS functions still point at the envs' callback data until it is disposed
+    napi_envs: Vec<Box<napi::Env>>,
 }
 
 impl Runtime {
@@ -134,6 +136,7 @@ impl Runtime {
             state,
             isolate,
             _tasks: tasks,
+            napi_envs: Vec::new(),
         })
     }
 
@@ -288,7 +291,10 @@ impl Drop for Runtime {
         workers::shutdown(&self.state);
         self.state.inspector.borrow_mut().take();
         if !self.state.napi_envs.borrow().is_empty() {
-            event_loop::with_js(&self.state, |_| napi::teardown(&self.state));
+            // No microtask checkpoint: queued JS would call addons that just cleaned up.
+            event_loop::with_js_final(&self.state, |_| {
+                self.napi_envs = napi::teardown(&self.state);
+            });
         }
         gobject::shutdown(&self.state);
         event_loop::set_current(None);
