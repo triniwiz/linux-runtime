@@ -30,7 +30,7 @@ pub struct State {
     pub modules: RefCell<crate::modules::ModuleMap>,
     pub next_request: Cell<u32>,
     pub requests: RefCell<HashMap<u32, v8::Global<v8::PromiseResolver>>>,
-    pub websockets: RefCell<HashMap<u32, std::sync::mpsc::Sender<crate::net::WsCommand>>>,
+    pub websockets: RefCell<HashMap<u32, crate::net::WsHandle>>,
     pub ws_dispatch: RefCell<Option<v8::Global<v8::Function>>>,
     pub workers: RefCell<HashMap<u32, std::sync::Arc<crate::workers::Link>>>,
     pub worker_dispatch: RefCell<Option<v8::Global<v8::Function>>>,

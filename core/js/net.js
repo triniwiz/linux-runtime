@@ -237,6 +237,8 @@
           this.dispatchEvent(new Event('open'));
           break;
         case 'message':
+          // after close(), like browsers
+          if (this.#state !== 1) break;
           this.dispatchEvent(new MessageEvent('message', {
             data: typeof a === 'string' || this.binaryType === 'arraybuffer' ? a : new Blob([a]),
             origin: new URL(this.#url).origin,
