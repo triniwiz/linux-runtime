@@ -5,11 +5,14 @@ use crate::state::{state, State};
 use crate::throw_error;
 use nativescript_core::glib::{g_main_context_iteration, g_main_context_wakeup, gpointer};
 use std::cell::Cell;
-use std::io::Read;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpStream;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Args<'s> = v8::FunctionCallbackArguments<'s>;
 type Rv<'s> = v8::ReturnValue<'s, v8::Value>;
@@ -218,6 +221,12 @@ pub enum WsCommand {
     Close(u16, String),
 }
 
+/// The JS side of a socket: commands for its thread, and a wakeup for that thread's poll().
+pub struct WsHandle {
+    commands: Sender<WsCommand>,
+    wake: UnixStream,
+}
+
 enum WsEvent {
     Open(String),
     Text(String),
@@ -267,22 +276,99 @@ fn dispatch_ws(context: usize, id: u32, event: WsEvent) {
     );
 }
 
+type WsSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
+
+/// (code, reason, wasClean) of the close event.
+type WsClose = (u16, String, bool);
+
+/// How long close() waits for the server's reply (Firefox's network.websocket.timeout.close).
+const WS_CLOSE_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn abnormal() -> WsClose {
+    (1006, String::new(), false)
+}
+
+fn would_block(e: &tungstenite::Error) -> bool {
+    matches!(e, tungstenite::Error::Io(e) if e.kind() == ErrorKind::WouldBlock)
+}
+
+/// Waits up to `ms` (-1: forever) for `fd` to be ready for `events`.
+fn poll_fds(fds: &mut [libc::pollfd], ms: i32) {
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+    if n < 0 {
+        for f in fds.iter_mut() {
+            f.revents = 0;
+        }
+    }
+}
+
+/// Gives queued frames (a close reply) up to `limit` to go out.
+fn flush_for(socket: &mut WsSocket, fd: RawFd, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        match socket.flush() {
+            Err(e) if would_block(&e) => {}
+            _ => return,
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        let mut fds = [libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        }];
+        poll_fds(&mut fds, left.as_millis().clamp(1, i32::MAX as u128) as i32);
+    }
+}
+
 fn ws_thread(
     context: usize,
     id: u32,
     url: String,
     protocols: Vec<String>,
-    commands: std::sync::mpsc::Receiver<WsCommand>,
+    commands: Receiver<WsCommand>,
+    wake: UnixStream,
 ) {
+    /// JS is owed exactly one close event, even if this thread panics.
+    struct Owed {
+        context: usize,
+        id: u32,
+    }
+    impl Drop for Owed {
+        fn drop(&mut self) {
+            dispatch_ws(
+                self.context,
+                self.id,
+                WsEvent::Error("WebSocket thread failed".into()),
+            );
+            let (code, reason, clean) = abnormal();
+            dispatch_ws(self.context, self.id, WsEvent::Close(code, reason, clean));
+        }
+    }
+    let owed = Owed { context, id };
+    let (code, reason, clean) = ws_run(context, id, &url, &protocols, &commands, &wake);
+    std::mem::forget(owed);
+    dispatch_ws(context, id, WsEvent::Close(code, reason, clean));
+}
+
+/// Runs a connection until it closes; dispatches everything but the close event.
+fn ws_run(
+    context: usize,
+    id: u32,
+    url: &str,
+    protocols: &[String],
+    commands: &Receiver<WsCommand>,
+    wake: &UnixStream,
+) -> WsClose {
     use tungstenite::client::IntoClientRequest;
     use tungstenite::stream::MaybeTlsStream;
-    use tungstenite::Message;
+    use tungstenite::{Error, Message};
 
+    let error = |e: String| dispatch_ws(context, id, WsEvent::Error(e));
     let connect = || -> Result<_, String> {
-        let mut request = url
-            .as_str()
-            .into_client_request()
-            .map_err(|e| e.to_string())?;
+        let mut request = url.into_client_request().map_err(|e| e.to_string())?;
         if !protocols.is_empty() {
             let value = protocols
                 .join(", ")
@@ -297,22 +383,28 @@ fn ws_thread(
     let (mut socket, response) = match connect() {
         Ok(s) => s,
         Err(e) => {
-            dispatch_ws(context, id, WsEvent::Error(e));
-            dispatch_ws(context, id, WsEvent::Close(1006, String::new(), false));
-            return;
+            error(e);
+            return abnormal();
         }
     };
-    // short read timeout so outgoing commands are picked up
-    let timeout = Some(Duration::from_millis(20));
-    match socket.get_mut() {
-        MaybeTlsStream::Plain(s) => {
-            let _ = s.set_read_timeout(timeout);
+    let tcp = match socket.get_ref() {
+        MaybeTlsStream::Plain(s) => s,
+        MaybeTlsStream::Rustls(s) => s.get_ref(),
+        _ => {
+            error("unsupported WebSocket stream".into());
+            return abnormal();
         }
-        MaybeTlsStream::Rustls(s) => {
-            let _ = s.get_mut().set_read_timeout(timeout);
-        }
-        _ => {}
+    };
+    // Never block: a write the network can't take yet (a stalled uplink) must not stop
+    // reads, or pings go unanswered and the server's FIN/RST is never seen. Writes that
+    // would block stay queued in tungstenite and go out when poll() says writable.
+    if let Err(e) = tcp.set_nonblocking(true) {
+        error(e.to_string());
+        return abnormal();
     }
+    // small frames (game input, pongs) go out now, as browsers do
+    let _ = tcp.set_nodelay(true);
+    let fd = tcp.as_raw_fd();
     let protocol = response
         .headers()
         .get("Sec-WebSocket-Protocol")
@@ -321,57 +413,110 @@ fn ws_thread(
         .to_owned();
     dispatch_ws(context, id, WsEvent::Open(protocol));
 
+    let mut detached = false;
+    let mut closing: Option<Instant> = None;
     loop {
+        // drain wakeups first: a command sent after this is followed by a new wakeup
+        let mut sink = [0u8; 64];
+        while !detached && matches!((&*wake).read(&mut sink), Ok(n) if n > 0) {}
+
+        // JS -> socket (queued by tungstenite, flushed below)
         loop {
-            let sent = match commands.try_recv() {
-                Ok(WsCommand::Text(t)) => socket.send(Message::text(t)),
-                Ok(WsCommand::Binary(b)) => socket.send(Message::binary(b)),
+            let queued = match commands.try_recv() {
+                Ok(WsCommand::Text(t)) => socket.write(Message::text(t)),
+                Ok(WsCommand::Binary(b)) => socket.write(Message::binary(b)),
                 Ok(WsCommand::Close(code, reason)) => {
+                    closing.get_or_insert_with(|| Instant::now() + WS_CLOSE_TIMEOUT);
                     socket.close(Some(tungstenite::protocol::CloseFrame {
                         code: code.into(),
                         reason: reason.into(),
                     }))
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => socket.close(None),
+                // the runtime is gone: close politely, stop listening for commands
+                Err(TryRecvError::Disconnected) => {
+                    if detached {
+                        break;
+                    }
+                    detached = true;
+                    closing.get_or_insert_with(|| Instant::now() + WS_CLOSE_TIMEOUT);
+                    socket.close(None)
+                }
             };
-            if let Err(e) = sent {
-                if !matches!(
-                    e,
-                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed
-                ) {
-                    dispatch_ws(context, id, WsEvent::Error(e.to_string()));
+            match queued {
+                Ok(()) => {}
+                Err(e) if would_block(&e) => {}
+                Err(Error::ConnectionClosed | Error::AlreadyClosed) => {}
+                Err(Error::Io(e)) => {
+                    error(e.to_string());
+                    return abnormal();
+                }
+                Err(e) => error(e.to_string()),
+            }
+        }
+
+        // socket -> JS: read until it would block (whole frames may sit in tungstenite's or
+        // rustls' buffers, where poll() can't see them)
+        loop {
+            match socket.read() {
+                Ok(Message::Text(t)) => dispatch_ws(context, id, WsEvent::Text(t.to_string())),
+                Ok(Message::Binary(b)) => dispatch_ws(context, id, WsEvent::Binary(b.to_vec())),
+                Ok(Message::Close(frame)) => {
+                    let (code, reason) = frame
+                        .map(|f| (u16::from(f.code), f.reason.to_string()))
+                        .unwrap_or((1005, String::new()));
+                    // tungstenite queued the close reply
+                    flush_for(&mut socket, fd, Duration::from_secs(1));
+                    return (code, reason, true);
+                }
+                // pings: tungstenite queues the pong, flushed below
+                Ok(_) => {}
+                Err(e) if would_block(&e) => break,
+                Err(Error::Io(e)) if e.kind() == ErrorKind::Interrupted => {}
+                Err(Error::ConnectionClosed | Error::AlreadyClosed) => {
+                    return (1000, String::new(), true);
+                }
+                Err(e) => {
+                    error(e.to_string());
+                    return abnormal();
                 }
             }
         }
-        match socket.read() {
-            Ok(Message::Text(t)) => dispatch_ws(context, id, WsEvent::Text(t.to_string())),
-            Ok(Message::Binary(b)) => dispatch_ws(context, id, WsEvent::Binary(b.to_vec())),
-            Ok(Message::Close(frame)) => {
-                let (code, reason) = frame
-                    .map(|f| (u16::from(f.code), f.reason.to_string()))
-                    .unwrap_or((1005, String::new()));
-                // tungstenite replies to the close frame on the next read/flush
-                let _ = socket.flush();
-                dispatch_ws(context, id, WsEvent::Close(code, reason, true));
-                return;
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-                dispatch_ws(context, id, WsEvent::Close(1000, String::new(), true));
-                return;
+
+        // frames from JS, pongs, close frames
+        let want_write = match socket.flush() {
+            Ok(()) => false,
+            Err(e) if would_block(&e) => true,
+            Err(Error::ConnectionClosed | Error::AlreadyClosed) => false,
+            Err(Error::Io(e)) => {
+                error(e.to_string());
+                return abnormal();
             }
             Err(e) => {
-                dispatch_ws(context, id, WsEvent::Error(e.to_string()));
-                dispatch_ws(context, id, WsEvent::Close(1006, String::new(), false));
-                return;
+                error(e.to_string());
+                false
             }
+        };
+
+        // a peer that never answers our close frame
+        if closing.is_some_and(|deadline| Instant::now() >= deadline) {
+            return abnormal();
         }
+
+        let mut fds = [
+            libc::pollfd {
+                fd,
+                events: libc::POLLIN | if want_write { libc::POLLOUT } else { 0 },
+                revents: 0,
+            },
+            libc::pollfd {
+                // negative: ignored once the JS side is gone (its end would poll as hung up)
+                fd: if detached { -1 } else { wake.as_raw_fd() },
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        poll_fds(&mut fds, 1000);
     }
 }
 
@@ -389,22 +534,38 @@ fn ws_connect<'s>(scope: &mut v8::PinScope<'s, '_>, args: Args<'s>, mut rv: Rv<'
             );
         }
     }
+    let (wake, wake_rx) = match UnixStream::pair().and_then(|(a, b)| {
+        a.set_nonblocking(true)?;
+        b.set_nonblocking(true)?;
+        Ok((a, b))
+    }) {
+        Ok(pair) => pair,
+        Err(e) => return throw_error(scope, &format!("WebSocket: {e}")),
+    };
     let id = st.next_request.get() + 1;
     st.next_request.set(id);
     let (tx, rx) = channel();
-    st.websockets.borrow_mut().insert(id, tx);
+    st.websockets
+        .borrow_mut()
+        .insert(id, WsHandle { commands: tx, wake });
     begin_pending(&st);
     let context = st.main_context.context;
-    std::thread::spawn(move || ws_thread(context, id, url, protocols, rx));
+    std::thread::spawn(move || ws_thread(context, id, url, protocols, rx, wake_rx));
     rv.set(v8::Integer::new_from_unsigned(scope, id).into());
 }
 
+/// False for an unknown socket. A socket whose thread has finished takes commands
+/// silently: its close event is already on the way.
 fn ws_command(st: &State, id: u32, command: WsCommand) -> bool {
-    st.websockets
-        .borrow()
-        .get(&id)
-        .map(|tx: &Sender<WsCommand>| tx.send(command).is_ok())
-        .unwrap_or(false)
+    let sockets = st.websockets.borrow();
+    let Some(handle) = sockets.get(&id) else {
+        return false;
+    };
+    if handle.commands.send(command).is_ok() {
+        // full: a wakeup is already pending
+        let _ = (&handle.wake).write(&[1]);
+    }
+    true
 }
 
 /// wsSend(id, string | buffer)

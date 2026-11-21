@@ -185,6 +185,53 @@ fn websocket() {
     ));
 }
 
+/// A server that stops reading (a stalled uplink: the client's writes can't go out),
+/// keeps sending, then half-closes without a close frame. Keeps the socket open so
+/// no RST unblocks the client's writes.
+fn ws_stalled_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let stream = listener.incoming().flatten().next().unwrap();
+        let mut ws = tungstenite::accept(stream).unwrap();
+        let _ = ws.read();
+        for i in 0..20 {
+            ws.send(tungstenite::Message::text(format!("tick {i}")))
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        ws.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    });
+    format!("ws://{addr}")
+}
+
+#[test]
+fn websocket_reads_while_writes_stall() {
+    let url = ws_stalled_server();
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        eprintln!("websocket_reads_while_writes_stall: no close event after 30 s");
+        std::process::exit(1);
+    });
+    run(&format!(
+        r#"
+      const ws = new WebSocket('{url}');
+      let got = 0;
+      ws.onopen = () => {{
+        ws.send('hi');
+        // more than the kernel buffers take while the server isn't reading
+        const big = new Uint8Array(1 << 20);
+        for (let i = 0; i < 48; i++) ws.send(big);
+      }};
+      ws.onmessage = () => got++;
+      ws.onclose = (e) => {{
+        eq([got, e.code, e.wasClean], [20, 1006, false], 'messages and close during a stalled upload');
+      }};
+    "#
+    ));
+}
+
 #[test]
 fn url_imports() {
     let base = http_server();
